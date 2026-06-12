@@ -14,16 +14,17 @@ import (
 
 // ── ANSI ──────────────────────────────────────────────────────────────────────
 const (
-	Reset  = "\033[0m"
-	Bold   = "\033[1m"
-	Dim    = "\033[2m"
-	Gray   = "\033[90m"
-	Red    = "\033[91m"
-	Green  = "\033[92m"
-	Yellow = "\033[93m"
-	Blue   = "\033[94m"
-	Purple = "\033[95m"
-	Cyan   = "\033[96m"
+	Reset   = "\033[0m"
+	Bold    = "\033[1m"
+	Dim     = "\033[2m"
+	Gray    = "\033[90m"
+	Red     = "\033[91m"
+	Green   = "\033[92m"
+	Yellow  = "\033[93m"
+	Blue    = "\033[94m"
+	Purple  = "\033[95m"
+	Cyan    = "\033[96m"
+	BoldRed = "\033[1;91m" // critical threshold
 )
 
 // sep divides all segments uniformly.
@@ -217,11 +218,15 @@ func modelLabel(id, displayName string) string {
 	return m
 }
 
+// pctColor returns a 4-tier color scaled to auto-compact territory.
+// Auto-compact fires at ~90% by default, so tiers are anchored there.
 func pctColor(pct float64) string {
 	switch {
 	case pct >= 90:
+		return BoldRed // compact imminent
+	case pct >= 75:
 		return Red
-	case pct >= 70:
+	case pct >= 50:
 		return Yellow
 	default:
 		return Green
@@ -243,6 +248,9 @@ func fmtDuration(ms int64) string {
 	s := ms / 1000
 	m := s / 60
 	h := m / 60
+	if h >= 10 {
+		return fmt.Sprintf("%dh", h) // drop minutes at double-digit hours
+	}
 	if h > 0 {
 		return fmt.Sprintf("%dh%dm", h, m%60)
 	}
@@ -433,20 +441,26 @@ func main() {
 	}
 
 	// ── LINE 2 ────────────────────────────────────────────────────────────────
-	// Section: context window  (ctx ██░░ 24% · 48k/200k)
+	// Section: context window
+	// used_percentage = (input + cache tokens) / context_window_size — excludes output tokens.
+	// Auto-compact fires at ~90% (CLAUDE_AUTOCOMPACT_PCT_OVERRIDE to change).
+	// Note: Claude Code has a known bug where 1M-context models may report
+	// context_window_size=200000, making used_percentage appear inflated.
 	var secCtx string
 	if p.ContextWindow.UsedPercentage != nil {
 		pct := *p.ContextWindow.UsedPercentage
 		usedK := p.ContextWindow.TotalInputTokens / 1000
 		totalK := p.ContextWindow.ContextWindowSize / 1000
-		warning := ""
-		if p.ExceedsTokens {
-			warning = "  " + Red + "⚠ >200k" + Reset
+		suffix := ""
+		if pct >= 90 {
+			suffix = "  " + BoldRed + "⚡ compact" + Reset
+		} else if pct >= 85 {
+			suffix = "  " + Red + "⚡ soon" + Reset
 		}
 		secCtx = sec(
 			fmt.Sprintf("ctx %s %s%.0f%%%s", bar(pct, 10), pctColor(pct), pct, Reset),
 			fmt.Sprintf("%s%dk/%dk%s", Gray, usedK, totalK, Reset),
-		) + warning
+		) + suffix
 	}
 
 	// Section: rate limits  (5h ███░ 38% ↺ 3:45pm (2h30m) · 7d ████░ 61% ↺ Thu 9am (1d14h))

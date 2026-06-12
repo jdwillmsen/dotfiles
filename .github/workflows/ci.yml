@@ -29,6 +29,7 @@ jobs:
           bash -n features/claude-rtk.sh
           bash -n features/claude-skills-personal.sh
           bash -n features/claude-plugins-personal.sh
+          bash -n features/codex.sh
           bash -n features/codex-skills-personal.sh
           bash -n features/tmux.sh
           bash -n shell/exports.sh
@@ -112,6 +113,7 @@ jobs:
           bash features/claude.sh               "$PWD" && echo "claude: OK"
           bash features/claude-skills-personal.sh  "$PWD" && echo "claude-skills-personal: OK"
           bash features/claude-plugins-personal.sh "$PWD" && echo "claude-plugins-personal: OK"
+          bash features/codex.sh "$PWD" && echo "codex: OK"
           bash features/codex-skills-personal.sh "$PWD" && echo "codex-skills-personal: OK"
           bash features/tmux.sh                 "$PWD" && echo "tmux: skips without tmux binary"
 

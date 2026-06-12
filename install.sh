@@ -40,25 +40,22 @@ if command -v go &>/dev/null; then
     CLAUDE_SETTINGS="$HOME/.claude/settings.json"
     [ ! -f "$CLAUDE_SETTINGS" ] && echo '{}' > "$CLAUDE_SETTINGS"
     if ! grep -q '"statusLine"' "$CLAUDE_SETTINGS"; then
-        # Inject statusLine using Go's built-in json approach via a temp file
         TMP="$(mktemp)"
-        go run - "$CLAUDE_SETTINGS" "$TMP" <<'GOEOF'
-package main
-import (
-    "encoding/json"
-    "os"
-)
-func main() {
-    src, dst := os.Args[1], os.Args[2]
-    data := map[string]any{}
-    if b, _ := os.ReadFile(src); len(b) > 2 {
-        json.Unmarshal(b, &data)
-    }
-    data["statusLine"] = map[string]any{"type": "command", "command": "claude-status"}
-    out, _ := json.MarshalIndent(data, "", "  ")
-    os.WriteFile(dst, append(out, '\n'), 0644)
-}
-GOEOF
+        python3 - "$CLAUDE_SETTINGS" "$TMP" <<'PYEOF'
+import json, sys
+data = {}
+try:
+    with open(sys.argv[1]) as f:
+        content = f.read()
+    if content.strip():
+        data = json.loads(content)
+except Exception:
+    pass
+data["statusLine"] = {"type": "command", "command": "claude-status"}
+with open(sys.argv[2], "w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PYEOF
         mv "$TMP" "$CLAUDE_SETTINGS"
         success "Added statusLine to ~/.claude/settings.json"
     fi

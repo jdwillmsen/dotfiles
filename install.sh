@@ -26,6 +26,12 @@ run_feature shell
 run_feature git
 run_feature claude-status
 run_feature claude
+run_feature claude-mcp
+run_feature claude-plugins
+run_feature claude-rtk
+run_feature claude-skills-personal
+run_feature claude-plugins-personal
+run_feature tmux
 
 info "Done. Restart your shell or run:"
 info "  source ~/.zshrc   (zsh)"

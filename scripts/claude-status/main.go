@@ -271,17 +271,19 @@ func fmtCost(usd float64) string {
 	return fmt.Sprintf("%s$%.2f%s", color, usd, Reset)
 }
 
-// fmtResetsAt shows WHEN a rate limit resets (clock time) + HOW LONG until then.
-//   5-hour window:  "↺ 3:45pm (2h30m)"
-//   7-day window:   "↺ Thu 9am (1d14h)"
-func fmtResetsAt(unixSec int64) string {
+// fmtResetsAt shows WHEN a rate limit resets + HOW LONG until then.
+// The countdown color combines usage and time-to-reset:
+//   high usage + reset soon  → green  (relief coming)
+//   high usage + reset far   → red    (constrained for a while)
+//   low usage                → gray   (not relevant)
+func fmtResetsAt(unixSec int64, usedPct float64) string {
 	if unixSec == 0 {
 		return ""
 	}
 	t := time.Unix(unixSec, 0).Local()
 	d := time.Until(t)
 	if d <= 0 {
-		return Gray + "↺ now" + Reset
+		return Green + "↺ now" + Reset
 	}
 
 	// Clock string: include day name when reset is >20h away (7-day window)
@@ -292,7 +294,7 @@ func fmtResetsAt(unixSec int64) string {
 		clock = t.Format("3:04pm")
 	}
 
-	// Countdown
+	// Countdown string
 	h := int(d.Hours())
 	m := int(d.Minutes()) % 60
 	var countdown string
@@ -310,7 +312,22 @@ func fmtResetsAt(unixSec int64) string {
 		countdown = fmt.Sprintf("%dm", m)
 	}
 
-	return Gray + "↺ " + Reset + clock + " " + Gray + "(" + countdown + ")" + Reset
+	// Countdown color: only meaningful when usage is high enough to care
+	countdownColor := Gray
+	if usedPct >= 75 {
+		switch {
+		case d <= 30*time.Minute:
+			countdownColor = Green // relief imminent
+		case d <= time.Hour:
+			countdownColor = Yellow // relief soon
+		default:
+			countdownColor = Red // constrained for a while
+		}
+	} else if usedPct >= 50 && d <= 30*time.Minute {
+		countdownColor = Green // approaching limit but almost reset
+	}
+
+	return Gray + "↺ " + Reset + clock + " " + countdownColor + "(" + countdown + ")" + Reset
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -468,14 +485,14 @@ func main() {
 				fmt.Sprintf("5h %s %s%.0f%%%s  %s",
 					bar(fh.UsedPercentage, 8),
 					pctColor(fh.UsedPercentage), fh.UsedPercentage, Reset,
-					fmtResetsAt(fh.ResetsAt)))
+					fmtResetsAt(fh.ResetsAt, fh.UsedPercentage)))
 		}
 		if sd := p.RateLimits.SevenDay; sd != nil {
 			rateParts = append(rateParts,
 				fmt.Sprintf("7d %s %s%.0f%%%s  %s",
 					bar(sd.UsedPercentage, 8),
 					pctColor(sd.UsedPercentage), sd.UsedPercentage, Reset,
-					fmtResetsAt(sd.ResetsAt)))
+					fmtResetsAt(sd.ResetsAt, sd.UsedPercentage)))
 		}
 	}
 	secRate := strings.Join(rateParts, sep)

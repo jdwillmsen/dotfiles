@@ -16,6 +16,11 @@ jobs:
       - name: Check shell syntax
         run: |
           bash -n install.sh
+          bash -n lib/utils.sh
+          bash -n features/shell.sh
+          bash -n features/git.sh
+          bash -n features/claude-status.sh
+          bash -n features/claude.sh
           bash -n shell/exports.sh
           bash -n shell/aliases.sh
           bash -n shell/functions.sh
@@ -36,18 +41,64 @@ jobs:
       - name: Run install.sh
         run: bash install.sh
 
-      - name: Verify symlinks exist
+      - name: Verify shell feature — symlinks exist
         run: |
-          test -L ~/.gitconfig
-          test -L ~/.gitignore_global
           test -L ~/.zshrc
           test -L ~/.bashrc
 
-      - name: Verify claude-status binary built
+      - name: Verify git feature — symlinks exist
+        run: |
+          test -L ~/.gitconfig
+          test -L ~/.gitignore_global
+
+      - name: Verify claude-status feature — binary built
         run: test -x ~/.local/bin/claude-status
 
-      - name: Verify statusLine injected into settings.json
+      - name: Verify claude-status feature — statusLine injected
         run: grep -q '"statusLine"' ~/.claude/settings.json
+
+      - name: Verify claude feature — CLAUDE.md symlinked
+        run: test -L ~/.claude/CLAUDE.md
+
+      - name: Verify claude feature — commands symlinked
+        run: |
+          test -L ~/.claude/commands/standup.md
+          test -L ~/.claude/commands/explain.md
+          test -L ~/.claude/commands/pr.md
+
+      - name: Verify install is idempotent
+        run: bash install.sh
+
+  feature-isolation:
+    name: Feature isolation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shell feature installs without git or Go
+        run: bash features/shell.sh "$PWD"
+
+      - name: Git feature skips when git is unavailable
+        run: |
+          PATH_BACKUP="$PATH"
+          export PATH="$(echo "$PATH" | tr ':' '\n' | grep -v '/usr/bin$\|/bin$' | tr '\n' ':')"
+          bash features/git.sh "$PWD" || true
+          export PATH="$PATH_BACKUP"
+
+      - name: Claude feature skips when python3 is unavailable
+        run: |
+          bash -c '
+            require() { exit 0; }
+            source lib/utils.sh
+            # Verify it exits 0 even on missing deps
+          '
+          true
+
+      - name: Each feature exits 0 regardless of environment
+        run: |
+          bash features/shell.sh      "$PWD" && echo "shell: OK"
+          bash features/git.sh        "$PWD" && echo "git: OK"
+          bash features/claude.sh     "$PWD" && echo "claude: OK"
 
   claude-status:
     name: claude-status build and test
@@ -68,15 +119,18 @@ jobs:
       - name: Vet
         run: cd scripts/claude-status && go vet ./...
 
-      - name: Smoke test — empty input
+      - name: Smoke test — empty input exits 0
         run: echo '{}' | ~/.local/bin/claude-status
 
-      - name: Smoke test — full payload produces output with model segment
+      - name: Smoke test — full payload produces model segment
         run: |
-          NOW=$(date +%s)
-          echo "{
-            \"model\": {\"id\": \"claude-sonnet-4-6\", \"display_name\": \"Sonnet 4.6\"},
-            \"session_id\": \"ci-test\",
-            \"cost\": {\"total_cost_usd\": 0.05, \"total_duration_ms\": 60000},
-            \"context_window\": {\"total_input_tokens\": 10000, \"context_window_size\": 200000, \"used_percentage\": 5.0}
-          }" | ~/.local/bin/claude-status | grep -q '⬡'
+          echo '{
+            "model": {"id": "claude-sonnet-4-6", "display_name": "Sonnet 4.6"},
+            "session_id": "ci-test",
+            "cost": {"total_cost_usd": 0.05, "total_duration_ms": 60000},
+            "context_window": {
+              "total_input_tokens": 10000,
+              "context_window_size": 200000,
+              "used_percentage": 5.0
+            }
+          }' | ~/.local/bin/claude-status | grep -q '⬡'

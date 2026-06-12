@@ -24,6 +24,12 @@ jobs:
           bash -n features/git.sh
           bash -n features/claude-status.sh
           bash -n features/claude.sh
+          bash -n features/claude-mcp.sh
+          bash -n features/claude-plugins.sh
+          bash -n features/claude-rtk.sh
+          bash -n features/claude-skills-personal.sh
+          bash -n features/claude-plugins-personal.sh
+          bash -n features/tmux.sh
           bash -n shell/exports.sh
           bash -n shell/aliases.sh
           bash -n shell/functions.sh
@@ -100,9 +106,12 @@ jobs:
 
       - name: Each feature exits 0 regardless of environment
         run: |
-          bash features/shell.sh      "$PWD" && echo "shell: OK"
-          bash features/git.sh        "$PWD" && echo "git: OK"
-          bash features/claude.sh     "$PWD" && echo "claude: OK"
+          bash features/shell.sh                "$PWD" && echo "shell: OK"
+          bash features/git.sh                  "$PWD" && echo "git: OK"
+          bash features/claude.sh               "$PWD" && echo "claude: OK"
+          bash features/claude-skills-personal.sh  "$PWD" && echo "claude-skills-personal: OK"
+          bash features/claude-plugins-personal.sh "$PWD" && echo "claude-plugins-personal: OK"
+          bash features/tmux.sh                 "$PWD" && echo "tmux: skips without tmux binary"
 
   claude-status:
     name: claude-status build and test

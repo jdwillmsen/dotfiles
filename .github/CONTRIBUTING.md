@@ -20,7 +20,7 @@ This repo uses [Conventional Commits](https://www.conventionalcommits.org/):
 | `perf` | Performance improvement (e.g. startup time) |
 | `ci` | CI/CD pipeline changes |
 
-**Scopes:** `shell`, `git`, `zsh`, `bash`, `claude-status`, `install`, `aliases`, `functions`
+**Scope:** the feature or module you're changing — use the feature name when in doubt.
 
 **Examples:**
 ```

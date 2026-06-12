@@ -39,14 +39,9 @@ I work across the full stack but skew backend and platform. I own infra and depl
 
 Always use the latest available version of every action. Before writing or modifying any workflow:
 
-1. Check the latest release: `gh api repos/<owner>/<action>/releases/latest --jq '.tag_name'`
-2. Pin to the exact version tag (e.g. `actions/checkout@v6.0.3`), never `@main` or `@latest`
-3. For common actions, current latest versions are (verify before use):
-   - `actions/checkout` — v6.0.3
-   - `actions/setup-go` — v6.4.0
-   - `actions/setup-node` — check before use
-   - `actions/setup-java` — check before use
-4. Add `cache: false` to setup-go when the module has no external dependencies (no `go.sum`)
+1. Look up the current latest tag — never assume: `gh api repos/<owner>/<action>/releases/latest --jq '.tag_name'`
+2. Pin to that exact version tag, never `@main` or `@latest`
+3. Add `cache: false` to setup-go for modules with no external dependencies (no `go.sum`)
 
 # Project Context
 

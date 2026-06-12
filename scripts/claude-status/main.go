@@ -248,9 +248,6 @@ func fmtDuration(ms int64) string {
 	s := ms / 1000
 	m := s / 60
 	h := m / 60
-	if h >= 10 {
-		return fmt.Sprintf("%dh", h) // drop minutes at double-digit hours
-	}
 	if h > 0 {
 		return fmt.Sprintf("%dh%dm", h, m%60)
 	}

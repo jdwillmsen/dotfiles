@@ -19,6 +19,7 @@ dotfiles/
 ├── lib/utils.sh       # shared helpers sourced by every feature
 ├── shell/             # shell config: aliases, exports, functions
 ├── claude/            # Claude Code: settings, CLAUDE.md, commands, hooks
+├── codex/             # Codex: personal skills
 ├── scripts/           # compiled tools (claude-status Go binary)
 ├── gitconfig          # git identity, aliases, sane defaults
 ├── gitignore_global   # global gitignore
@@ -39,6 +40,7 @@ dotfiles/
 | `claude-rtk` | RTK output-filtering CLI | `cargo` or `brew` |
 | `claude-skills-personal` | Personal Claude skills → `~/.claude/skills/` | — |
 | `claude-plugins-personal` | Personal Claude plugins → `~/.claude/plugins/` | — |
+| `codex-skills-personal` | Personal Codex skills → `${CODEX_HOME:-~/.codex}/skills/` | — |
 | `tmux` | `~/.tmux.conf` | `tmux` |
 
 See each `features/*.sh` for exactly what is linked and where.

@@ -6,12 +6,15 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   shell:
     name: Shell syntax
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Check shell syntax
         run: |
@@ -31,12 +34,13 @@ jobs:
     name: Install script
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: scripts/claude-status/go.mod
+          cache: false
 
       - name: Run install.sh
         run: bash install.sh
@@ -73,7 +77,7 @@ jobs:
     name: Feature isolation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Shell feature installs without git or Go
         run: bash features/shell.sh "$PWD"
@@ -104,12 +108,13 @@ jobs:
     name: claude-status build and test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4.2.2
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version-file: scripts/claude-status/go.mod
+          cache: false
 
       - name: Build
         run: |

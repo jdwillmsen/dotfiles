@@ -1,0 +1,45 @@
+[user]
+    name = Jake Willmsen
+    email = jdwillmsen@gmail.com
+
+[core]
+    editor = nano
+    autocrlf = input
+    excludesfile = ~/.gitignore_global
+    whitespace = fix,trailing-space,cr-at-eol
+
+[init]
+    defaultBranch = main
+
+[pull]
+    rebase = false
+
+[push]
+    default = current
+    autoSetupRemote = true
+
+[fetch]
+    prune = true
+
+[diff]
+    colorMoved = zebra
+
+[merge]
+    conflictstyle = diff3
+
+[alias]
+    st  = status
+    co  = checkout
+    br  = branch
+    sw  = switch
+    swc = switch -c
+    lg  = log --oneline --graph --decorate --all
+    last = log -1 HEAD --stat
+    undo = reset HEAD~1 --mixed
+    aliases = config --get-regexp alias
+
+[color]
+    ui = auto
+
+[credential]
+    helper = store

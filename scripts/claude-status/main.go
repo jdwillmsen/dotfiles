@@ -92,9 +92,6 @@ type Payload struct {
 		Level string `json:"level"`
 	} `json:"effort"`
 
-	Thinking *struct {
-		Enabled bool `json:"enabled"`
-	} `json:"thinking"`
 
 	RateLimits *struct {
 		FiveHour *struct {
@@ -346,15 +343,12 @@ func main() {
 	git := getGitState(p.SessionID)
 
 	// ── LINE 1 ────────────────────────────────────────────────────────────────
-	// Section: model  (⬡ Sonnet 4.6  high  💭)
+	// Section: model  (⬡ Sonnet 4.6  high)
 	var secModel string
 	if label := modelLabel(p.Model.ID, p.Model.DisplayName); label != "" {
 		s := Purple + Bold + "⬡ " + label + Reset
 		if p.Effort != nil && p.Effort.Level != "" {
 			s += "  " + Gray + p.Effort.Level + Reset
-		}
-		if p.Thinking != nil && p.Thinking.Enabled {
-			s += "  " + Cyan + "💭" + Reset
 		}
 		secModel = s
 	}

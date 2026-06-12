@@ -31,6 +31,7 @@ run_feature claude-plugins
 run_feature claude-rtk
 run_feature claude-skills-personal
 run_feature claude-plugins-personal
+run_feature codex
 run_feature codex-skills-personal
 run_feature tmux
 

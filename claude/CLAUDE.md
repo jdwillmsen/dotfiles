@@ -16,7 +16,9 @@ I work across the full stack but skew backend and platform. I own infra and depl
 - **No unsolicited refactors.** Fix the thing I asked about. Don't clean up surrounding code unless I ask.
 - **No speculative features.** Don't add error handling, abstractions, or backwards-compat shims for scenarios that don't exist yet.
 - **No filler comments.** Only comment when the *why* is genuinely non-obvious.
-- **Conventional commits.** All commit messages follow `type(scope): description`. Always.
+- **Conventional commits.** When asked to commit, use `type(scope): description`. Keep commits atomic: one logical change per commit, with unrelated formatting, refactors, dependency updates, and behavior changes split apart.
+- **Attribute AI-assisted work honestly.** If AI contributed to a commit, disclose that in commit/PR metadata. Use `Co-authored-by: <agent name> <email>` for visible coauthor attribution, and add Linux-style provenance with `Assisted-by: <agent>:<model> [tools...]` when the agent/model is known. For Codex-assisted commits, prefer `Co-authored-by: Codex <codex@openai.com>` and `Assisted-by: Codex:<model>` unless the repository defines a different convention.
+- **Keep attribution out of source by default.** Do not add generated-by banners or provenance comments inside source files, docs, or generated files unless the repository explicitly requires them; commit/PR metadata is the normal place for attribution.
 - **Ask before destructive actions.** Confirm before force-pushing, dropping tables, deleting branches, or anything hard to reverse.
 
 # Editor & Tooling

@@ -1,6 +1,13 @@
 [user]
     name = Jake Willmsen
     email = jdwillmsen@gmail.com
+    signingkey = 80F11F099D474F1F
+
+[commit]
+    gpgsign = true
+
+[tag]
+    gpgsign = true
 
 [core]
     editor = nano

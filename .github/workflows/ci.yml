@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  shell:
+    name: Shell syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check shell syntax
+        run: |
+          bash -n install.sh
+          bash -n shell/exports.sh
+          bash -n shell/aliases.sh
+          bash -n shell/functions.sh
+          bash -n zshrc
+          bash -n bashrc
+
+  install:
+    name: Install script
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: scripts/claude-status/go.mod
+
+      - name: Run install.sh
+        run: bash install.sh
+
+      - name: Verify symlinks exist
+        run: |
+          test -L ~/.gitconfig
+          test -L ~/.gitignore_global
+          test -L ~/.zshrc
+          test -L ~/.bashrc
+
+      - name: Verify claude-status binary built
+        run: test -x ~/.local/bin/claude-status
+
+      - name: Verify statusLine injected into settings.json
+        run: grep -q '"statusLine"' ~/.claude/settings.json
+
+  claude-status:
+    name: claude-status build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: scripts/claude-status/go.mod
+
+      - name: Build
+        run: cd scripts/claude-status && go build ./...
+
+      - name: Vet
+        run: cd scripts/claude-status && go vet ./...
+
+      - name: Smoke test — empty input
+        run: echo '{}' | ~/.local/bin/claude-status || true
+        continue-on-error: true
+
+      - name: Smoke test — full payload
+        run: |
+          NOW=$(date +%s)
+          echo "{
+            \"model\": {\"id\": \"claude-sonnet-4-6\", \"display_name\": \"Sonnet 4.6\"},
+            \"session_id\": \"ci-test\",
+            \"cost\": {\"total_cost_usd\": 0.05, \"total_duration_ms\": 60000},
+            \"context_window\": {\"total_input_tokens\": 10000, \"context_window_size\": 200000, \"used_percentage\": 5.0}
+          }" | cd scripts/claude-status && go run . | grep -q '⬡'

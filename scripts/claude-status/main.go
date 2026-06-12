@@ -29,7 +29,7 @@ const (
 // sep divides all segments uniformly.
 var sep = "  " + Gray + "│" + Reset + "  "
 
-// sec joins non-empty strings with sep.
+// sec joins non-empty strings with spaces (items within a logical group).
 func sec(items ...string) string {
 	var out []string
 	for _, s := range items {
@@ -37,7 +37,7 @@ func sec(items ...string) string {
 			out = append(out, s)
 		}
 	}
-	return strings.Join(out, sep)
+	return strings.Join(out, "  ")
 }
 
 // ── Payload — exact JSON schema from Claude Code docs ─────────────────────────
@@ -399,18 +399,9 @@ func main() {
 		gitParts = append(gitParts, s)
 	}
 
-	secGit := strings.Join(gitParts, sep)
-
-	// Section: cost  ($0.04 · ⏱ 5m12s · +156 -23)
-	var costParts []string
-	if cs := fmtCost(p.Cost.TotalCostUSD); cs != "" {
-		costParts = append(costParts, cs)
-	}
-	if ds := fmtDuration(p.Cost.TotalDurationMS); ds != "" {
-		costParts = append(costParts, Gray+"⏱ "+Reset+ds)
-	}
+	// Lines added/removed by Claude this session belong with git context
 	added, removed := p.Cost.TotalLinesAdded, p.Cost.TotalLinesRemoved
-	if added > 0 || removed > 0 {
+	if (added > 0 || removed > 0) && git != nil {
 		var diff string
 		if added > 0 {
 			diff += Green + "+" + strconv.Itoa(added) + Reset
@@ -418,14 +409,25 @@ func main() {
 		if removed > 0 {
 			diff += " " + Red + "-" + strconv.Itoa(removed) + Reset
 		}
-		costParts = append(costParts, strings.TrimSpace(diff))
+		gitParts = append(gitParts, strings.TrimSpace(diff))
 	}
-	secCost := strings.Join(costParts, sep)
+
+	secGit := strings.Join(gitParts, sep)
+
+	// Section: cost  ($0.04  ⏱ 5m12s)
+	var costParts []string
+	if cs := fmtCost(p.Cost.TotalCostUSD); cs != "" {
+		costParts = append(costParts, cs)
+	}
+	if ds := fmtDuration(p.Cost.TotalDurationMS); ds != "" {
+		costParts = append(costParts, Gray+"⏱ "+Reset+ds)
+	}
+	secCost := strings.Join(costParts, "  ")
 
 	// Agent (appended to cost section)
 	if p.Agent != nil && p.Agent.Name != "" {
 		if secCost != "" {
-			secCost += sep
+			secCost += "  "
 		}
 		secCost += Gray + "agent: " + Reset + p.Agent.Name
 	}
@@ -499,7 +501,7 @@ func main() {
 			}
 		}
 	}
-	secCache := strings.Join(cacheParts, sep)
+	secCache := strings.Join(cacheParts, "  ")
 
 	// Section: tokens  (↑ 4k out · api 29% of time)
 	var tokenParts []string
@@ -510,7 +512,7 @@ func main() {
 		apiPct := float64(p.Cost.TotalAPIDurationMS) / float64(p.Cost.TotalDurationMS) * 100
 		tokenParts = append(tokenParts, fmt.Sprintf("%sapi %.0f%%%s", Gray, apiPct, Reset))
 	}
-	secTokens := strings.Join(tokenParts, sep)
+	secTokens := strings.Join(tokenParts, "  ")
 
 	// Section: session name
 	secSession := ""

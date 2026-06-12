@@ -111,7 +111,7 @@ All three version managers are supported. Shell configs activate them only if th
 
 | Manager | Stack | Install |
 |---------|-------|---------|
-| [nvm](https://github.com/nvm-sh/nvm) | Node / JavaScript | `curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh \| bash` |
+| [nvm](https://github.com/nvm-sh/nvm) | Node / JavaScript | See [nvm install docs](https://github.com/nvm-sh/nvm#installing-and-updating) for the latest command |
 | [pyenv](https://github.com/pyenv/pyenv) | Python | `curl https://pyenv.run \| bash` |
 | [sdkman](https://sdkman.io) | Java / Kotlin / JVM | `curl -s "https://get.sdkman.io" \| bash` |
 

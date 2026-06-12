@@ -35,6 +35,19 @@ I work across the full stack but skew backend and platform. I own infra and depl
 - Python: type hints, `black` formatting
 - Shell: `set -euo pipefail`, quote variables, no bashisms in `#!/bin/sh` scripts
 
+# GitHub Actions
+
+Always use the latest available version of every action. Before writing or modifying any workflow:
+
+1. Check the latest release: `gh api repos/<owner>/<action>/releases/latest --jq '.tag_name'`
+2. Pin to the exact version tag (e.g. `actions/checkout@v6.0.3`), never `@main` or `@latest`
+3. For common actions, current latest versions are (verify before use):
+   - `actions/checkout` — v6.0.3
+   - `actions/setup-go` — v6.4.0
+   - `actions/setup-node` — check before use
+   - `actions/setup-java` — check before use
+4. Add `cache: false` to setup-go when the module has no external dependencies (no `go.sum`)
+
 # Project Context
 
 My dotfiles live at `~/dotfiles` and are symlinked to `$HOME` via `install.sh`. The repo is at `github.com/jdwillmsen/dotfiles`. The Claude Code status line is a Go binary at `~/.local/bin/claude-status`.

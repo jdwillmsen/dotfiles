@@ -78,6 +78,12 @@ jobs:
           test -L ~/.claude/commands/explain.md
           test -L ~/.claude/commands/pr.md
 
+      - name: Verify codex feature — AGENTS.md symlinked
+        run: test -L ~/.codex/AGENTS.md
+
+      - name: Verify codex feature — status line configured
+        run: grep -q 'status_line = \["model-with-reasoning", "context-remaining", "git-branch", "current-dir"\]' ~/.codex/config.toml
+
       - name: Verify install is idempotent
         run: bash install.sh
 

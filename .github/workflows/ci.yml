@@ -19,8 +19,8 @@ jobs:
           bash -n shell/exports.sh
           bash -n shell/aliases.sh
           bash -n shell/functions.sh
-          bash -n zshrc
           bash -n bashrc
+          bash -n zshrc
 
   install:
     name: Install script
@@ -61,16 +61,17 @@ jobs:
           go-version-file: scripts/claude-status/go.mod
 
       - name: Build
-        run: cd scripts/claude-status && go build ./...
+        run: |
+          mkdir -p ~/.local/bin
+          cd scripts/claude-status && go build -o ~/.local/bin/claude-status .
 
       - name: Vet
         run: cd scripts/claude-status && go vet ./...
 
       - name: Smoke test — empty input
-        run: echo '{}' | ~/.local/bin/claude-status || true
-        continue-on-error: true
+        run: echo '{}' | ~/.local/bin/claude-status
 
-      - name: Smoke test — full payload
+      - name: Smoke test — full payload produces output with model segment
         run: |
           NOW=$(date +%s)
           echo "{
@@ -78,4 +79,4 @@ jobs:
             \"session_id\": \"ci-test\",
             \"cost\": {\"total_cost_usd\": 0.05, \"total_duration_ms\": 60000},
             \"context_window\": {\"total_input_tokens\": 10000, \"context_window_size\": 200000, \"used_percentage\": 5.0}
-          }" | cd scripts/claude-status && go run . | grep -q '⬡'
+          }" | ~/.local/bin/claude-status | grep -q '⬡'

@@ -1,0 +1,6 @@
+.DS_Store
+*.bak
+*.local
+
+# Compiled binaries (built by install.sh into ~/.local/bin)
+scripts/claude-status/claude-status

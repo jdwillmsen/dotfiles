@@ -38,6 +38,23 @@ jobs:
           bash -n bashrc
           bash -n zshrc
 
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Lint shell scripts
+        # SC1091: sourced files resolve via runtime env vars ($DOTFILES, etc.)
+        #   and cannot be followed statically.
+        # zshrc is genuine zsh (setopt, $fg[...], autoload) with no shellcheck
+        #   dialect; bash -n above covers it.
+        run: |
+          shellcheck --exclude=SC1091 \
+            install.sh \
+            lib/*.sh \
+            features/*.sh \
+            shell/*.sh \
+            claude/hooks/*.sh
+          shellcheck --shell=bash --exclude=SC1091 bashrc
+
   install:
     name: Install script
     runs-on: ubuntu-latest

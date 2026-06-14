@@ -1,4 +1,6 @@
 {
   "theme": "dark",
-  "cleanupPeriodDays": 90
+  "cleanupPeriodDays": 90,
+  "skipDangerousModePermissionPrompt": true,
+  "skipAutoPermissionPrompt": true
 }

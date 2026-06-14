@@ -1,3 +1,6 @@
+# shellcheck shell=bash
+# Sourced by bashrc and zshrc; declares no shebang of its own.
+
 # mkcd — make directory and cd into it
 mkcd() {
     mkdir -p "$1" && cd "$1" || return 1

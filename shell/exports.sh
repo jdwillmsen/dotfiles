@@ -1,3 +1,6 @@
+# shellcheck shell=bash
+# Sourced by bashrc and zshrc; declares no shebang of its own.
+
 # Dotfiles root — used by shell files to source sibling scripts
 export DOTFILES="$HOME/dotfiles"
 

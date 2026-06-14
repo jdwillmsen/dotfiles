@@ -1,3 +1,6 @@
+# shellcheck shell=bash
+# Sourced by bashrc and zshrc; declares no shebang of its own.
+
 # Navigation
 alias ..='cd ..'
 alias ...='cd ../..'

@@ -20,6 +20,7 @@ I work across the full stack but skew backend and platform. I own infra and depl
 - **Attribute AI-assisted work honestly.** If AI contributed to a commit, disclose that in commit/PR metadata. Use the exact trailer `Co-Authored-By: <agent name> <email>` for visible coauthor attribution, and add Linux-style provenance with `Assisted-by: <agent>:<model> [tools...]` when the agent/model is known. For Codex-assisted commits, prefer `Co-Authored-By: Codex <codex@openai.com>` and `Assisted-by: Codex:<model>` unless the repository defines a different convention. For Claude-assisted commits, prefer `Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>` and `Assisted-by: Claude:Sonnet-4.6`.
 - **Keep attribution out of source by default.** Do not add generated-by banners or provenance comments inside source files, docs, or generated files unless the repository explicitly requires them; commit/PR metadata is the normal place for attribution.
 - **Ask before destructive actions.** Confirm before force-pushing, dropping tables, deleting branches, or anything hard to reverse.
+- **Always work in a worktree, never on the default branch.** For any non-trivial change, create a git worktree on a dedicated feature branch and do the work there. Never commit directly to `main` or a repo's default branch.
 
 # Editor & Tooling
 

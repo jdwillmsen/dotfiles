@@ -9,6 +9,7 @@
 
 ## Git
 
+- Always work in a git worktree on a dedicated feature branch for any non-trivial change. Never commit directly to `main` or a repo's default branch.
 - When asked to commit, use Conventional Commit messages: `type(scope): description`.
 - Keep commits atomic. Each commit should represent one logical change and be reviewable on its own.
 - Split unrelated formatting, refactors, dependency updates, and behavior changes into separate commits.

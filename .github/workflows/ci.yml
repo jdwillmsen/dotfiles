@@ -157,6 +157,17 @@ jobs:
           mkdir -p ~/.local/bin
           cd scripts/claude-status && go build -o ~/.local/bin/claude-status .
 
+      - name: Check formatting
+        run: |
+          cd scripts/claude-status
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            echo "Run: gofmt -w scripts/claude-status/"
+            exit 1
+          fi
+
       - name: Vet
         run: cd scripts/claude-status && go vet ./...
 

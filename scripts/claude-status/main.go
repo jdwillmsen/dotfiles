@@ -43,11 +43,11 @@ func sec(items ...string) string {
 
 // ── Payload — exact JSON schema from Claude Code docs ─────────────────────────
 type Payload struct {
-	Cwd          string `json:"cwd"`
-	SessionID    string `json:"session_id"`
-	SessionName  string `json:"session_name"`
-	Version      string `json:"version"`
-	ExceedsTokens bool  `json:"exceeds_200k_tokens"`
+	Cwd           string `json:"cwd"`
+	SessionID     string `json:"session_id"`
+	SessionName   string `json:"session_name"`
+	Version       string `json:"version"`
+	ExceedsTokens bool   `json:"exceeds_200k_tokens"`
 
 	Model struct {
 		ID          string `json:"id"`
@@ -91,7 +91,6 @@ type Payload struct {
 	Effort *struct {
 		Level string `json:"level"`
 	} `json:"effort"`
-
 
 	RateLimits *struct {
 		FiveHour *struct {
@@ -195,8 +194,9 @@ var (
 )
 
 // modelLabel combines display_name with version parsed from id.
-//   "claude-sonnet-4-6" + "Sonnet"      →  "Sonnet 4.6"
-//   "claude-sonnet-4-6" + "Sonnet 4.6"  →  "Sonnet 4.6"  (no duplicate)
+//
+//	"claude-sonnet-4-6" + "Sonnet"      →  "Sonnet 4.6"
+//	"claude-sonnet-4-6" + "Sonnet 4.6"  →  "Sonnet 4.6"  (no duplicate)
 func modelLabel(id, displayName string) string {
 	m := strings.TrimPrefix(id, "claude-")
 	if ms := modelRe.FindStringSubmatch(m); ms != nil {
@@ -270,9 +270,10 @@ func fmtCost(usd float64) string {
 
 // fmtResetsAt shows WHEN a rate limit resets + HOW LONG until then.
 // The countdown color combines usage and time-to-reset:
-//   high usage + reset soon  → green  (relief coming)
-//   high usage + reset far   → red    (constrained for a while)
-//   low usage                → gray   (not relevant)
+//
+//	high usage + reset soon  → green  (relief coming)
+//	high usage + reset far   → red    (constrained for a while)
+//	low usage                → gray   (not relevant)
 func fmtResetsAt(unixSec int64, usedPct float64) string {
 	if unixSec == 0 {
 		return ""

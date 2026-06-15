@@ -36,7 +36,7 @@ dotfiles/
 | `claude-status` | Go status line binary + `statusLine` in `~/.claude/settings.json` | `go`, `python3` |
 | `claude` | Settings merge, CLAUDE.md, slash commands, hooks → `~/.claude/` | `python3` |
 | `claude-mcp` | MCP server configs (Atlassian/Rovo) → `~/.claude/mcp.json` | `node`, `python3` |
-| `claude-plugins` | External Claude plugins (Caveman) → `~/.claude/plugins/` | `git`, `node`, `python3` |
+| `claude-plugins` | Native Claude Code plugins (Caveman) via `claude plugin` | `git`, `claude` |
 | `claude-rtk` | RTK output-filtering CLI | `cargo` or `brew` |
 | `claude-skills-personal` | Personal Claude skills → `~/.claude/skills/` | — |
 | `claude-plugins-personal` | Personal Claude plugins → `~/.claude/plugins/` | — |

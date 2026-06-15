@@ -67,4 +67,5 @@ alias cpuinfo='lscpu'
 # Misc
 alias reload='source ~/.zshrc 2>/dev/null || source ~/.bashrc'
 alias dotfiles='cd $DOTFILES'
+alias jlabs='cd ~/projects/jdwlabs'
 alias path='echo $PATH | tr : "\n"'

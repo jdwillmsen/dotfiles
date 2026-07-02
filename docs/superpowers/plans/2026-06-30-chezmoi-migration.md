@@ -527,6 +527,8 @@ Expected: FAIL (modify script missing).
 
 chezmoi passes the current file on stdin; the script prints the new content. Existing values win.
 
+> **Amended during execution:** the block below had two bugs — the merge skipped existing scalar keys already present in defaults (defaults clobbered user values, violating "existing wins"), and the `python3 - <<'PYEOF'` heredoc consumed stdin so the piped JSON never reached the script. The committed `home/private_dot_claude/modify_settings.json.tmpl` captures stdin with `EXISTING="$(cat)"`, passes it via argv, and merges with override-wins at every level. Treat the committed file as authoritative.
+
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail

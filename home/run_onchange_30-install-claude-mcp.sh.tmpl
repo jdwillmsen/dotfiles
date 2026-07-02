@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+command -v node &>/dev/null || { echo "node not found — skipping MCP"; exit 0; }
+mkdir -p "$HOME/.claude"
+MCP_FILE="$HOME/.claude/mcp.json"
+DESIRED='{{ .mcp | toJson }}'
+# Windows ships a python3 Store-stub that fails on exec; probe for a real one.
+PY=python3
+"$PY" -c "" >/dev/null 2>&1 || PY=python
+"$PY" -c "" >/dev/null 2>&1 || { echo "python not found — skipping MCP"; exit 0; }
+"$PY" - "$MCP_FILE" "$DESIRED" <<'PYEOF'
+import json, os, sys
+path, desired = sys.argv[1], json.loads(sys.argv[2])
+existing = {}
+if os.path.exists(path):
+    try:
+        with open(path) as f: existing = json.load(f)
+    except json.JSONDecodeError:
+        pass
+servers = existing.setdefault("mcpServers", {})
+for name, cfg in desired.items():
+    servers.setdefault(name, cfg)
+with open(path, "w") as f:
+    json.dump(existing, f, indent=2)
+PYEOF
+echo "MCP servers ready (authenticate on first use)"

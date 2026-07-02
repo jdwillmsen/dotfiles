@@ -1,0 +1,57 @@
+[user]
+    name = Jake Willmsen
+{{- if eq .machineRole "work" }}
+    email = {{ (include "~/.config/git/work-identity" | fromYaml).email | default "jdwillmsen@gmail.com" }}
+    signingkey = {{ (include "~/.config/git/work-identity" | fromYaml).signingkey | default "80F11F099D474F1F" }}
+{{- else }}
+    email = jdwillmsen@gmail.com
+    signingkey = 80F11F099D474F1F
+{{- end }}
+
+[commit]
+    gpgsign = {{ if .isEphemeral }}false{{ else }}true{{ end }}
+[tag]
+    gpgsign = {{ if .isEphemeral }}false{{ else }}true{{ end }}
+
+[core]
+    editor = nano
+    autocrlf = input
+    excludesfile = ~/.gitignore_global
+    whitespace = fix,trailing-space,cr-at-eol
+
+[init]
+    defaultBranch = main
+[pull]
+    rebase = false
+[push]
+    default = current
+    autoSetupRemote = true
+[fetch]
+    prune = true
+[diff]
+    colorMoved = zebra
+[merge]
+    conflictstyle = diff3
+
+[alias]
+    st  = status
+    co  = checkout
+    br  = branch
+    sw  = switch
+    swc = switch -c
+    lg  = log --oneline --graph --decorate --all
+    last = log -1 HEAD --stat
+    undo = reset HEAD~1 --mixed
+    aliases = config --get-regexp alias
+
+[color]
+    ui = auto
+
+[credential]
+{{- if .isEphemeral }}
+    helper =
+{{- else if or .isWSL (eq .chezmoi.os "windows") }}
+    helper = manager
+{{- else }}
+    helper = libsecret
+{{- end }}

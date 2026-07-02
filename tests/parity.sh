@@ -20,6 +20,11 @@ manifests="$(mktemp -d)"
 ( cd "$old_home" && find . -type f | sort ) > "$manifests/old"
 ( cd "$new_home" && find . -type f | sort ) > "$manifests/new"
 
+# Floor check: if the legacy installer crashed before creating files, old manifest
+# would be near-empty and the comparison would report "PARITY OK" despite failure.
+old_count="$(wc -l < "$manifests/old")"
+[ "$old_count" -gt 10 ] || { echo "PARITY FAILED: legacy installer produced only $old_count files — install.sh likely crashed"; exit 1; }
+
 echo "=== files only under OLD installer ==="
 comm -23 "$manifests/old" "$manifests/new" || true
 echo "=== files only under chezmoi ==="

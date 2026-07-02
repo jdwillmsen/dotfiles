@@ -218,7 +218,7 @@ Expected: FAIL (files not created yet).
 - [ ] **Step 3: Create the three shell files**
 
 Copy verbatim from the existing repo files, with these two edits:
-- `home/dot_config/shell/aliases.sh`: full content of `shell/aliases.sh` (the `jlabs` and navigation/git/docker/k8s aliases are already there); additionally add `alias clauded='claude --dangerously-skip-permissions'` (currently appended to `zshrc:51`).
+- `home/dot_config/shell/aliases.sh`: full content of `shell/aliases.sh` (the `jlabs` and navigation/git/docker/k8s aliases are already there); additionally add `alias clauded='claude --dangerously-skip-permissions'` (currently appended to `zshrc:51`), and repoint `alias dotfiles` from the dropped `$DOTFILES` var to `cd "$(chezmoi source-path)"`.
 - `home/dot_config/shell/exports.sh`: full content of `shell/exports.sh` **minus** the `export DOTFILES="$HOME/dotfiles"` line (chezmoi removes the need for a dotfiles-root indirection).
 - `home/dot_config/shell/functions.sh`: full content of `shell/functions.sh` verbatim.
 

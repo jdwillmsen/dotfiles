@@ -17,7 +17,7 @@
 - `credential.helper = store` must be removed; replaced per-OS (`libsecret` Linux, `manager` WSL/Windows, disabled ephemeral).
 - `settings.json` merge semantics: existing on-disk (runtime) values win; repo only fills missing keys. Default keys contributed: `model: fable`, `statusLine`.
 - Do not delete `install.sh`/`features/`/`lib/` until the parity gate (Task 12) is green.
-- Every shell script authored must pass `shellcheck`; Go must pass `gofmt`.
+- Every shell script authored must pass `shellcheck -s bash` at default severity; scoped `# shellcheck disable=` directives with a cause comment are the sanctioned escape for runtime-dynamic source paths. zsh-only files are exempt (shellcheck lacks zsh support). Go must pass `gofmt`.
 - Commit after every task. Conventional Commits. Feature branch `feat/chezmoi-migration`.
 
 ---

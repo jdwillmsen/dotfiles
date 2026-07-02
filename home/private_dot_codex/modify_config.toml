@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# chezmoi feeds the current file on our stdin. That stdin is captured here
+# (not left connected to python3) because a `python3 - <<PYEOF` heredoc would
+# itself occupy stdin as the script source, leaving nothing for the process
+# to read the existing file from. Passing the blob as argv sidesteps that.
+EXISTING="$(cat)"
+python3 -c '
+import re, sys
+text = sys.argv[1]
+status_line = "status_line = [\"model-with-reasoning\", \"context-remaining\", \"git-branch\", \"current-dir\"]"
+m = re.search(r"(?m)^\[tui\]\s*$", text)
+if not m:
+    text = text.rstrip()
+    text += ("\n\n" if text else "") + f"[tui]\n{status_line}\n"
+else:
+    nxt = re.search(r"(?m)^\[[^\]]+\]\s*$", text[m.end():])
+    end = m.end() + nxt.start() if nxt else len(text)
+    section = text[m.end():end]
+    sre = re.compile(r"(?m)^status_line\s*=.*$")
+    if sre.search(section):
+        section = sre.sub(status_line, section, count=1)
+    else:
+        if section and not section.endswith("\n"):
+            section += "\n"
+        section += status_line + "\n"
+    text = text[:m.end()] + section + text[end:]
+sys.stdout.write(text)
+' "$EXISTING"

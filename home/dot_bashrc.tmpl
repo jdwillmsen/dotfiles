@@ -1,0 +1,35 @@
+# Not running interactively? Stop here.
+case $- in
+    *i*) ;;
+    *) return ;;
+esac
+
+# Shared config
+for f in "$HOME/.config/shell/exports.sh" "$HOME/.config/shell/aliases.sh" "$HOME/.config/shell/functions.sh"; do
+    [ -r "$f" ] && source "$f"
+done
+
+# History
+HISTSIZE=10000
+HISTFILESIZE=20000
+HISTCONTROL=ignoredups:ignorespace
+shopt -s histappend
+shopt -s checkwinsize
+
+# Prompt
+PS1='\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
+
+# nvm
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ]          && \. "$NVM_DIR/nvm.sh"
+[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
+
+# pyenv
+if command -v pyenv &>/dev/null; then eval "$(pyenv init -)"; fi
+
+# sdkman (must stay near bottom)
+export SDKMAN_DIR="$HOME/.sdkman"
+[[ -s "$SDKMAN_DIR/bin/sdkman-init.sh" ]] && source "$SDKMAN_DIR/bin/sdkman-init.sh"
+
+# cargo
+[ -s "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"

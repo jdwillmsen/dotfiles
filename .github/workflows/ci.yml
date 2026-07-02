@@ -215,6 +215,7 @@ jobs:
 
       - name: chezmoi init + verify
         run: |
+          set -x
           export PATH="$HOME/.local/bin:$PATH"
           # tests/lib.sh is the proven two-phase init harness: chezmoi's
           # `execute-template --init` skips .chezmoi.toml.tmpl's [data], and

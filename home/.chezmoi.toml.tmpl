@@ -1,0 +1,17 @@
+{{- /* prompt text intentionally equals the data path so --promptString machineRole=... keys correctly */ -}}
+{{- $role := promptStringOnce . "machineRole" "machineRole" "personal" -}}
+{{- $ephemeral := or (env "CI" | not | not) (env "REMOTE_CONTAINERS" | not | not) (env "CODESPACES" | not | not) -}}
+{{- if eq $role "ephemeral" }}{{ $ephemeral = true }}{{ end -}}
+{{- $osrelease := lower (output "sh" "-c" "cat /proc/sys/kernel/osrelease 2>/dev/null || true") -}}
+{{- $isWSL := or (contains "microsoft" $osrelease) (contains "wsl" $osrelease) -}}
+
+encryption = "age"
+
+[age]
+    identity = "~/.config/chezmoi/key.txt"
+    recipient = "age1PLACEHOLDER_REPLACED_IN_TASK7"
+
+[data]
+    machineRole = {{ $role | quote }}
+    isEphemeral = {{ $ephemeral }}
+    isWSL = {{ $isWSL }}

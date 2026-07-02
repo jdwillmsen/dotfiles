@@ -186,3 +186,46 @@ jobs:
               "used_percentage": 5.0
             }
           }' | ~/.local/bin/claude-status | grep -q '⬡'
+
+  chezmoi:
+    name: chezmoi verify + parity
+    runs-on: ubuntu-latest
+    env:
+      CHEZMOI_AGE_KEY: ${{ secrets.CHEZMOI_AGE_KEY }}
+    steps:
+      - uses: actions/checkout@v7.0.0
+
+      - name: Install chezmoi
+        run: sh -c "$(curl -fsLS get.chezmoi.io)" -- -b "$HOME/.local/bin"
+
+      - name: Template unit tests
+        run: for t in tests/template/*.sh; do bash "$t"; done
+
+      - name: Script unit tests
+        run: for t in tests/scripts/*.sh; do bash "$t"; done
+
+      - name: chezmoi doctor
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          chezmoi doctor --source . || true
+
+      - name: chezmoi init + verify
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          # tests/lib.sh is the proven two-phase init harness: chezmoi's
+          # `execute-template --init` skips .chezmoi.toml.tmpl's [data], and
+          # --promptString keys on the prompt TEXT (here "machineRole", by
+          # deliberate template design — see home/.chezmoi.toml.tmpl), not
+          # the data path. Reuse chez_init rather than re-deriving this.
+          # shellcheck disable=SC1091
+          . tests/lib.sh
+          cfg="$(chez_init ephemeral)"
+          dest="$(mktemp -d)"
+          chezmoi verify --source "$CHEZ_SRC" --config "$cfg" --destination "$dest"
+
+      - name: Parity gate — legacy install.sh vs chezmoi apply
+        # CHEZMOI_AGE_KEY is already the real secret from the job env (not the
+        # brief's illustrative "dummy": tests/parity.sh's chez_apply does a
+        # real full apply that decrypts encrypted_ source files, and a bad
+        # key would abort the whole apply on first decrypt failure).
+        run: bash tests/parity.sh

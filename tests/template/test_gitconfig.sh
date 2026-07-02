@@ -3,6 +3,7 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091  # dynamic path resolved at runtime; harness lives at tests/lib.sh
 . "$here/tests/lib.sh"
+chez_require_key
 render() { chez_render "$(chez_init "$1")" "$here/home/dot_gitconfig.tmpl"; }
 p="$(render personal)"
 echo "$p" | grep -q "jdwillmsen@gmail.com" || { echo "FAIL: personal email"; exit 1; }

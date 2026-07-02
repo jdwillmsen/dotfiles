@@ -78,3 +78,10 @@ This decrypts the file, opens it in `$EDITOR`, and re-encrypts on save. Set
   rather than `include` on the decrypted destination path: `include`
   resolves relative to the chezmoi *source* directory, so it can't see
   target files chezmoi hasn't applied yet.
+
+Because the work-identity slot is an `encrypted_` source file, chezmoi
+decrypts it unconditionally on every `chezmoi apply` regardless of
+`machineRole`. That means **every** machine — personal and ephemeral
+included, not just `work` — needs a working age identity for `apply` to
+succeed at all; `machineRole` only changes who ends up consuming the
+decrypted values, not whether decryption happens.

@@ -26,15 +26,17 @@ encryption = "age"
     isEphemeral = {{ $ephemeral }}
     isWSL = {{ $isWSL }}
 
-{{- if eq .chezmoi.os "windows" }}
-
-{{- /* Windows cannot exec shebang scripts; route modify_ script temp files
-       (named after their target's extension) through bash. Also covers
-       run_ scripts (e.g. run_before_00-write-ci-age-key.sh) by .sh extension. */}}
+{{- /* Applied on every OS, not just Windows: chezmoi resolves a modify_
+       script's *destination* name by stripping whatever extension matches
+       an interpreters key, so the key set must be identical everywhere or
+       the same source file name would resolve to a different target path
+       per OS. modify_settings.json.json.tmpl / modify_config.toml.toml
+       carry a doubled extension for exactly this reason — the first
+       "json"/"toml" is the real target extension, the second is the
+       interpreter-selection marker that this stripping consumes. */}}
 [interpreters.json]
     command = "bash"
 [interpreters.toml]
     command = "bash"
 [interpreters.sh]
     command = "bash"
-{{- end }}

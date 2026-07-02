@@ -17,6 +17,7 @@
 
 [commit]
     gpgsign = {{ if .isEphemeral }}false{{ else }}true{{ end }}
+
 [tag]
     gpgsign = {{ if .isEphemeral }}false{{ else }}true{{ end }}
 
@@ -28,15 +29,20 @@
 
 [init]
     defaultBranch = main
+
 [pull]
     rebase = false
+
 [push]
     default = current
     autoSetupRemote = true
+
 [fetch]
     prune = true
+
 [diff]
     colorMoved = zebra
+
 [merge]
     conflictstyle = diff3
 

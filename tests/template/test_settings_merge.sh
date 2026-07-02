@@ -5,7 +5,7 @@ here="$(cd "$(dirname "$0")/../.." && pwd)"
 # The modify script contains no template directives, so running it directly with the
 # current file content on stdin is byte-faithful to what chezmoi executes.
 existing='{"theme":"light","model":"opus"}'
-out="$(printf '%s' "$existing" | bash "$here/home/private_dot_claude/modify_settings.json.tmpl")"
+out="$(printf '%s' "$existing" | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
 # Windows ships a python3 Store-stub that fails on exec; probe for a real one.
 PY=python3
 "$PY" -c "" >/dev/null 2>&1 || PY=python

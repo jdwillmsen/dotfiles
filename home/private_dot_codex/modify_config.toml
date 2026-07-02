@@ -10,6 +10,7 @@ PY=python3
 "$PY" -c "" >/dev/null 2>&1 || PY=python
 "$PY" -c '
 import re, sys
+sys.stdout.reconfigure(newline="\n")  # stop Windows text-mode \n->\r\n translation; script must be byte-stable across applies
 text = sys.argv[1]
 status_line = "status_line = [\"model-with-reasoning\", \"context-remaining\", \"git-branch\", \"current-dir\"]"
 m = re.search(r"(?m)^\[tui\]\s*$", text)

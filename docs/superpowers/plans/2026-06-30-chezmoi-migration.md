@@ -56,29 +56,65 @@ Unchanged: `scripts/claude-status/`, `docs/` (except this plan/spec), `README.md
 - Create: `.chezmoiroot`
 - Create: `home/.chezmoi.toml.tmpl`
 - Create: `home/.chezmoidata.yaml`
+- Create: `tests/lib.sh` (shared test harness, sourced by every template/script test)
 - Test: `tests/template/test_data.sh`
 
 **Interfaces:**
 - Produces: chezmoi template data `.machineRole` (string: `personal`|`work`|`ephemeral`), `.isEphemeral` (bool), consumed by every later `.tmpl`.
+- Produces: `tests/lib.sh` harness functions `chez_init`, `chez_tmpl`, `chez_render`, `chez_apply`, consumed by every later test.
 
-- [ ] **Step 1: Write the failing test**
+> **Test idiom (verified against chezmoi v2.70.5):** `chezmoi execute-template --init --source <dir>` does NOT load `.chezmoi.toml.tmpl`'s `[data]`, and `--promptString key=value` keys on the prompt *text* (3rd arg to `promptStringOnce`), not the data path. Tests therefore do a real two-phase init: `chezmoi init --config <sandbox>` renders the config once, then `chezmoi execute-template --config <sandbox>` runs with the config's data loaded. The config template's prompt text is set equal to the data path (`"machineRole"`) so `--promptString machineRole=<role>` works.
+
+- [ ] **Step 1: Write the shared harness and the failing test**
+
+```bash
+# tests/lib.sh — shared chezmoi test harness (sourced, not executed)
+# chezmoi's `execute-template --init` does not load .chezmoi.toml.tmpl's
+# [data], and --promptString keys on the prompt text, not the data path.
+# So tests do a real two-phase init into a sandbox: render the config once,
+# then execute templates against that config.
+: "${CHEZMOI_AGE_KEY:=dummy}"; export CHEZMOI_AGE_KEY
+CHEZ_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# chez_init [role] — prints path to a config rendered for that role.
+# CI-detection env vars are stripped so results are deterministic everywhere.
+chez_init() {
+    local tmp; tmp="$(mktemp -d)"
+    env -u CI -u REMOTE_CONTAINERS -u CODESPACES chezmoi init \
+        --source "$CHEZ_SRC" --destination "$tmp/dest" \
+        --config "$tmp/chezmoi.toml" \
+        --promptString "machineRole=${1:-personal}" --no-tty >/dev/null
+    echo "$tmp/chezmoi.toml"
+}
+
+# chez_tmpl CONFIG 'TEMPLATE' — render an inline probe template.
+chez_tmpl() { chezmoi execute-template --source "$CHEZ_SRC" --config "$1" "$2"; }
+
+# chez_render CONFIG FILE — render a source template file via stdin.
+chez_render() { chezmoi execute-template --source "$CHEZ_SRC" --config "$1" < "$2"; }
+
+# chez_apply CONFIG DEST — apply the full source state into DEST.
+chez_apply() { chezmoi apply --source "$CHEZ_SRC" --config "$1" --destination "$2" --force; }
+```
 
 ```bash
 # tests/template/test_data.sh
 #!/usr/bin/env bash
 set -euo pipefail
 here="$(cd "$(dirname "$0")/../.." && pwd)"
-# Render a probe template against the source; ephemeral role must yield isEphemeral=true.
-out="$(CHEZMOI_AGE_KEY=dummy chezmoi execute-template --init --promptString machineRole=ephemeral \
-    '{{ .machineRole }}:{{ .isEphemeral }}' --source "$here/home" 2>/dev/null)"
+. "$here/tests/lib.sh"
+# Ephemeral role must yield isEphemeral=true; personal must not.
+out="$(chez_tmpl "$(chez_init ephemeral)" '{{ .machineRole }}:{{ .isEphemeral }}')"
 [ "$out" = "ephemeral:true" ] || { echo "FAIL: got '$out'"; exit 1; }
+out="$(chez_tmpl "$(chez_init personal)" '{{ .machineRole }}:{{ .isEphemeral }}')"
+[ "$out" = "personal:false" ] || { echo "FAIL: got '$out'"; exit 1; }
 echo "PASS"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `bash tests/template/test_data.sh`
-Expected: FAIL (no `.chezmoiroot`/config yet; chezmoi errors or wrong output).
+Expected: FAIL (no `.chezmoiroot`/config template yet; `chez_init` or the probe errors).
 
 - [ ] **Step 3: Create `.chezmoiroot`**
 
@@ -89,7 +125,8 @@ home
 - [ ] **Step 4: Create `home/.chezmoi.toml.tmpl`**
 
 ```
-{{- $role := promptStringOnce . "machineRole" "Machine role (personal/work/ephemeral)" "personal" -}}
+{{- /* prompt text intentionally equals the data path so --promptString machineRole=... keys correctly */ -}}
+{{- $role := promptStringOnce . "machineRole" "machineRole" "personal" -}}
 {{- $ephemeral := or (env "CI" | not | not) (env "REMOTE_CONTAINERS" | not | not) (env "CODESPACES" | not | not) -}}
 {{- if eq $role "ephemeral" }}{{ $ephemeral = true }}{{ end -}}
 {{- $osrelease := lower (output "sh" "-c" "cat /proc/sys/kernel/osrelease 2>/dev/null || true") -}}
@@ -132,13 +169,13 @@ Expected: PASS
 
 - [ ] **Step 7: Verify chezmoi accepts the source**
 
-Run: `chezmoi --source home execute-template --init --promptString machineRole=personal '{{ .machineRole }}'`
+Run: `bash -c '. tests/lib.sh && chez_tmpl "$(chez_init personal)" "{{ .machineRole }}"'` (from the repo root)
 Expected: prints `personal`, no error.
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add .chezmoiroot home/.chezmoi.toml.tmpl home/.chezmoidata.yaml tests/template/test_data.sh
+git add .chezmoiroot home/.chezmoi.toml.tmpl home/.chezmoidata.yaml tests/lib.sh tests/template/test_data.sh
 git commit -m "feat(chezmoi): add source root, data model, and target detection"
 ```
 
@@ -162,9 +199,9 @@ git commit -m "feat(chezmoi): add source root, data model, and target detection"
 #!/usr/bin/env bash
 set -euo pipefail
 here="$(cd "$(dirname "$0")/../.." && pwd)"
+. "$here/tests/lib.sh"
 dest="$(mktemp -d)"
-CHEZMOI_AGE_KEY=dummy chezmoi apply --source "$here/home" --destination "$dest" \
-    --init --promptString machineRole=personal --force >/dev/null 2>&1 || true
+chez_apply "$(chez_init personal)" "$dest" >/dev/null 2>&1 || true
 for f in aliases exports functions; do
     [ -f "$dest/.config/shell/$f.sh" ] || { echo "FAIL: missing $f.sh"; exit 1; }
 done
@@ -222,9 +259,9 @@ git commit -m "feat(chezmoi): manage shell aliases/exports/functions under ~/.co
 #!/usr/bin/env bash
 set -euo pipefail
 here="$(cd "$(dirname "$0")/../.." && pwd)"
+. "$here/tests/lib.sh"
 # Ephemeral render must NOT contain interactive prompt (PS1) heavy blocks guarded off.
-out="$(CHEZMOI_AGE_KEY=dummy chezmoi execute-template --init --promptString machineRole=ephemeral \
-    --source "$here/home" < home/dot_bashrc.tmpl 2>/dev/null)"
+out="$(chez_render "$(chez_init ephemeral)" "$here/home/dot_bashrc.tmpl")"
 echo "$out" | grep -q '\.config/shell/aliases.sh' || { echo "FAIL: aliases not sourced"; exit 1; }
 echo "$out" | grep -q 'SDKMAN_DIR' || { echo "FAIL: sdkman block missing"; exit 1; }
 echo "PASS"
@@ -353,8 +390,8 @@ git commit -m "feat(chezmoi): template zshrc/bashrc sourcing ~/.config/shell"
 #!/usr/bin/env bash
 set -euo pipefail
 here="$(cd "$(dirname "$0")/../.." && pwd)"
-render() { CHEZMOI_AGE_KEY=dummy chezmoi execute-template --init --promptString "machineRole=$1" \
-    --source "$here/home" < home/dot_gitconfig.tmpl 2>/dev/null; }
+. "$here/tests/lib.sh"
+render() { chez_render "$(chez_init "$1")" "$here/home/dot_gitconfig.tmpl"; }
 p="$(render personal)"
 echo "$p" | grep -q "jdwillmsen@gmail.com" || { echo "FAIL: personal email"; exit 1; }
 echo "$p" | grep -q "signingkey = 80F11F099D474F1F" || { echo "FAIL: signing key"; exit 1; }
@@ -471,10 +508,10 @@ git commit -m "feat(chezmoi): template gitconfig identity and per-OS credential 
 set -euo pipefail
 here="$(cd "$(dirname "$0")/../.." && pwd)"
 # Existing file has a user theme + a user-overridden model; script must keep both, add statusLine.
+# The modify script contains no template directives, so running it directly with the
+# current file content on stdin is byte-faithful to what chezmoi executes.
 existing='{"theme":"light","model":"opus"}'
-out="$(printf '%s' "$existing" | CHEZMOI_AGE_KEY=dummy chezmoi execute-template --init \
-    --promptString machineRole=personal --source "$here/home" \
-    < home/private_dot_claude/modify_settings.json.tmpl 2>/dev/null)"
+out="$(printf '%s' "$existing" | bash "$here/home/private_dot_claude/modify_settings.json.tmpl")"
 echo "$out" | python3 -c 'import json,sys; d=json.load(sys.stdin); \
  assert d["theme"]=="light", "user theme lost"; \
  assert d["model"]=="opus", "user model overwritten"; \
@@ -571,9 +608,8 @@ status_line = ["old"]
 
 [other]
 x = 1'
-out="$(printf '%s' "$existing" | CHEZMOI_AGE_KEY=dummy chezmoi execute-template --init \
-    --promptString machineRole=personal --source "$here/home" \
-    < home/private_dot_codex/modify_config.toml 2>/dev/null)"
+# Plain modify script (no template directives) — run directly, stdin = current file.
+out="$(printf '%s' "$existing" | bash "$here/home/private_dot_codex/modify_config.toml")"
 echo "$out" | grep -q 'model-with-reasoning' || { echo "FAIL: status_line not set"; exit 1; }
 echo "$out" | grep -q '\[other\]' || { echo "FAIL: other section lost"; exit 1; }
 echo "$out" | grep -c 'status_line' | grep -qx 1 || { echo "FAIL: duplicate status_line"; exit 1; }
@@ -665,12 +701,13 @@ Record the `age1...` recipient for Step 3.
 #!/usr/bin/env bash
 set -euo pipefail
 here="$(cd "$(dirname "$0")/../.." && pwd)"
-# CI path: env var present → config template must select env-provided key, not pass.
-out="$(CHEZMOI_AGE_KEY='AGE-SECRET-KEY-TEST' CI=1 chezmoi execute-template --init \
-    --promptString machineRole=ephemeral --source "$here/home" \
-    '{{ (include "key-source-probe") }}' 2>/dev/null || true)"
+# CI path: env key present → rendered config must point identity at a temp key file.
+# Rendering the config template itself via stdin is the chezmoi-documented pattern.
+out="$(CHEZMOI_AGE_KEY='AGE-SECRET-KEY-TEST' RUNNER_TEMP="$(mktemp -d)" chezmoi execute-template --init \
+    --promptString machineRole=ephemeral < "$here/home/.chezmoi.toml.tmpl")"
+echo "$out" | grep -q 'chezmoi-age-key.txt' || { echo "FAIL: env key not wired to temp identity"; exit 1; }
 # Placeholder recipient must be gone.
-grep -q 'age1PLACEHOLDER' home/.chezmoi.toml.tmpl && { echo "FAIL: placeholder recipient remains"; exit 1; }
+grep -q 'age1PLACEHOLDER' "$here/home/.chezmoi.toml.tmpl" && { echo "FAIL: placeholder recipient remains"; exit 1; }
 echo "PASS"
 ```
 
@@ -792,8 +829,8 @@ git commit -m "feat(chezmoi): install TPM via run_once script"
 #!/usr/bin/env bash
 set -euo pipefail
 here="$(cd "$(dirname "$0")/../.." && pwd)"
-rendered="$(CHEZMOI_AGE_KEY=dummy chezmoi execute-template --init --promptString machineRole=personal \
-    --source "$here/home" < home/run_onchange_after_20-build-claude-status.sh.tmpl 2>/dev/null)"
+. "$here/tests/lib.sh"
+rendered="$(chez_render "$(chez_init personal)" "$here/home/run_onchange_after_20-build-claude-status.sh.tmpl")"
 echo "$rendered" | shellcheck -s bash - 
 echo "$rendered" | grep -q 'go build' || { echo "FAIL: no go build"; exit 1; }
 # onchange hash line must reference the Go source so edits retrigger.
@@ -857,8 +894,9 @@ git commit -m "feat(chezmoi): build claude-status binary via run_onchange script
 #!/usr/bin/env bash
 set -euo pipefail
 here="$(cd "$(dirname "$0")/../.." && pwd)"
-render() { CHEZMOI_AGE_KEY=dummy chezmoi execute-template --init --promptString machineRole=personal \
-    --source "$here/home" < "$1" 2>/dev/null; }
+. "$here/tests/lib.sh"
+cfg="$(chez_init personal)"
+render() { chez_render "$cfg" "$here/$1"; }
 mcp="$(render home/run_onchange_30-install-claude-mcp.sh.tmpl)"
 echo "$mcp" | shellcheck -s bash -
 echo "$mcp" | grep -q 'mcp.atlassian.com' || { echo "FAIL: atlassian url missing"; exit 1; }
@@ -1026,16 +1064,15 @@ LICENSE
 #!/usr/bin/env bash
 set -euo pipefail
 repo="$(cd "$(dirname "$0")/.." && pwd)"
+. "$repo/tests/lib.sh"
 
 # 1. Old installer into a fake HOME.
 old_home="$(mktemp -d)"
 HOME="$old_home" bash "$repo/install.sh" >/dev/null 2>&1 || true
 
-# 2. chezmoi apply into a fresh fake HOME.
+# 2. chezmoi apply into a fresh fake HOME (two-phase sandboxed init via harness).
 new_home="$(mktemp -d)"
-CHEZMOI_AGE_KEY="${CHEZMOI_AGE_KEY:-dummy}" chezmoi apply \
-    --source "$repo/home" --destination "$new_home" \
-    --init --promptString machineRole=personal --force >/dev/null 2>&1
+chez_apply "$(chez_init personal)" "$new_home" >/dev/null 2>&1
 
 # 3. Compare the file *sets* (names + relative paths), ignoring known-intentional diffs.
 ( cd "$old_home" && find . -type f | sort ) > "$old_home/.manifest"
@@ -1132,8 +1169,11 @@ jobs:
       - name: chezmoi verify + doctor
         run: |
           export PATH="$HOME/.local/bin:$PATH"
-          chezmoi doctor --source home || true
-          chezmoi verify --source home --init --promptString machineRole=ephemeral || true
+          chezmoi doctor --source . || true
+          tmp="$(mktemp -d)"
+          chezmoi init --source . --destination "$tmp/dest" --config "$tmp/chezmoi.toml" \
+            --promptString machineRole=ephemeral --no-tty
+          chezmoi verify --source . --config "$tmp/chezmoi.toml" --destination "$tmp/dest" || true
       - name: parity gate
         run: CHEZMOI_AGE_KEY=dummy bash tests/parity.sh
 ```
@@ -1186,9 +1226,9 @@ git rm -r install.sh features lib shell zshrc bashrc gitconfig gitignore_global 
 #!/usr/bin/env bash
 set -euo pipefail
 repo="$(cd "$(dirname "$0")/.." && pwd)"
+. "$repo/tests/lib.sh"
 h="$(mktemp -d)"
-CHEZMOI_AGE_KEY=dummy chezmoi apply --source "$repo/home" --destination "$h" \
-    --init --promptString machineRole=personal --force
+chez_apply "$(chez_init personal)" "$h"
 for f in .bashrc .zshrc .gitconfig .config/shell/aliases.sh .claude/settings.json; do
     [ -f "$h/$f" ] || { echo "FAIL: missing $f"; exit 1; }
 done

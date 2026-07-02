@@ -15,3 +15,13 @@ encryption = "age"
     machineRole = {{ $role | quote }}
     isEphemeral = {{ $ephemeral }}
     isWSL = {{ $isWSL }}
+
+{{- if eq .chezmoi.os "windows" }}
+
+{{- /* Windows cannot exec shebang scripts; route modify_ script temp files
+       (named after their target's extension) through bash. */}}
+[interpreters.json]
+    command = "bash"
+[interpreters.toml]
+    command = "bash"
+{{- end }}

@@ -14,7 +14,10 @@ DEFAULTS='{
 # itself occupy stdin as the script source, leaving nothing for the process
 # to read the existing file from. Passing both blobs as argv sidesteps that.
 EXISTING="$(cat)"
-python3 -c '
+# Windows ships a python3 Store-stub that fails on exec; probe for a real one.
+PY=python3
+"$PY" -c "" >/dev/null 2>&1 || PY=python
+"$PY" -c '
 import json, sys
 defaults = json.loads(sys.argv[1])
 raw = sys.argv[2].strip()

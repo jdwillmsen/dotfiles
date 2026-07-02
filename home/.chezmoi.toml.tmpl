@@ -5,11 +5,21 @@
 {{- $osrelease := lower (output "sh" "-c" "cat /proc/sys/kernel/osrelease 2>/dev/null || true") -}}
 {{- $isWSL := or (contains "microsoft" $osrelease) (contains "wsl" $osrelease) -}}
 
+{{- /* CI has no `pass`/on-disk identity; it exports CHEZMOI_AGE_KEY instead.
+       run_before_00-write-ci-age-key.sh writes that value to this same path
+       before apply, so the identity file exists by the time decryption runs.
+       (chezmoi's `writeToStdout|out2` helper form for doing this inline is
+       not available in this chezmoi version, hence the separate script.) */ -}}
+{{- $ageKeyFile := "~/.config/chezmoi/key.txt" -}}
+{{- if env "CHEZMOI_AGE_KEY" -}}
+{{-   $ageKeyFile = printf "%s/chezmoi-age-key.txt" (env "RUNNER_TEMP" | default "/tmp") -}}
+{{- end -}}
+
 encryption = "age"
 
 [age]
-    identity = "~/.config/chezmoi/key.txt"
-    recipient = "age1PLACEHOLDER_REPLACED_IN_TASK7"
+    identity = {{ $ageKeyFile | quote }}
+    recipient = "age10wy5anvd0624nqf90v46yc0f5qjwjkxvu8ut2rrfjquwrwl68sqs0sh2r4"
 
 [data]
     machineRole = {{ $role | quote }}
@@ -19,9 +29,12 @@ encryption = "age"
 {{- if eq .chezmoi.os "windows" }}
 
 {{- /* Windows cannot exec shebang scripts; route modify_ script temp files
-       (named after their target's extension) through bash. */}}
+       (named after their target's extension) through bash. Also covers
+       run_ scripts (e.g. run_before_00-write-ci-age-key.sh) by .sh extension. */}}
 [interpreters.json]
     command = "bash"
 [interpreters.toml]
+    command = "bash"
+[interpreters.sh]
     command = "bash"
 {{- end }}

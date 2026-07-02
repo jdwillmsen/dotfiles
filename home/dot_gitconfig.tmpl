@@ -1,8 +1,15 @@
+{{- /* `include` resolves paths relative to the source dir, not the applied
+       destination — it can't read the plaintext target this decrypts to.
+       Decrypt the source .age file directly instead. */ -}}
+{{- $workIdentity := dict -}}
+{{- if eq .machineRole "work" -}}
+{{-   $workIdentity = include "dot_config/private_git/encrypted_work-identity.age" | decrypt | fromYaml -}}
+{{- end -}}
 [user]
     name = Jake Willmsen
 {{- if eq .machineRole "work" }}
-    email = {{ (include "~/.config/git/work-identity" | fromYaml).email | default "jdwillmsen@gmail.com" }}
-    signingkey = {{ (include "~/.config/git/work-identity" | fromYaml).signingkey | default "80F11F099D474F1F" }}
+    email = {{ $workIdentity.email | default "jdwillmsen@gmail.com" }}
+    signingkey = {{ $workIdentity.signingkey | default "80F11F099D474F1F" }}
 {{- else }}
     email = jdwillmsen@gmail.com
     signingkey = 80F11F099D474F1F

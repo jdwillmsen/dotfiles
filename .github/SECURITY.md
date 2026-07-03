@@ -18,7 +18,7 @@ You'll receive a response within **72 hours**.
 
 This repo contains shell configs and a Go binary. Things worth reporting:
 
-- Command injection in `install.sh` or shell functions
+- Command injection in `home/run_*` scripts or shell functions
 - The `claude-status` binary reading or writing sensitive data unexpectedly
 - Hardcoded credentials or tokens accidentally committed
 

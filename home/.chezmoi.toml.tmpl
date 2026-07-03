@@ -1,0 +1,42 @@
+{{- /* prompt text intentionally equals the data path so --promptString machineRole=... keys correctly */ -}}
+{{- $role := promptStringOnce . "machineRole" "machineRole" "personal" -}}
+{{- $ephemeral := or (env "CI" | not | not) (env "REMOTE_CONTAINERS" | not | not) (env "CODESPACES" | not | not) -}}
+{{- if eq $role "ephemeral" }}{{ $ephemeral = true }}{{ end -}}
+{{- $osrelease := lower (output "sh" "-c" "cat /proc/sys/kernel/osrelease 2>/dev/null || true") -}}
+{{- $isWSL := or (contains "microsoft" $osrelease) (contains "wsl" $osrelease) -}}
+
+{{- /* CI has no `pass`/on-disk identity; it exports CHEZMOI_AGE_KEY instead.
+       run_before_00-write-ci-age-key.sh writes that value to this same path
+       before apply, so the identity file exists by the time decryption runs.
+       (chezmoi's `writeToStdout|out2` helper form for doing this inline is
+       not available in this chezmoi version, hence the separate script.) */ -}}
+{{- $ageKeyFile := "~/.config/chezmoi/key.txt" -}}
+{{- if env "CHEZMOI_AGE_KEY" -}}
+{{-   $ageKeyFile = printf "%s/chezmoi-age-key.txt" (env "RUNNER_TEMP" | default "/tmp") -}}
+{{- end -}}
+
+encryption = "age"
+
+[age]
+    identity = {{ $ageKeyFile | quote }}
+    recipient = "age10wy5anvd0624nqf90v46yc0f5qjwjkxvu8ut2rrfjquwrwl68sqs0sh2r4"
+
+[data]
+    machineRole = {{ $role | quote }}
+    isEphemeral = {{ $ephemeral }}
+    isWSL = {{ $isWSL }}
+
+{{- /* Applied on every OS, not just Windows: chezmoi resolves a modify_
+       script's *destination* name by stripping whatever extension matches
+       an interpreters key, so the key set must be identical everywhere or
+       the same source file name would resolve to a different target path
+       per OS. modify_settings.json.json.tmpl / modify_config.toml.toml
+       carry a doubled extension for exactly this reason — the first
+       "json"/"toml" is the real target extension, the second is the
+       interpreter-selection marker that this stripping consumes. */}}
+[interpreters.json]
+    command = "bash"
+[interpreters.toml]
+    command = "bash"
+[interpreters.sh]
+    command = "bash"

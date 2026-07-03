@@ -45,14 +45,14 @@ chore/upgrade-go-module
 
 ## Adding Aliases or Functions
 
-- **Aliases** go in `shell/aliases.sh` — group them with the related block (git, docker, kubectl, system)
-- **Functions** go in `shell/functions.sh` — keep each function focused and self-contained
-- **Env vars / PATH changes** go in `shell/exports.sh`
+- **Aliases** go in `home/dot_config/shell/aliases.sh` — group them with the related block (git, docker, kubectl, system)
+- **Functions** go in `home/dot_config/shell/functions.sh` — keep each function focused and self-contained
+- **Env vars / PATH changes** go in `home/dot_config/shell/exports.sh`
 
 Test locally before opening a PR:
 
 ```bash
-# Re-source to pick up changes
+chezmoi apply
 source ~/.zshrc   # or ~/.bashrc
 
 # Then exercise the alias or function

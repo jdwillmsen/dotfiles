@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Defaults contributed by dotfiles; existing on-disk (runtime) values always win.
+DEFAULTS='{
+  "model": "fable",
+  "statusLine": { "type": "command", "command": "claude-status" },
+  "theme": "dark",
+  "cleanupPeriodDays": 90,
+  "skipDangerousModePermissionPrompt": true,
+  "skipAutoPermissionPrompt": true
+}'
+# chezmoi feeds the current file on our stdin. That stdin is captured here
+# (not left connected to python3) because a `python3 - <<PYEOF` heredoc would
+# itself occupy stdin as the script source, leaving nothing for the process
+# to read the existing file from. Passing both blobs as argv sidesteps that.
+EXISTING="$(cat)"
+# Windows ships a python3 Store-stub that fails on exec; probe for a real one.
+PY=python3
+"$PY" -c "" >/dev/null 2>&1 || PY=python
+"$PY" -c '
+import json, sys
+defaults = json.loads(sys.argv[1])
+raw = sys.argv[2].strip()
+existing = json.loads(raw) if raw else {}
+def merge(base, override):
+    out = dict(base)
+    for k, v in override.items():
+        if isinstance(out.get(k), dict) and isinstance(v, dict):
+            out[k] = merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+# base=defaults, override=existing -> existing keys win, defaults fill gaps
+merged = merge(defaults, existing)
+json.dump(merged, sys.stdout, indent=2)
+sys.stdout.write("\n")
+' "$DEFAULTS" "$EXISTING"

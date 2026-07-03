@@ -1,58 +1,56 @@
 # dotfiles
 
-Personal development environment for Jake Willmsen — shell, git, and Claude Code, installable on any machine or devcontainer with a single script.
+Personal development environment for Jake Willmsen — shell, git, and Claude Code, managed with [chezmoi](https://www.chezmoi.io/) and installable on any machine or devcontainer with a single command.
 
 ## Install
 
 ```bash
-git clone https://github.com/jdwillmsen/dotfiles.git ~/dotfiles
-~/dotfiles/install.sh
+sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply jdwillmsen
 ```
 
-Each feature checks its own requirements and skips cleanly if they aren't met — the install never fails because of a missing tool.
+You'll be prompted for a machine role (see Targets below). Re-running `chezmoi apply` is always safe — templates and scripts are idempotent.
+
+## Secrets
+
+Encrypted values (git work identity, etc.) are handled via age + pass. See [`docs/secrets.md`](docs/secrets.md) for key generation, storage, and CI setup.
+
+## Targets
+
+The source tree templates itself per machine, selected by a `machineRole` prompt at `init` time:
+
+| Role | What differs |
+|------|-------------|
+| `personal` | Default identity, no extra work-only git config. |
+| `work` | Work git identity + credential config layered in (`home/dot_gitconfig.tmpl`). |
+| `ephemeral` | Auto-detected in CI/devcontainers/Codespaces (`CI`, `REMOTE_CONTAINERS`, `CODESPACES` env vars); also selectable explicitly. |
+
+Other data derived automatically at init: `isWSL` (Windows Subsystem for Linux detection) gates WSL-specific templating.
 
 ## Structure
 
 ```
 dotfiles/
-├── features/          # one script per feature — the install unit
-├── lib/utils.sh       # shared helpers sourced by every feature
-├── shell/             # shell config: aliases, exports, functions
-├── claude/            # Claude Code: settings, CLAUDE.md, commands, hooks
-├── codex/             # Codex: global AGENTS.md, status line, and personal skills
-├── scripts/           # compiled tools (claude-status Go binary)
-├── gitconfig          # git identity, aliases, sane defaults
-├── gitignore_global   # global gitignore
-├── zshrc / bashrc     # shell entry points — source shell/
-└── install.sh         # runs each feature in order
+├── .chezmoiroot          # points chezmoi at home/ as the source root
+├── home/                 # chezmoi source state — everything below is templated/managed
+│   ├── .chezmoi.toml.tmpl    # machineRole/isEphemeral/isWSL data + age config
+│   ├── dot_*.tmpl            # ~/.bashrc, ~/.zshrc, ~/.gitconfig, ...
+│   ├── dot_config/           # ~/.config/shell, ~/.config/git (encrypted work identity), ...
+│   ├── private_dot_claude/   # ~/.claude — settings (merged), CLAUDE.md, commands, hooks
+│   ├── private_dot_codex/    # ~/.codex — AGENTS.md, config.toml, skills
+│   └── run_*                # side-effect scripts (TPM, Go build, MCP, plugins, rtk)
+├── scripts/              # compiled tools (claude-status Go binary source)
+├── tests/                # template unit tests, script unit tests, smoke test
+└── docs/                 # secrets, tmux, and design docs
 ```
 
-## Features
+## Testing
 
-| Feature | What it installs | Requires |
-|---------|-----------------|----------|
-| `shell` | `~/.zshrc`, `~/.bashrc` → `shell/` aliases, exports, functions | — |
-| `git` | `~/.gitconfig`, `~/.gitignore_global` | `git` |
-| `claude-status` | Go status line binary + `statusLine` in `~/.claude/settings.json` | `go`, `python3` |
-| `claude` | Settings merge, CLAUDE.md, slash commands, hooks → `~/.claude/` | `python3` |
-| `claude-mcp` | MCP server configs (Atlassian/Rovo) → `~/.claude/mcp.json` | `node`, `python3` |
-| `claude-plugins` | Native Claude Code plugins (Caveman) via `claude plugin` | `git`, `claude` |
-| `claude-rtk` | RTK output-filtering CLI | `cargo` or `brew` |
-| `claude-skills-personal` | Personal Claude skills → `~/.claude/skills/` | — |
-| `claude-plugins-personal` | Personal Claude plugins → `~/.claude/plugins/` | — |
-| `codex` | Global Codex instructions + enriched TUI status line → `${CODEX_HOME:-~/.codex}/` | `python3` for status line |
-| `codex-skills-personal` | Personal Codex skills → `${CODEX_HOME:-~/.codex}/skills/` | — |
-| `tmux` | `~/.tmux.conf` | `tmux` |
-
-See each `features/*.sh` for exactly what is linked and where.
-
-## Adding a feature
-
-1. Create `features/<name>.sh` — source `lib/utils.sh`, call `require` for any dependencies, use `symlink` to link files
-2. Call `run_feature <name>` in `install.sh`
-3. Add CI verification steps in `.github/workflows/ci.yml`
-
-The feature will skip gracefully if its requirements aren't present; it will never break the overall install.
+```bash
+bash tests/smoke.sh                                    # chezmoi apply into a temp HOME, assert key files
+for t in tests/template/*.sh; do bash "$t"; done       # template rendering unit tests
+for t in tests/scripts/*.sh; do bash "$t"; done        # run_* script unit tests
+find home -name 'run_*.sh' -exec shellcheck -s bash {} +
+```
 
 ## Claude Code status line
 
@@ -66,4 +64,4 @@ cd scripts/claude-status && go build -o ~/.local/bin/claude-status .
 
 ## GitHub Codespaces
 
-Add this repo under **Settings → Codespaces → Dotfiles**. Codespaces will clone it and run `install.sh` automatically on every new environment.
+Add this repo under **Settings → Codespaces → Dotfiles**. Codespaces clones it and applies chezmoi automatically on every new environment (`ephemeral` role, auto-detected via `CODESPACES`).

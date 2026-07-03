@@ -1,0 +1,6 @@
+{{ if .isEphemeral }}
+.tmux.conf
+.tmux/**
+run_once_10-install-tpm.sh
+run_once_40-install-rtk.sh
+{{ end }}

@@ -5,146 +5,20 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Manual escape hatch: push/pull_request are scoped to main (Task 14 opens
+  # the cutover PR), but feature-branch work still needs to validate CI green
+  # before that PR exists.
+  workflow_dispatch:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  shell:
-    name: Shell syntax
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6.0.3
-
-      - name: Check shell syntax
-        run: |
-          bash -n install.sh
-          bash -n lib/utils.sh
-          bash -n features/shell.sh
-          bash -n features/git.sh
-          bash -n features/claude-status.sh
-          bash -n features/claude.sh
-          bash -n features/claude-mcp.sh
-          bash -n features/claude-plugins.sh
-          bash -n features/claude-rtk.sh
-          bash -n features/claude-skills-personal.sh
-          bash -n features/claude-plugins-personal.sh
-          bash -n features/codex.sh
-          bash -n features/codex-skills-personal.sh
-          bash -n features/tmux.sh
-          bash -n shell/exports.sh
-          bash -n shell/aliases.sh
-          bash -n shell/functions.sh
-          bash -n bashrc
-          bash -n zshrc
-
-      - name: Install shellcheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
-
-      - name: Lint shell scripts
-        # SC1091: sourced files resolve via runtime env vars ($DOTFILES, etc.)
-        #   and cannot be followed statically.
-        # zshrc is genuine zsh (setopt, $fg[...], autoload) with no shellcheck
-        #   dialect; bash -n above covers it.
-        run: |
-          shellcheck --exclude=SC1091 \
-            install.sh \
-            lib/*.sh \
-            features/*.sh \
-            shell/*.sh \
-            claude/hooks/*.sh
-          shellcheck --shell=bash --exclude=SC1091 bashrc
-
-  install:
-    name: Install script
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6.0.3
-
-      - name: Set up Go
-        uses: actions/setup-go@v6.4.0
-        with:
-          go-version-file: scripts/claude-status/go.mod
-          cache: false
-
-      - name: Run install.sh
-        run: bash install.sh
-
-      - name: Verify shell feature — symlinks exist
-        run: |
-          test -L ~/.zshrc
-          test -L ~/.bashrc
-
-      - name: Verify git feature — symlinks exist
-        run: |
-          test -L ~/.gitconfig
-          test -L ~/.gitignore_global
-
-      - name: Verify claude-status feature — binary built
-        run: test -x ~/.local/bin/claude-status
-
-      - name: Verify claude-status feature — statusLine injected
-        run: grep -q '"statusLine"' ~/.claude/settings.json
-
-      - name: Verify claude feature — CLAUDE.md symlinked
-        run: test -L ~/.claude/CLAUDE.md
-
-      - name: Verify claude feature — commands symlinked
-        run: |
-          test -L ~/.claude/commands/standup.md
-          test -L ~/.claude/commands/explain.md
-          test -L ~/.claude/commands/pr.md
-
-      - name: Verify codex feature — AGENTS.md symlinked
-        run: test -L ~/.codex/AGENTS.md
-
-      - name: Verify codex feature — status line configured
-        run: grep -q 'status_line = \["model-with-reasoning", "context-remaining", "git-branch", "current-dir"\]' ~/.codex/config.toml
-
-      - name: Verify install is idempotent
-        run: bash install.sh
-
-  feature-isolation:
-    name: Feature isolation
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6.0.3
-
-      - name: Shell feature installs without git or Go
-        run: bash features/shell.sh "$PWD"
-
-      - name: Git feature skips when git is unavailable
-        run: |
-          PATH_BACKUP="$PATH"
-          export PATH="$(echo "$PATH" | tr ':' '\n' | grep -v '/usr/bin$\|/bin$' | tr '\n' ':')"
-          bash features/git.sh "$PWD" || true
-          export PATH="$PATH_BACKUP"
-
-      - name: Claude feature skips when python3 is unavailable
-        run: |
-          bash -c '
-            require() { exit 0; }
-            source lib/utils.sh
-            # Verify it exits 0 even on missing deps
-          '
-          true
-
-      - name: Each feature exits 0 regardless of environment
-        run: |
-          bash features/shell.sh                "$PWD" && echo "shell: OK"
-          bash features/git.sh                  "$PWD" && echo "git: OK"
-          bash features/claude.sh               "$PWD" && echo "claude: OK"
-          bash features/claude-skills-personal.sh  "$PWD" && echo "claude-skills-personal: OK"
-          bash features/claude-plugins-personal.sh "$PWD" && echo "claude-plugins-personal: OK"
-          bash features/codex.sh "$PWD" && echo "codex: OK"
-          bash features/codex-skills-personal.sh "$PWD" && echo "codex-skills-personal: OK"
-          bash features/tmux.sh                 "$PWD" && echo "tmux: skips without tmux binary"
-
   claude-status:
     name: claude-status build and test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6.0.3
+      - uses: actions/checkout@v7.0.0
 
       - name: Set up Go
         uses: actions/setup-go@v6.4.0
@@ -186,3 +60,59 @@ jobs:
               "used_percentage": 5.0
             }
           }' | ~/.local/bin/claude-status | grep -q '⬡'
+
+  chezmoi:
+    name: chezmoi verify + smoke
+    runs-on: ubuntu-latest
+    env:
+      CHEZMOI_AGE_KEY: ${{ secrets.CHEZMOI_AGE_KEY }}
+    steps:
+      - uses: actions/checkout@v7.0.0
+
+      - name: Install chezmoi
+        run: sh -c "$(curl -fsLS get.chezmoi.io)" -- -b "$HOME/.local/bin"
+
+      - name: Template unit tests
+        run: for t in tests/template/*.sh; do bash "$t"; done
+
+      - name: Script unit tests
+        run: for t in tests/scripts/*.sh; do bash "$t"; done
+
+      - name: chezmoi doctor
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          chezmoi doctor --source . || true
+
+      - name: chezmoi init + verify
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          # tests/lib.sh is the proven two-phase init harness: chezmoi's
+          # `execute-template --init` skips .chezmoi.toml.tmpl's [data], and
+          # --promptString keys on the prompt TEXT (here "machineRole", by
+          # deliberate template design — see home/.chezmoi.toml.tmpl), not
+          # the data path. Reuse chez_init rather than re-deriving this.
+          # shellcheck disable=SC1091
+          . tests/lib.sh
+          cfg="$(chez_init ephemeral)"
+          dest="$(mktemp -d)"
+          # `chezmoi verify` reports drift against the *current* destination —
+          # it never applies anything itself. Verifying a still-empty dest
+          # would trivially fail (every managed file "differs" from nothing),
+          # so apply once into the sandbox first; verify then confirms apply
+          # and verify agree on the resulting state.
+          chez_apply "$cfg" "$dest"
+          # --exclude=scripts: run_before_00-write-ci-age-key.sh isn't
+          # run_once_, so chezmoi has no persisted "already applied" state
+          # for it — diff/verify always reports it as a pending "new file"
+          # regardless of destination state. That's expected for any
+          # always-run script, not real drift, so scripts are out of scope
+          # for this file-state check (tests/scripts/*.sh cover the scripts
+          # themselves).
+          chezmoi verify --source "$CHEZ_SRC" --config "$cfg" --destination "$dest" --exclude=scripts
+
+      - name: Smoke test — chezmoi apply into temp HOME
+        # CHEZMOI_AGE_KEY is already the real secret from the job env (not a
+        # dummy): tests/smoke.sh's chez_apply does a real full apply that
+        # decrypts encrypted_ source files, and a bad key would abort the
+        # whole apply on first decrypt failure.
+        run: bash tests/smoke.sh

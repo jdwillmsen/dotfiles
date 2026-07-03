@@ -1,0 +1,6 @@
+# Force LF regardless of core.autocrlf: Windows checkouts with autocrlf=true
+# otherwise convert *.sh to CRLF, which trips shellcheck's line-continuation
+# parser (spurious SC2215 on backslash-continued commands) without the
+# committed blob actually having a bug.
+*.sh text eol=lf
+*.tmpl text eol=lf

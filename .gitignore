@@ -5,3 +5,4 @@
 # Compiled binaries (built by run_onchange_after_20-build-claude-status.sh.tmpl into ~/.local/bin)
 scripts/claude-status/claude-status
 .aider*
+.claude/settings.local.json

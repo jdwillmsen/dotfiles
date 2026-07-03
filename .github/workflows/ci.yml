@@ -230,20 +230,15 @@ jobs:
           # would trivially fail (every managed file "differs" from nothing),
           # so apply once into the sandbox first; verify then confirms apply
           # and verify agree on the resulting state.
-          set +e
-          chez_apply "$cfg" "$dest"; apply_rc=$?
-          chezmoi verify --source "$CHEZ_SRC" --config "$cfg" --destination "$dest"; verify_rc=$?
-          set -e
-          echo "apply_rc=$apply_rc verify_rc=$verify_rc"
-          if [ "$apply_rc" -ne 0 ]; then
-            echo "APPLY FAILED"
-            exit 1
-          fi
-          if [ "$verify_rc" -ne 0 ]; then
-            echo "VERIFY FAILED — diff against the applied sandbox:"
-            chezmoi diff --source "$CHEZ_SRC" --config "$cfg" --destination "$dest" || true
-            exit 1
-          fi
+          chez_apply "$cfg" "$dest"
+          # --exclude=scripts: run_before_00-write-ci-age-key.sh isn't
+          # run_once_, so chezmoi has no persisted "already applied" state
+          # for it — diff/verify always reports it as a pending "new file"
+          # regardless of destination state. That's expected for any
+          # always-run script, not real drift, so scripts are out of scope
+          # for this file-state check (tests/scripts/*.sh cover the scripts
+          # themselves).
+          chezmoi verify --source "$CHEZ_SRC" --config "$cfg" --destination "$dest" --exclude=scripts
 
       - name: Parity gate — legacy install.sh vs chezmoi apply
         # CHEZMOI_AGE_KEY is already the real secret from the job env (not the

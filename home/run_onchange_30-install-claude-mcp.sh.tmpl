@@ -3,7 +3,14 @@ set -euo pipefail
 command -v node &>/dev/null || { echo "node not found — skipping MCP"; exit 0; }
 mkdir -p "$HOME/.claude"
 MCP_FILE="$HOME/.claude/mcp.json"
-DESIRED='{{ .mcp | toJson }}'
+# Heredoc, not a quoted shell string: toJson output can contain single or
+# double quotes (e.g. an arg value with an apostrophe), which would
+# otherwise terminate a quoted assignment early. A heredoc with a quoted
+# delimiter takes the content verbatim, so no shell quoting rules apply.
+DESIRED=$(cat <<'CHEZMOI_MCP_JSON'
+{{ .mcp | toJson }}
+CHEZMOI_MCP_JSON
+)
 # Windows ships a python3 Store-stub that fails on exec; probe for a real one.
 PY=python3
 "$PY" -c "" >/dev/null 2>&1 || PY=python

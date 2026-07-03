@@ -1,89 +1,156 @@
-# About Me
+# Global Claude Instructions
 
-I'm Jake Willmsen — a senior polyglot software engineer. My primary stacks:
+## Code Comments — MANDATORY
 
-- **Java / Kotlin** — Spring Boot microservices, Gradle builds
-- **Go** — CLI tools, backend services, performance-sensitive code
-- **Python** — scripting, data work, automation
-- **TypeScript / Node** — Angular frontends, NestJS backends
-- **DevOps / Kubernetes** — Helm, Terraform, GitOps, GKE/EKS
+Stance: **self-documenting code; comment _why_, never _what_.** Per Google Engineering Practices, *Software Engineering at Google* (ch. 8), *Clean Code*.
 
-I work across the full stack but skew backend and platform. I own infra and deployments alongside application code.
+1. **Why, not what.** Code shows _what_. Comments capture intent code can't: trade-offs, business rules, non-obvious constraints, "why this not obvious alternative." Never paraphrase code.
+2. **Clarify code before commenting.** Try better name, smaller function, clearer structure first. Comment only when code can't carry meaning.
+3. **Comment non-obvious — expected:** workarounds (with cause), surprising decisions, `switch` fall-through, intentionally-empty catch blocks, gnarly regex/algorithms, units & invariants, security/concurrency caveats.
+4. **No noise comments.** Delete comments restating code, echoing name, narrating obvious steps.
+5. **Comment rot is enemy.** Comments change with code — stale comment worse than none. Update/delete comments in any touched block. Never comment-out dead code; delete (version control remembers).
+6. **No external references in comments** — issue keys (`JDWLABS-123`, `#123`), ticket/PR URLs, person names. They rot. Traceability goes in **commit messages and PR descriptions**; rationale inline (e.g. "Raised from 512Mi: was OOM-killed under churn"). Applies to all languages/config (YAML, HCL, Dockerfiles, etc.).
+7. **TODO/FIXME:** concrete, actionable — no ticket link. Sparingly.
+8. **Doc comments** (public API) where value beyond signature — contract, intent, usage; keep accurate.
+9. **Match surrounding comment density and idiom.**
 
-# How I Like to Work
+## PR Review Before Merge — MANDATORY
 
-- **Concise by default.** Skip summaries of what you just did — I can read the diff. Get to the point.
-- **No unsolicited refactors.** Fix the thing I asked about. Don't clean up surrounding code unless I ask.
-- **No speculative features.** Don't add error handling, abstractions, or backwards-compat shims for scenarios that don't exist yet.
-- **No filler comments.** Only comment when the *why* is genuinely non-obvious.
-- **Conventional commits.** When asked to commit, use `type(scope): description`. Keep commits atomic: one logical change per commit, with unrelated formatting, refactors, dependency updates, and behavior changes split apart.
-- **Attribute AI-assisted work honestly.** If AI contributed to a commit, disclose that in commit/PR metadata. Use the exact trailer `Co-Authored-By: <agent name> <email>` for visible coauthor attribution, and add Linux-style provenance with `Assisted-by: <agent>:<model> [tools...]` when the agent/model is known. For Codex-assisted commits, prefer `Co-Authored-By: Codex <codex@openai.com>` and `Assisted-by: Codex:<model>` unless the repository defines a different convention. For Claude-assisted commits, prefer `Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>` and `Assisted-by: Claude:Sonnet-4.6`.
-- **Keep attribution out of source by default.** Do not add generated-by banners or provenance comments inside source files, docs, or generated files unless the repository explicitly requires them; commit/PR metadata is the normal place for attribution.
-- **Ask before destructive actions.** Confirm before force-pushing, dropping tables, deleting branches, or anything hard to reverse.
-- **Always work in a worktree, never on the default branch.** For any non-trivial change, create a git worktree on a dedicated feature branch and do the work there. Never commit directly to `main` or a repo's default branch.
+**Never merge a PR without reviewing all of its content first.** Applies to every merge, including admin/bypass merges and your own PRs.
 
-# Editor & Tooling
+Before merging, verify:
+1. **All checks green** — CI, status checks, required contexts. No merging on red or pending.
+2. **Every review suggestion addressed** — read all inline comments, review threads, and bot/security findings (CodeQL, advanced-security, Dependabot, linters). Each must be either fixed in the diff or have an explicit written justification for why it's safe to dismiss. Never merge with an open, unaddressed suggestion.
+3. **Stale vs live** — when a suggestion persists after a fix, confirm it's stale (re-anchored to a new line, alert resolved/closed) and not a fresh finding. Cross-check the code-scanning alerts API (`state=open`), not just the PR comment thread.
+4. **Diff sanity** — read the actual changed lines; confirm they match the PR's stated intent, nothing unintended slipped in.
+5. **Justification recorded** — the PR description (and commit messages) explain *why*, and any dismissed suggestion has its rationale captured.
 
-- Editor: nano (daily), learning neovim
-- Shell: zsh (primary), bash (scripts/CI)
-- Version managers: nvm (Node), pyenv (Python), sdkman (Java/Kotlin)
-- Container runtime: Docker + Compose
-- K8s tooling: kubectl, Helm, k9s
+Only after all of the above: merge. If anything is unaddressed or unclear, fix it or surface it — do not merge.
 
-# Code Preferences
+## Git Worktree Policy — MANDATORY
 
-- Go: standard library first, minimal dependencies, `gofmt` always
-- Java/Kotlin: prefer Kotlin, idiomatic style, avoid raw Java where possible
-- TypeScript: strict mode, no `any`
-- Python: type hints, `black` formatting
-- Shell: `set -euo pipefail`, quote variables, no bashisms in `#!/bin/sh` scripts
+**NEVER work on `main`/`master`.** All feature work, fixes, experiments use git worktrees.
 
-# Code Comments
+### Pre-work Checklist
 
-## Default position: don't add them
+Before touching code:
+1. Run `git branch --show-current` — if `main`/`master`, STOP, create worktree
+2. Check `GIT_DIR` vs `GIT_COMMON_DIR` — if different (not submodule), already in worktree
+3. Invoke `superpowers:using-git-worktrees` skill for isolated workspace setup
 
-The bar for adding a comment is high. Most comments that developers reach for describe *what* the code does — information already present in the code itself. Well-named functions, variables, and types make those comments redundant. Prefer expressing intent in the code; reach for a comment only when the code cannot carry the information.
+### Branch Naming — `feat/<description>`
 
-This is the consensus across Google, Linux kernel, LLVM, Mozilla, and all major style guides. It is not "avoid comments always" — it is "comments must earn their place."
+| Type | Pattern | Example |
+|------|---------|---------|
+| Feature | `feat/<name>` | `feat/auth-jwt` |
+| Bug fix | `fix/<name>` | `fix/null-session` |
+| Chore | `chore/<name>` | `chore/update-deps` |
+| Docs | `docs/<name>` | `docs/api-reference` |
+| Refactor | `refactor/<name>` | `refactor/auth-module` |
 
-## When a comment is required
+### Worktree Location
 
-**Public API documentation.** Every exported / public symbol must have a documentation comment. Users read docs, not implementations. The comment IS the contract — describe what the abstraction does, what it promises, and what callers must know (preconditions, null semantics, units, thread-safety). Use the language-idiomatic format (godoc, docstring, JSDoc, Javadoc, rustdoc, XML doc, etc.). No exceptions.
+Worktrees live in `~/worktrees/<project>/<type>/<name>` — global, outside repo. Repos stay clean. No `.gitignore` entry.
 
-**Non-obvious invariants and preconditions.** Units of measure, inclusive vs. exclusive boundaries, null semantics, expected value ranges, memory ownership, thread-safety constraints. Type systems rarely express these; a comment does.
+```
+~/worktrees/
+└── myapp/
+    ├── feat/auth-jwt/       � worktree
+    └── fix/null-session/    � worktree
 
-**Why, not what.** When the code does something counter-intuitive, rejects a simpler approach, encodes a business rule, or satisfies a non-obvious constraint — say why. Future maintainers (including you) will ask "why is this like this?" before asking "what does this do?"
+/c/repos/myapp/              � main checkout (untouched)
+```
 
-**Workarounds and hacks.** Comment every intentional hack with: what it works around, a reference (issue, ticket, external bug), and the condition under which it can be removed. This prevents well-meaning future engineers from "fixing" it.
+Override location: `export WT_BASE=~/worktrees` in `.bashrc` (already default).
 
-## What never belongs in source code
+### Creation Flow
 
-**Restating the code.** `// increment x` before `x++` is noise. `// loop through users` before `for user in users` is noise. If the code is readable, the comment adds nothing and will eventually contradict.
+```bash
+# Preferred — use helper (handles dir creation):
+gwta auth-jwt          # → ~/worktrees/myapp/feat/auth-jwt
+gwta fix/null-session  # → ~/worktrees/myapp/fix/null-session
 
-**Commented-out code.** Delete it. Version control preserves history — `git log` and `git show` retrieve anything deleted. Commented-out code rots within weeks because the surrounding code drifts without it. It signals discomfort with version control, not caution.
+# Or native tool if available:
+EnterWorktree feat/<name>
 
-**Changelog and journal entries.** `// 2024-03-15 jdw: fixed race condition` belongs in a commit message and `git blame`, not source files. Source code is not a diary.
+# Manual fallback:
+git worktree add ~/worktrees/<project>/feat/<name> -b feat/<name>
+```
 
-**TODOs without an owner and a ticket.** `// TODO: fix this` accumulates into permanent ignored noise. A TODO must name an owner and link to a tracking issue: `// TODO(jdw): handle edge case — see GH-1234`. No unlinked TODOs in merged code.
+### Cleanup Flow (after PR merge)
 
-**Outdated comments.** An incorrect comment is actively harmful — empirical research shows code-comment inconsistency increases bug-introducing commits by ~1.5x. When changing code, update adjacent comments. If a comment cannot be kept accurate, delete it rather than leaving it wrong.
+```bash
+wtd feat/<name>    # removes worktree + deletes branch
+# or bulk:
+wtclean            # removes all merged branches at once
+```
 
-## Documentation files (README, CONTRIBUTING, etc.)
+### Rules
 
-Write for the reader who has never seen the project. Cover: what it does, how to run it, how to contribute. Use working code examples.
+- Never nest worktrees (check if in one before creating)
+- Never `git checkout main` — pull updates via `git fetch` from worktree
+- `git pull origin main --rebase` before creating new worktree
+- No `.gitignore` changes — worktrees live outside repo
 
-**Timeless content** (stable): motivation and goals, architectural decisions and their rationale, core concepts, public API contracts, contribution process.
+---
 
-**Rot-prone content** — avoid, or isolate explicitly: specific version numbers, UI screenshots, step-by-step instructions for external services that change, inline changelogs. Apply DRY — one authoritative location per piece of knowledge; link rather than duplicate.
+## Shell Preference
 
-# GitHub Actions
+**Primary shell: Git Bash.** Prefer bash commands, paths, scripts over PowerShell. Use `/c/Users/...` paths in bash context.
 
-Always use the latest available version of every action. Before writing or modifying any workflow:
+## Shell Helpers
 
-1. Look up the current latest tag — never assume: `gh api repos/<owner>/<action>/releases/latest --jq '.tag_name'`
-2. Pin to that exact version tag, never `@main` or `@latest`
-3. Add `cache: false` to setup-go for modules with no external dependencies (no `go.sum`)
+Sourced automatically in both shells.
 
-# Project Context
+**Git Bash** (`~/.bashrc` → `~/.claude/scripts/worktree-helpers.sh`):
+```bash
+gwt                     # list all worktrees (with dirty indicator)
+gwta auth-jwt           # create ~/worktrees/<proj>/feat/auth-jwt
+gwta fix/null-check     # create ~/worktrees/<proj>/fix/null-check
+gwta auth-jwt fix       # explicit type as second arg
+gwtr                    # jump back to root/main worktree
+wts                     # interactive switch (fzf+preview or select)
+wtst                    # status across all worktrees (dirty/ahead/behind)
+wtd feat/auth-jwt       # remove worktree + delete branch (tab-completes)
+wtd -f feat/auth-jwt    # force remove
+wtd -k feat/auth-jwt    # keep branch, remove worktree only
+wtp                     # prune stale metadata + fetch --prune
+wtclean                 # remove all merged-branch worktrees
+```
 
-My dotfiles are managed by chezmoi (source at `~/.local/share/chezmoi`, applied via `chezmoi apply`). The repo is at `github.com/jdwillmsen/dotfiles`. The Claude Code status line is a Go binary at `~/.local/bin/claude-status`.
+**PowerShell** (`~/.claude/scripts/worktree-helpers.ps1`):
+```powershell
+gwta auth-jwt [-Type feat|fix|chore|docs|refactor|test|ci]
+wts          # Out-GridView selector (or fzf if installed)
+wtd feat/auth-jwt [-Force] [-KeepBranch]
+```
+
+| Command | Action |
+|---------|--------|
+| `gwt` | List all worktrees |
+| `gwta <name> [type]` | Create worktree under `~/worktrees/<proj>/<type>/<name>` |
+| `wts` | Interactive switch (fzf or fallback) |
+| `wtd <branch>` | Remove worktree + delete branch (tab-completes) |
+| `wtp` | Prune stale metadata + fetch --prune |
+| `wtclean` | Remove all merged-branch worktrees |
+
+---
+
+## Agent-Facing CLIs — AXI
+
+When building, modifying, or reviewing **any CLI a coding agent runs via shell**, follow AXI (Agent eXperience Interface). Benchmarked to beat both raw CLI and MCP on success, cost, duration, and turns. Full guidance in the `axi` skill; reference impls: `npx -y gh-axi`, `npx -y chrome-devtools-axi`.
+
+10 principles (efficiency / robustness / discoverability):
+
+1. **Token-efficient output** — emit [TOON](https://toonformat.dev/) on stdout (~40% fewer tokens than JSON); convert at the output boundary, keep internal logic on JSON.
+2. **Minimal default schemas** — 3–4 fields per list item; more via `--fields`.
+3. **Content truncation** — cap large text, append size hint (`(truncated, N chars total — use --full)`).
+4. **Pre-computed aggregates** — return `totalCount`, inline CI summaries, etc. to kill round-trips.
+5. **Definitive empty states** — explicit zero-result message, never silent empty output.
+6. **Structured errors & exit codes** — idempotent mutations; structured errors to **stdout**; never prompt interactively; `0` ok / `1` err.
+7. **Ambient context** — install into session hooks/plugins so state is visible before the agent acts; ship a SKILL.md too.
+8. **Content first** — no-args prints live actionable data (+ exec path + one-line description), not help text.
+9. **Contextual disclosure** — append `help[]` next-step command templates with `<id>` placeholders.
+10. **Consistent help** — every subcommand has a concise `--help` fallback.
+
+@RTK.md

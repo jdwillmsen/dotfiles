@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Rebuild trigger — main.go hash: {{ include (joinPath .chezmoi.sourceDir ".." "scripts" "claude-status" "main.go") | sha256sum }}
+# Rebuild trigger — hashes every .go file so adding a source file (not just
+# editing main.go) also retriggers the build:
+# {{ range (glob (joinPath .chezmoi.sourceDir ".." "scripts" "claude-status" "*.go")) }}{{ include . | sha256sum }}{{ end }}
 command -v go &>/dev/null || { echo "Go not found — skipping claude-status build"; exit 0; }
 SRC="{{ joinPath .chezmoi.sourceDir ".." "scripts" "claude-status" }}"
 mkdir -p "$HOME/.local/bin"

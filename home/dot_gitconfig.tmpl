@@ -68,3 +68,8 @@
 {{- else }}
     helper = libsecret
 {{- end }}
+
+{{- /* Must stay the last section: git applies later values over earlier
+       ones, so machine-local overrides only win from the bottom. */}}
+[include]
+    path = ~/.gitconfig.local

@@ -5,8 +5,9 @@ case $- in
     *) return ;;
 esac
 
-# Shared config
-for f in "$HOME/.config/shell/exports.sh" "$HOME/.config/shell/aliases.sh" "$HOME/.config/shell/functions.sh"; do
+# Shared config; local.sh is unmanaged machine-local config and stays last
+# so its definitions override the managed files.
+for f in "$HOME/.config/shell/exports.sh" "$HOME/.config/shell/aliases.sh" "$HOME/.config/shell/functions.sh" "$HOME/.config/shell/local.sh"; do
     [ -r "$f" ] && source "$f"
 done
 

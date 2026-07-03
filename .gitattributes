@@ -4,3 +4,6 @@
 # committed blob actually having a bug.
 *.sh text eol=lf
 *.tmpl text eol=lf
+# Extensionless rc files: shell content that must stay LF for the same reason.
+dot_bashrc text eol=lf
+dot_zshrc text eol=lf

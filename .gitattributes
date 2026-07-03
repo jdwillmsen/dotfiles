@@ -7,3 +7,6 @@
 # Extensionless rc files: shell content that must stay LF for the same reason.
 dot_bashrc text eol=lf
 dot_zshrc text eol=lf
+# chezmoi applies from the working tree, so an autocrlf-smudged checkout
+# would push CRLF into the live ~/.claude files.
+home/private_dot_claude/*.md text eol=lf

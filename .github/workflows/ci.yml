@@ -215,7 +215,6 @@ jobs:
 
       - name: chezmoi init + verify
         run: |
-          set -x
           export PATH="$HOME/.local/bin:$PATH"
           # tests/lib.sh is the proven two-phase init harness: chezmoi's
           # `execute-template --init` skips .chezmoi.toml.tmpl's [data], and
@@ -226,6 +225,12 @@ jobs:
           . tests/lib.sh
           cfg="$(chez_init ephemeral)"
           dest="$(mktemp -d)"
+          # `chezmoi verify` reports drift against the *current* destination —
+          # it never applies anything itself. Verifying a still-empty dest
+          # would trivially fail (every managed file "differs" from nothing),
+          # so apply once into the sandbox first; verify then confirms apply
+          # and verify agree on the resulting state.
+          chez_apply "$cfg" "$dest"
           chezmoi verify --source "$CHEZ_SRC" --config "$cfg" --destination "$dest"
 
       - name: Parity gate — legacy install.sh vs chezmoi apply

@@ -48,4 +48,14 @@ chez_tmpl() { chezmoi execute-template --source "$CHEZ_SRC" --config "$1" "$2"; 
 chez_render() { chezmoi execute-template --source "$CHEZ_SRC" --config "$1" < "$2"; }
 
 # chez_apply CONFIG DEST — apply the full source state into DEST.
-chez_apply() { chezmoi apply --source "$CHEZ_SRC" --config "$1" --destination "$2" --force; }
+# HOME is overridden to DEST for the apply itself: run_once/run_onchange
+# scripts read $HOME directly (e.g. ~/.local/bin, ~/.claude, ~/.tmux), so
+# --destination alone still lets them write into the real home directory.
+# RUNNER_TEMP is deliberately left untouched: CONFIG's [age].identity was
+# already resolved to an absolute path under RUNNER_TEMP's *current* value
+# back when chez_init rendered it, and run_before_00-write-ci-age-key.sh
+# writes the decrypted key to that same RUNNER_TEMP-derived path during this
+# apply — repointing RUNNER_TEMP here would desync the two and break
+# decryption. RUNNER_TEMP already lives outside $HOME (system temp), so it
+# poses none of the leak risk HOME does.
+chez_apply() { HOME="$2" chezmoi apply --source "$CHEZ_SRC" --config "$1" --destination "$2" --force; }

@@ -230,8 +230,20 @@ jobs:
           # would trivially fail (every managed file "differs" from nothing),
           # so apply once into the sandbox first; verify then confirms apply
           # and verify agree on the resulting state.
-          chez_apply "$cfg" "$dest"
-          chezmoi verify --source "$CHEZ_SRC" --config "$cfg" --destination "$dest"
+          set +e
+          chez_apply "$cfg" "$dest"; apply_rc=$?
+          chezmoi verify --source "$CHEZ_SRC" --config "$cfg" --destination "$dest"; verify_rc=$?
+          set -e
+          echo "apply_rc=$apply_rc verify_rc=$verify_rc"
+          if [ "$apply_rc" -ne 0 ]; then
+            echo "APPLY FAILED"
+            exit 1
+          fi
+          if [ "$verify_rc" -ne 0 ]; then
+            echo "VERIFY FAILED — diff against the applied sandbox:"
+            chezmoi diff --source "$CHEZ_SRC" --config "$cfg" --destination "$dest" || true
+            exit 1
+          fi
 
       - name: Parity gate — legacy install.sh vs chezmoi apply
         # CHEZMOI_AGE_KEY is already the real secret from the job env (not the

@@ -15,6 +15,12 @@
 {{-   $ageKeyFile = printf "%s/chezmoi-age-key.txt" (env "RUNNER_TEMP" | default "/tmp") -}}
 {{- end -}}
 
+{{- /* Persist the source location so bare `chezmoi status`/`apply` work
+       after `init --source <repo>`. Must be the working tree (repo root),
+       not .chezmoi.sourceDir: sourceDir already has .chezmoiroot's `home`
+       appended, and chezmoi re-applies .chezmoiroot to this value. */ -}}
+sourceDir = {{ .chezmoi.workingTree | quote }}
+
 encryption = "age"
 
 [age]

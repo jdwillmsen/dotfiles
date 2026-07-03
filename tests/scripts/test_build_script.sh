@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 here="$(cd "$(dirname "$0")/../.." && pwd)"
+# shellcheck disable=SC1091  # dynamic path resolved at runtime; harness lives at tests/lib.sh
 . "$here/tests/lib.sh"
 rendered="$(chez_render "$(chez_init personal)" "$here/home/run_onchange_after_20-build-claude-status.sh.tmpl")"
 echo "$rendered" | shellcheck -s bash -

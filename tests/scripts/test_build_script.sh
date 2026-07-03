@@ -7,4 +7,6 @@ echo "$rendered" | shellcheck -s bash -
 echo "$rendered" | grep -q 'go build' || { echo "FAIL: no go build"; exit 1; }
 # onchange hash line must reference the Go source so edits retrigger.
 echo "$rendered" | grep -q 'claude-status' || { echo "FAIL: missing target"; exit 1; }
+# The glob over *.go must actually resolve to source files, not render empty.
+echo "$rendered" | grep -qE '[0-9a-f]{64}' || { echo "FAIL: no Go source hash in rebuild trigger"; exit 1; }
 echo "PASS"

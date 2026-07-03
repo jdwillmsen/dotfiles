@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Rebuild trigger — main.go hash: {{ include (joinPath .chezmoi.sourceDir ".." "scripts" "claude-status" "main.go") | sha256sum }}
+command -v go &>/dev/null || { echo "Go not found — skipping opencode-status build"; exit 0; }
+SRC="{{ joinPath .chezmoi.sourceDir ".." "scripts" "claude-status" }}"
+mkdir -p "$HOME/.local/bin"
+# Same Go binary as claude-status: the payload schemas overlap.
+if (cd "$SRC" && go build -o "$HOME/.local/bin/opencode-status" .); then
+    echo "Built ~/.local/bin/opencode-status"
+else
+    echo "opencode-status build failed — skipping" >&2
+    exit 0
+fi

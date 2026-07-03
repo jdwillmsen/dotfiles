@@ -16,7 +16,7 @@ if os.path.exists(path):
     try:
         with open(path) as f: existing = json.load(f)
     except json.JSONDecodeError:
-        pass
+        print(f"warning: {path} is malformed JSON — rewriting it", file=sys.stderr)
 servers = existing.setdefault("mcpServers", {})
 for name, cfg in desired.items():
     servers.setdefault(name, cfg)

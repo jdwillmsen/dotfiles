@@ -1,0 +1,13 @@
+mcp:
+  Atlassian:
+    command: npx
+    args:
+      - "-y"
+      - "mcp-remote@latest"
+      - "https://mcp.atlassian.com/v1/mcp/authv2"
+claudePlugins:
+  marketplaces:
+    - name: caveman
+      url: "https://github.com/JuliusBrussee/caveman"
+  install:
+    - caveman@caveman

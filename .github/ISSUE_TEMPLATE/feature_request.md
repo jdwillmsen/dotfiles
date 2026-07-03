@@ -20,12 +20,12 @@ assignees: jdwillmsen
 
 ## Affected Area
 
-- [ ] `shell/aliases.sh`
-- [ ] `shell/functions.sh`
-- [ ] `shell/exports.sh`
+- [ ] `home/dot_config/shell/aliases.sh`
+- [ ] `home/dot_config/shell/functions.sh`
+- [ ] `home/dot_config/shell/exports.sh`
 - [ ] `scripts/claude-status/`
-- [ ] `install.sh`
-- [ ] `gitconfig` / `gitignore_global`
+- [ ] `home/.chezmoi.toml.tmpl` / `home/run_*`
+- [ ] `home/dot_gitconfig.tmpl` / `home/dot_gitignore_global`
 - [ ] Other
 
 ## Additional Context

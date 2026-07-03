@@ -6,7 +6,7 @@
       "version": "latest"
     }
   },
-  "postCreateCommand": "sudo apt-get install -y shellcheck && bash install.sh",
+  "postCreateCommand": "sudo apt-get install -y shellcheck && sh -c \"$(curl -fsLS get.chezmoi.io)\" -- -b ~/.local/bin && ~/.local/bin/chezmoi init --apply --source \"$PWD\" --promptString machineRole=ephemeral",
   "customizations": {
     "vscode": {
       "extensions": [

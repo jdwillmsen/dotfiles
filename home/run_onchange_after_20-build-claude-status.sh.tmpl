@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Rebuild trigger — main.go hash: {{ include (joinPath .chezmoi.sourceDir ".." "scripts" "claude-status" "main.go") | sha256sum }}
+command -v go &>/dev/null || { echo "Go not found — skipping claude-status build"; exit 0; }
+SRC="{{ joinPath .chezmoi.sourceDir ".." "scripts" "claude-status" }}"
+mkdir -p "$HOME/.local/bin"
+if (cd "$SRC" && go build -o "$HOME/.local/bin/claude-status" .); then
+    echo "Built ~/.local/bin/claude-status"
+else
+    echo "claude-status build failed — skipping" >&2
+    exit 0
+fi

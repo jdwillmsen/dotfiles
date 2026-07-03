@@ -28,7 +28,7 @@ assignees: jdwillmsen
 
 - **Shell:** <!-- zsh / bash + version -->
 - **OS:** <!-- macOS 14 / Ubuntu 24.04 / etc. -->
-- **Affected file:** <!-- shell/aliases.sh / scripts/claude-status / install.sh / etc. -->
+- **Affected file:** <!-- home/dot_config/shell/aliases.sh / scripts/claude-status / home/.chezmoi.toml.tmpl / etc. -->
 
 ## Output / Error
 

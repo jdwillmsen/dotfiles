@@ -12,6 +12,12 @@ echo "$p" | grep -q "helper = store" && { echo "FAIL: plaintext store helper sti
 e="$(render ephemeral)"
 echo "$e" | grep -q "gpgsign = false" || { echo "FAIL: ephemeral should disable signing"; exit 1; }
 
+# [include] of ~/.gitconfig.local must render as the LAST section: git lets
+# later values override earlier ones, so machine-local only wins from the end.
+last_section="$(echo "$p" | grep -oE '^\[[a-z]+\]' | tail -1)"
+[ "$last_section" = "[include]" ] || { echo "FAIL: [include] not last section (got $last_section)"; exit 1; }
+echo "$p" | grep -q 'path = ~/.gitconfig.local' || { echo "FAIL: gitconfig.local include missing"; exit 1; }
+
 # role=work reads the encrypted work-identity slot, which only exists as a
 # destination file after a real apply (run_before writes the CI/local age
 # identity, then chezmoi decrypts) — probe via chez_apply, not chez_render.

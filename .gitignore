@@ -2,5 +2,5 @@
 *.bak
 *.local
 
-# Compiled binaries (built by install.sh into ~/.local/bin)
+# Compiled binaries (built by run_onchange_after_20-build-claude-status.sh.tmpl into ~/.local/bin)
 scripts/claude-status/claude-status

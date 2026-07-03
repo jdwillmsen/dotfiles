@@ -86,4 +86,4 @@ Always use the latest available version of every action. Before writing or modif
 
 # Project Context
 
-My dotfiles live at `~/dotfiles` and are symlinked to `$HOME` via `install.sh`. The repo is at `github.com/jdwillmsen/dotfiles`. The Claude Code status line is a Go binary at `~/.local/bin/claude-status`.
+My dotfiles are managed by chezmoi (source at `~/.local/share/chezmoi`, applied via `chezmoi apply`). The repo is at `github.com/jdwillmsen/dotfiles`. The Claude Code status line is a Go binary at `~/.local/bin/claude-status`.

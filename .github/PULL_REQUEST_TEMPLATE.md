@@ -18,7 +18,7 @@
 
 - [ ] Sourced in zsh (`source ~/.zshrc`)
 - [ ] Sourced in bash (`source ~/.bashrc`)
-- [ ] Ran `install.sh` on a clean shell
+- [ ] Ran `chezmoi apply` on a clean HOME (or `bash tests/smoke.sh`)
 - [ ] Manually tested the new alias/function
 
 ## Related Issues

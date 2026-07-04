@@ -12,4 +12,13 @@ PY=python3
 echo "$out" | "$PY" -c 'import json,sys; d=json.load(sys.stdin); \
  assert d["theme"]=="light", "user theme lost"; \
  assert d["model"]=="opus", "user model overwritten"; \
- assert d["statusLine"]["command"]=="claude-status", "statusLine missing"; print("PASS")'
+ assert d["statusLine"]["command"]=="claude-status", "statusLine missing"; \
+ assert d["statusLine"]["refreshInterval"]==60, "refreshInterval default missing"; print("PASS")'
+
+# A pre-existing statusLine dict must gain new default keys (refreshInterval)
+# without losing user-set values (custom command).
+existing='{"statusLine":{"type":"command","command":"my-status"}}'
+out="$(printf '%s' "$existing" | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
+echo "$out" | "$PY" -c 'import json,sys; d=json.load(sys.stdin); \
+ assert d["statusLine"]["command"]=="my-status", "user statusLine command overwritten"; \
+ assert d["statusLine"]["refreshInterval"]==60, "refreshInterval not merged into existing statusLine"; print("PASS")'

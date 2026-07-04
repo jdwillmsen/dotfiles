@@ -4,6 +4,9 @@
 # committed blob actually having a bug.
 *.sh text eol=lf
 *.tmpl text eol=lf
+# gofmt treats CRLF as unformatted; CI runs gofmt -l on a Linux checkout,
+# so a CRLF-smudged local checkout diverges from what CI validates.
+*.go text eol=lf
 # Extensionless rc files: shell content that must stay LF for the same reason.
 dot_bashrc text eol=lf
 dot_zshrc text eol=lf

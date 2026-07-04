@@ -3,7 +3,7 @@ set -euo pipefail
 # Defaults contributed by dotfiles; existing on-disk (runtime) values always win.
 DEFAULTS='{
   "model": "fable",
-  "statusLine": { "type": "command", "command": "claude-status" },
+  "statusLine": { "type": "command", "command": "claude-status", "refreshInterval": 60 },
   "theme": "dark",
   "cleanupPeriodDays": 90,
   "skipDangerousModePermissionPrompt": true,

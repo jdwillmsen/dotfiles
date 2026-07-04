@@ -21,6 +21,12 @@ shopt -s checkwinsize
 # Prompt
 PS1='\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
 
+# Windows Terminal reads cwd from OSC 9;9 so duplicate tab/pane opens here;
+# cygpath guard keeps this a no-op outside Git Bash (Linux, WSL).
+if [ -n "$WT_SESSION" ] && command -v cygpath >/dev/null 2>&1; then
+    PROMPT_COMMAND=${PROMPT_COMMAND:+"$PROMPT_COMMAND; "}'printf "\e]9;9;%s\e\\" "$(cygpath -w "$PWD")"'
+fi
+
 # nvm
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ]          && \. "$NVM_DIR/nvm.sh"

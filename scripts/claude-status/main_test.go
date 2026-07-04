@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -8,6 +9,80 @@ import (
 	"testing"
 	"time"
 )
+
+// ── subagent rows ─────────────────────────────────────────────────────────────
+
+func TestSubagentRowRunningShowsNameTokensElapsed(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	task := subTask{
+		ID: "t1", Name: "Explore", Status: "running",
+		Description: "searching for callers",
+		TokenCount:  12400,
+		StartTime:   (now.Add(-3 * time.Minute)).UnixMilli(),
+	}
+	row := stripANSI(renderSubagentRow(task, 120, now))
+	for _, want := range []string{"Explore", "searching for callers", "12k", "3m"} {
+		if !strings.Contains(row, want) {
+			t.Errorf("row %q missing %q", row, want)
+		}
+	}
+}
+
+func TestSubagentRowStatusGlyphs(t *testing.T) {
+	now := time.Now()
+	cases := []struct{ status, glyph string }{
+		{"running", "⟳"},
+		{"completed", "✓"},
+		{"failed", "✗"},
+		{"pending", "·"},
+	}
+	for _, c := range cases {
+		row := stripANSI(renderSubagentRow(subTask{ID: "x", Name: "a", Status: c.status}, 120, now))
+		if !strings.Contains(row, c.glyph) {
+			t.Errorf("status %s: row %q missing glyph %q", c.status, row, c.glyph)
+		}
+	}
+}
+
+func TestSubagentRowTruncatesToColumns(t *testing.T) {
+	task := subTask{
+		ID: "t1", Name: "Explore", Status: "running",
+		Description: strings.Repeat("long description ", 20),
+	}
+	row := stripANSI(renderSubagentRow(task, 60, time.Now()))
+	if n := len([]rune(row)); n > 60 {
+		t.Errorf("visible row length %d exceeds 60 columns", n)
+	}
+	if !strings.Contains(row, "…") {
+		t.Error("truncated description should end with ellipsis")
+	}
+}
+
+func TestSubagentOverridesEmitJSONLinePerTask(t *testing.T) {
+	in := subagentInput{
+		Columns: 100,
+		Tasks: []subTask{
+			{ID: "a1", Name: "Explore", Status: "running"},
+			{ID: "b2", Name: "Plan", Status: "completed"},
+		},
+	}
+	lines := renderSubagentOverrides(in, time.Now())
+	if len(lines) != 2 {
+		t.Fatalf("got %d lines, want 2", len(lines))
+	}
+	for i, l := range lines {
+		var row struct {
+			ID      string `json:"id"`
+			Content string `json:"content"`
+		}
+		if err := json.Unmarshal([]byte(l), &row); err != nil {
+			t.Fatalf("line %d not valid JSON: %v", i, err)
+		}
+		if row.ID == "" || row.Content == "" {
+			t.Errorf("line %d missing id/content: %q", i, l)
+		}
+	}
+}
 
 func TestCachePathUsesSystemTempDir(t *testing.T) {
 	p := cachePath("abc-123")

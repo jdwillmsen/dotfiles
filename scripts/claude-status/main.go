@@ -718,8 +718,117 @@ func joinSections(sections ...string) string {
 	return strings.Join(out, sep)
 }
 
+// ── Subagent rows (settings.subagentStatusLine, invoked as -subagents) ────────
+type subTask struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	Status      string `json:"status"`
+	Description string `json:"description"`
+	Label       string `json:"label"`
+	StartTime   int64  `json:"startTime"` // epoch ms
+	TokenCount  int    `json:"tokenCount"`
+}
+
+type subagentInput struct {
+	Columns int       `json:"columns"`
+	Tasks   []subTask `json:"tasks"`
+}
+
+var ansiSeq = regexp.MustCompile(`\033(\[[0-9;]*m|\]8;;[^\033]*\033\\)`)
+
+func visibleLen(s string) int {
+	return len([]rune(ansiSeq.ReplaceAllString(s, "")))
+}
+
+func statusGlyph(status string) string {
+	switch status {
+	case "running":
+		return Cyan + "⟳" + Reset
+	case "completed", "success", "done":
+		return Green + "✓" + Reset
+	case "failed", "error":
+		return Red + "✗" + Reset
+	default:
+		return Gray + "·" + Reset
+	}
+}
+
+func fmtTokens(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if n < 1000 {
+		return strconv.Itoa(n)
+	}
+	return strconv.Itoa(n/1000) + "k"
+}
+
+// renderSubagentRow mirrors the main statusline's visual language:
+// glyph + bold name + gray description, tokens and elapsed trailing.
+// Description absorbs all truncation so the operational fields survive
+// narrow panels.
+func renderSubagentRow(t subTask, cols int, now time.Time) string {
+	if cols <= 0 {
+		cols = 80
+	}
+
+	head := statusGlyph(t.Status) + " " + Bold + t.Name + Reset
+
+	var tail string
+	if tk := fmtTokens(t.TokenCount); tk != "" {
+		tail += "  " + Gray + tk + Reset
+	}
+	if t.StartTime > 0 {
+		if d := now.Sub(time.UnixMilli(t.StartTime)); d > 0 {
+			tail += "  " + Gray + fmtDuration(d.Milliseconds()) + Reset
+		}
+	}
+
+	desc := t.Description
+	if desc == "" {
+		desc = t.Label
+	}
+	if desc != "" {
+		budget := cols - visibleLen(head) - visibleLen(tail) - 2
+		if r := []rune(desc); len(r) > budget {
+			if budget < 1 {
+				budget = 1
+			}
+			desc = string(r[:budget-1]) + "…"
+		}
+		return head + "  " + Gray + desc + Reset + tail
+	}
+	return head + tail
+}
+
+func renderSubagentOverrides(in subagentInput, now time.Time) []string {
+	lines := make([]string, 0, len(in.Tasks))
+	for _, t := range in.Tasks {
+		row := struct {
+			ID      string `json:"id"`
+			Content string `json:"content"`
+		}{t.ID, renderSubagentRow(t, in.Columns, now)}
+		b, err := json.Marshal(row)
+		if err != nil {
+			continue
+		}
+		lines = append(lines, string(b))
+	}
+	return lines
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "-subagents" {
+		var in subagentInput
+		json.NewDecoder(os.Stdin).Decode(&in) //nolint:errcheck
+		for _, line := range renderSubagentOverrides(in, time.Now()) {
+			fmt.Println(line)
+		}
+		return
+	}
+
 	var p Payload
 	json.NewDecoder(os.Stdin).Decode(&p) //nolint:errcheck
 

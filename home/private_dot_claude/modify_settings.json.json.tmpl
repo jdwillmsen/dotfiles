@@ -4,6 +4,7 @@ set -euo pipefail
 DEFAULTS='{
   "model": "fable",
   "statusLine": { "type": "command", "command": "claude-status", "refreshInterval": 60 },
+  "subagentStatusLine": { "type": "command", "command": "claude-status -subagents" },
   "theme": "dark",
   "cleanupPeriodDays": 90,
   "skipDangerousModePermissionPrompt": true,

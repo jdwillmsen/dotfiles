@@ -13,7 +13,8 @@ echo "$out" | "$PY" -c 'import json,sys; d=json.load(sys.stdin); \
  assert d["theme"]=="light", "user theme lost"; \
  assert d["model"]=="opus", "user model overwritten"; \
  assert d["statusLine"]["command"]=="claude-status", "statusLine missing"; \
- assert d["statusLine"]["refreshInterval"]==60, "refreshInterval default missing"; print("PASS")'
+ assert d["statusLine"]["refreshInterval"]==60, "refreshInterval default missing"; \
+ assert d["subagentStatusLine"]["command"]=="claude-status -subagents", "subagentStatusLine missing"; print("PASS")'
 
 # A pre-existing statusLine dict must gain new default keys (refreshInterval)
 # without losing user-set values (custom command).

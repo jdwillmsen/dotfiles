@@ -50,47 +50,64 @@ Before touching code:
 
 ### Worktree Location
 
-Worktrees live in `~/worktrees/<project>/<type>/<name>` — global, outside repo. Repos stay clean. No `.gitignore` entry.
+Two locations, by tool:
+
+- **Native `EnterWorktree` (agent sessions — preferred):** `.claude/worktrees/<name>` inside the repo, created/cleaned by the tool. Branches from `origin/<default-branch>` by default, so it's always fresh.
+- **Shell helpers (`gwta`, terminal use):** `~/worktrees/<project>/<type>/<name>` — global, outside repo. Override: `export WT_BASE=~/worktrees` in `.bashrc` (already default).
 
 ```
 ~/worktrees/
 └── myapp/
-    ├── feat/auth-jwt/       � worktree
-    └── fix/null-session/    � worktree
+    ├── feat/auth-jwt/       ← worktree (shell)
+    └── fix/null-session/    ← worktree (shell)
 
-/c/repos/myapp/              � main checkout (untouched)
+/c/repos/myapp/              ← main checkout (merge target only)
+└── .claude/worktrees/       ← worktrees (native tool)
 ```
-
-Override location: `export WT_BASE=~/worktrees` in `.bashrc` (already default).
 
 ### Creation Flow
 
 ```bash
-# Preferred — use helper (handles dir creation):
+# Agent session — native tool (handles branch, placement, cleanup):
+EnterWorktree feat/<name>
+
+# Terminal — shell helper:
 gwta auth-jwt          # → ~/worktrees/myapp/feat/auth-jwt
 gwta fix/null-session  # → ~/worktrees/myapp/fix/null-session
 
-# Or native tool if available:
-EnterWorktree feat/<name>
-
 # Manual fallback:
-git worktree add ~/worktrees/<project>/feat/<name> -b feat/<name>
+git fetch origin && git worktree add ~/worktrees/<project>/feat/<name> -b feat/<name> origin/main
 ```
 
 ### Cleanup Flow (after PR merge)
 
 ```bash
+# Agent session: verify merged, then ExitWorktree(remove).
+# Squash merge rewrites the SHA — `git branch --contains` lies. Compare trees:
+git fetch origin main && git diff HEAD origin/main --stat   # empty = merged, safe to remove
+
+# Terminal:
 wtd feat/<name>    # removes worktree + deletes branch
-# or bulk:
-wtclean            # removes all merged branches at once
+wtclean            # or bulk: all merged branches
 ```
+
+### Main Branch Hygiene — MANDATORY
+
+`main`/`master` is a **merge target only**:
+
+- **Never commit or push directly to main.** Every change lands via PR with green CI. (dotfiles repo enforces this with a GitHub ruleset — direct pushes are rejected; treat the same as policy everywhere.)
+- **Refresh main after every merge:** from the main checkout, `git pull --ff-only`. Do this immediately post-merge so the next worktree branches from current state.
+- **`--ff-only` fails ⇒ commits leaked onto local main.** Rescue them onto a branch and PR them — never push them directly:
+  ```bash
+  git branch fix/rescued-work && git reset --hard origin/main
+  ```
+- **Before creating a worktree:** `git fetch origin` and branch from `origin/main` (native `EnterWorktree` does this automatically).
 
 ### Rules
 
 - Never nest worktrees (check if in one before creating)
 - Never `git checkout main` — pull updates via `git fetch` from worktree
-- `git pull origin main --rebase` before creating new worktree
-- No `.gitignore` changes — worktrees live outside repo
+- No `.gitignore` changes — shell worktrees live outside repo; native ones under `.claude/`
 
 ---
 

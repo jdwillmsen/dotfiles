@@ -1,0 +1,46 @@
+# whisper-local user settings — chezmoi-managed.
+# Prefer editing here (dotfiles) over the GUI; `chezmoi apply` overwrites
+# GUI-made edits. Full option reference: config.defaults.yaml in the repo.
+
+whisper:
+  model: base
+  device: cpu # switch to cuda after `whisper-local --doctor` confirms GPU
+  compute_type: int8
+  language: en
+  # Vocabulary the model should favour — tune as dictation misses terms.
+  hotwords:
+    - chezmoi
+    - dotfiles
+    - worktree
+    - statusline
+    - Claude
+    - caveman
+    - AXI
+    - TOON
+    - opencode
+    - gh
+    - kubectl
+    - Terraform
+    - Angular
+    - Nx
+    - Jira
+    - regex
+    - repo
+    - rebase
+    - squash
+
+hotkey:
+  recording_hotkey: ctrl+win
+  recording_mode: push_to_talk
+
+clipboard:
+  auto_paste: true
+  delivery_method: paste
+
+audio:
+  host: WASAPI # low latency on Windows
+
+postprocess:
+  capitalize_first: true
+  ensure_punctuation: true
+  strip_filler_words: true

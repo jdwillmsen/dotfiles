@@ -1,0 +1,31 @@
+{{ if eq .chezmoi.os "windows" -}}
+#!/usr/bin/env bash
+set -euo pipefail
+# Voice dictation (push-to-talk, fully offline). Pinned release — bump to upgrade:
+VERSION="v0.15.0"
+BASE="https://github.com/drajb/whisper-local/releases/download/$VERSION"
+BIN="$HOME/.local/bin/whisper-local.exe"
+
+command -v curl &>/dev/null || { echo "curl not found — skipping whisper-local install"; exit 0; }
+mkdir -p "$HOME/.local/bin"
+
+want_sha="$(curl -fsSL "$BASE/whisper-local.exe.sha256" | awk '{print $1}')"
+if [ -f "$BIN" ] && command -v sha256sum &>/dev/null; then
+    have_sha="$(sha256sum "$BIN" | awk '{print $1}')"
+    [ "$have_sha" = "$want_sha" ] && { echo "whisper-local $VERSION already installed"; exit 0; }
+fi
+
+tmp="$(mktemp)"
+curl -fsSL -o "$tmp" "$BASE/whisper-local.exe"
+got_sha="$(sha256sum "$tmp" | awk '{print $1}')"
+if [ "$got_sha" != "$want_sha" ]; then
+    echo "whisper-local checksum mismatch (got $got_sha, want $want_sha) — aborting" >&2
+    rm -f "$tmp"
+    exit 1
+fi
+mv -f "$tmp" "$BIN"
+echo "Installed whisper-local $VERSION → $BIN (run 'whisper-local --setup' once, then Ctrl+Win to dictate)"
+{{ else -}}
+#!/usr/bin/env bash
+exit 0
+{{ end -}}

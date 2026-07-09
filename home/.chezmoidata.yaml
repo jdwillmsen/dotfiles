@@ -11,3 +11,6 @@ claudePlugins:
       url: "https://github.com/JuliusBrussee/caveman"
   install:
     - caveman@caveman
+claudeSkillsDir:
+  - name: mattpocock-skills
+    url: "https://github.com/mattpocock/skills"

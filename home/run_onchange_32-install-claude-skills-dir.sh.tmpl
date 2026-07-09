@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+command -v git &>/dev/null || { echo "git not found — skipping skills-dir repos"; exit 0; }
+mkdir -p "$HOME/.claude/skills"
+{{ range .claudeSkillsDir }}
+DIR="$HOME/.claude/skills/{{ .name }}"
+if [ -d "$DIR/.git" ]; then
+    git -C "$DIR" pull --ff-only || echo "skills-dir {{ .name }} update failed"
+else
+    git clone --depth 1 {{ .url | quote }} "$DIR" || echo "skills-dir {{ .name }} clone failed"
+fi
+{{ end }}

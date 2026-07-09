@@ -35,4 +35,8 @@ rm -rf "$quote_src"
 plug="$(render home/run_onchange_31-install-claude-plugins.sh.tmpl)"
 echo "$plug" | shellcheck -s bash -
 echo "$plug" | grep -q 'caveman' || { echo "FAIL: caveman missing"; exit 1; }
+
+skills_dir="$(render home/run_onchange_32-install-claude-skills-dir.sh.tmpl)"
+echo "$skills_dir" | shellcheck -s bash -
+echo "$skills_dir" | grep -q 'mattpocock/skills' || { echo "FAIL: mattpocock/skills missing"; exit 1; }
 echo "PASS"

@@ -467,3 +467,42 @@ func TestParseFallbackKeepsModelWithoutSlash(t *testing.T) {
 		t.Error("Reasoning should be true when CCR_REASONING=on")
 	}
 }
+
+// ── Fallback model rendering ──────────────────────────────────────────────────
+
+func fbNvidia() fallback {
+	return fallback{Route: "nvidia,deepseek-ai/deepseek-v4-pro", Provider: "nvidia", Model: "deepseek-v4-pro", CtxWindow: 0, Reasoning: false}
+}
+
+func TestRenderFallbackModelReplacesLabel(t *testing.T) {
+	p := fullPayload()
+	p.Effort = &struct {
+		Level string `json:"level"`
+	}{Level: "high"}
+	joined := stripANSI(strings.Join(renderLines(p, testGit(), 110, false, fbNvidia()), "\n"))
+	if !strings.Contains(joined, "⚡ deepseek-v4-pro") {
+		t.Errorf("fallback model label missing ⚡/model in %q", joined)
+	}
+	if !strings.Contains(joined, "nvidia") {
+		t.Error("fallback provider missing")
+	}
+	if strings.Contains(joined, "Fable") || strings.Contains(joined, "⬡") {
+		t.Error("native label must not appear in fallback")
+	}
+	if strings.Contains(joined, "high") {
+		t.Error("reasoning hidden when Reasoning=false (stripped route)")
+	}
+}
+
+func TestRenderFallbackShowsReasoningWhenOn(t *testing.T) {
+	p := fullPayload()
+	p.Effort = &struct {
+		Level string `json:"level"`
+	}{Level: "high"}
+	fb := fbNvidia()
+	fb.Reasoning = true
+	joined := stripANSI(strings.Join(renderLines(p, testGit(), 110, false, fb), "\n"))
+	if !strings.Contains(joined, "high") {
+		t.Error("reasoning shown when Reasoning=true (e.g. gpt-oss)")
+	}
+}

@@ -492,21 +492,34 @@ func renderLines(p Payload, git *gitState, cols int, verbose bool, fb fallback) 
 	}
 
 	// ── LINE 1 ────────────────────────────────────────────────────────────────
-	// Section: model  ([i] ⬡ Fable 5  high  caveman)
+	// Section: model — native shows ⬡ <label>; CCR fallback shows ⚡ <real model>.
 	var secModel string
-	if label := modelLabel(p.Model.ID, p.Model.DisplayName); label != "" {
-		s := ""
-		if p.Vim != nil && p.Vim.Mode != "" {
-			s = Gray + "[" + strings.ToLower(p.Vim.Mode[:1]) + "]" + Reset + " "
+	vimPrefix := ""
+	if p.Vim != nil && p.Vim.Mode != "" {
+		vimPrefix = Gray + "[" + strings.ToLower(p.Vim.Mode[:1]) + "]" + Reset + " "
+	}
+	outputStyle := ""
+	if p.OutputStyle != nil && p.OutputStyle.Name != "" && p.OutputStyle.Name != "default" {
+		outputStyle = "  " + Dim + p.OutputStyle.Name + Reset
+	}
+	switch {
+	case fb.Route != "":
+		s := vimPrefix + Yellow + Bold + "⚡ " + fb.Model + Reset
+		if fb.Provider != "" {
+			s += "  " + Dim + fb.Provider + Reset
 		}
-		s += Purple + Bold + "⬡ " + label + Reset
-		if p.Effort != nil && p.Effort.Level != "" {
+		if fb.Reasoning && p.Effort != nil && p.Effort.Level != "" {
 			s += "  " + Gray + p.Effort.Level + Reset
 		}
-		if p.OutputStyle != nil && p.OutputStyle.Name != "" && p.OutputStyle.Name != "default" {
-			s += "  " + Dim + p.OutputStyle.Name + Reset
+		secModel = s + outputStyle
+	default:
+		if label := modelLabel(p.Model.ID, p.Model.DisplayName); label != "" {
+			s := vimPrefix + Purple + Bold + "⬡ " + label + Reset
+			if p.Effort != nil && p.Effort.Level != "" {
+				s += "  " + Gray + p.Effort.Level + Reset
+			}
+			secModel = s + outputStyle
 		}
-		secModel = s
 	}
 
 	// Section: git context  (⎇ main ⑂wt ⇡2 ⇣1 +1 ~3 ?4 · owner/repo · PR #47 ✓)

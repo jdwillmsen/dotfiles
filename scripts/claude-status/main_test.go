@@ -535,3 +535,32 @@ func TestRenderFallbackUnknownWindowShowsTokensOnly(t *testing.T) {
 		t.Error("no denominator when window unknown")
 	}
 }
+
+// ── Fallback cost and rate rendering ──────────────────────────────────────
+
+func TestRenderFallbackCostIsFree(t *testing.T) {
+	joined := stripANSI(strings.Join(renderLines(fullPayload(), testGit(), 110, false, fbNvidia()), "\n"))
+	if !strings.Contains(joined, "FREE") {
+		t.Errorf("fallback cost should show FREE in %q", joined)
+	}
+	if strings.Contains(joined, "$0.42") {
+		t.Error("no dollar cost in fallback")
+	}
+}
+
+func TestRenderFallbackRateLimitsMinimized(t *testing.T) {
+	joined := stripANSI(strings.Join(renderLines(fullPayload(), testGit(), 110, false, fbNvidia()), "\n"))
+	if !strings.Contains(joined, "5h") || !strings.Contains(joined, "↺") {
+		t.Errorf("fallback should keep 5h reset info in %q", joined)
+	}
+	// minimized = no progress-bar cells in the rate section
+	rateLine := ""
+	for _, l := range strings.Split(joined, "\n") {
+		if strings.Contains(l, "5h") {
+			rateLine = l
+		}
+	}
+	if strings.ContainsAny(rateLine, "█░") {
+		t.Errorf("minimized rate limits must have no bar cells: %q", rateLine)
+	}
+}

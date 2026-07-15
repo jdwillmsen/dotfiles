@@ -611,11 +611,13 @@ func renderLines(p Payload, git *gitState, cols int, verbose bool, fb fallback) 
 
 	secGit := strings.Join(gitParts, sep)
 
-	// Section: cost  ($0.04  5m12s  agent: x)
+	// Section: cost — native shows $; fallback shows FREE (free/local routes).
 	secCost := ""
 	if t != narrow {
 		var costParts []string
-		if cs := fmtCost(p.Cost.TotalCostUSD); cs != "" {
+		if fb.Route != "" {
+			costParts = append(costParts, Green+"FREE"+Reset)
+		} else if cs := fmtCost(p.Cost.TotalCostUSD); cs != "" {
 			costParts = append(costParts, cs)
 		}
 		if ds := fmtDuration(p.Cost.TotalDurationMS); ds != "" {
@@ -673,28 +675,43 @@ func renderLines(p Payload, git *gitState, cols int, verbose bool, fb fallback) 
 		) + suffix
 	}
 
-	// Section: rate limits  (5h ███░ 38%▲ ↺ 3:45pm (2h30m) · 7d ████░ 61% ↺ Thu 9am (1d14h))
+	// Section: rate limits — native shows full bars; fallback minimizes to
+	// pct + unlock time (Max quota isn't moving while you're on free routes).
 	secRate := ""
 	if t != narrow && p.RateLimits != nil {
 		now := time.Now()
 		var rateParts []string
-		if fh := p.RateLimits.FiveHour; fh != nil {
-			rateParts = append(rateParts,
-				fmt.Sprintf("5h %s %s%.0f%%%s%s  %s",
-					bar(fh.UsedPercentage, 8),
+		if fb.Route != "" {
+			if fh := p.RateLimits.FiveHour; fh != nil {
+				rateParts = append(rateParts, fmt.Sprintf("5h %s%.0f%%%s  %s",
 					pctColor(fh.UsedPercentage), fh.UsedPercentage, Reset,
-					paceDelta(fh.UsedPercentage, fh.ResetsAt, 5*time.Hour, now),
 					fmtResetsAt(fh.ResetsAt, fh.UsedPercentage)))
-		}
-		if sd := p.RateLimits.SevenDay; sd != nil {
-			rateParts = append(rateParts,
-				fmt.Sprintf("7d %s %s%.0f%%%s%s  %s",
-					bar(sd.UsedPercentage, 8),
+			}
+			if sd := p.RateLimits.SevenDay; sd != nil {
+				rateParts = append(rateParts, fmt.Sprintf("7d %s%.0f%%%s  %s",
 					pctColor(sd.UsedPercentage), sd.UsedPercentage, Reset,
-					paceDelta(sd.UsedPercentage, sd.ResetsAt, 7*24*time.Hour, now),
 					fmtResetsAt(sd.ResetsAt, sd.UsedPercentage)))
+			}
+			secRate = strings.Join(rateParts, sep)
+		} else {
+			if fh := p.RateLimits.FiveHour; fh != nil {
+				rateParts = append(rateParts,
+					fmt.Sprintf("5h %s %s%.0f%%%s%s  %s",
+						bar(fh.UsedPercentage, 8),
+						pctColor(fh.UsedPercentage), fh.UsedPercentage, Reset,
+						paceDelta(fh.UsedPercentage, fh.ResetsAt, 5*time.Hour, now),
+						fmtResetsAt(fh.ResetsAt, fh.UsedPercentage)))
+			}
+			if sd := p.RateLimits.SevenDay; sd != nil {
+				rateParts = append(rateParts,
+					fmt.Sprintf("7d %s %s%.0f%%%s%s  %s",
+						bar(sd.UsedPercentage, 8),
+						pctColor(sd.UsedPercentage), sd.UsedPercentage, Reset,
+						paceDelta(sd.UsedPercentage, sd.ResetsAt, 7*24*time.Hour, now),
+						fmtResetsAt(sd.ResetsAt, sd.UsedPercentage)))
+			}
+			secRate = strings.Join(rateParts, sep)
 		}
-		secRate = strings.Join(rateParts, sep)
 	}
 
 	secVer := ""

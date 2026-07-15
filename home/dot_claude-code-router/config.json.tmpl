@@ -1,0 +1,64 @@
+{
+  "LOG": true,
+  "HOST": "127.0.0.1",
+  "PORT": 3456,
+  "transformers": [
+    {
+      "path": "{{ .chezmoi.homeDir | replace "\\" "/" }}/.claude-code-router/strip-reasoning.js"
+    }
+  ],
+  "Providers": [
+    {
+      "name": "nvidia",
+      "api_base_url": "https://integrate.api.nvidia.com/v1/chat/completions",
+      "api_key": "$PLATFORMCTL_JDWLABS_NVIDIA_API_KEY",
+      "models": [
+        "deepseek-ai/deepseek-v4-pro",
+        "deepseek-ai/deepseek-v4-flash",
+        "qwen/qwen3.5-397b-a17b"
+      ],
+      "transformer": {
+        "use": [
+          "strip-reasoning"
+        ]
+      }
+    },
+    {
+      "name": "openrouter",
+      "api_base_url": "https://openrouter.ai/api/v1/chat/completions",
+      "api_key": "$OPENROUTER_API_KEY",
+      "models": [
+        "qwen/qwen3-coder:free",
+        "qwen/qwen3-next-80b-a3b-instruct:free"
+      ],
+      "transformer": {
+        "use": [
+          "openrouter"
+        ]
+      }
+    },
+    {
+      "name": "gpu-stack",
+      "api_base_url": "http://192.168.1.50:8000/v1/chat/completions",
+      "api_key": "dummy",
+      "models": [
+        "openai/gpt-oss-20b"
+      ]
+    },
+    {
+      "name": "ollama",
+      "api_base_url": "http://127.0.0.1:11434/v1/chat/completions",
+      "api_key": "ollama",
+      "models": [
+        "gpt-oss:20b"
+      ]
+    }
+  ],
+  "Router": {
+    "default": "ollama,gpt-oss:20b",
+    "think": "nvidia,deepseek-ai/deepseek-v4-pro",
+    "background": "gpu-stack,openai/gpt-oss-20b",
+    "longContext": "openrouter,qwen/qwen3-coder:free",
+    "longContextThreshold": 60000
+  }
+}

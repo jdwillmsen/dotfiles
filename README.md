@@ -56,6 +56,8 @@ find home -name 'run_*.sh' -exec shellcheck -s bash {} +
 
 A three-line footer in the Claude Code prompt, built as a Go binary for fast startup. Shows model, git context, cost, session duration, context window fill (color-tiered to auto-compact threshold), rate limits, cache stats, and more.
 
+When a session is launched through the CCR (claude-code-router) fallback tier via `ccrpick`, the footer reflects the *real* proxied backend instead of Claude Code's native labels: `⚡ <model>` with the provider, reasoning shown only when the route actually reasons, the routed model's context window (or tokens-only when the provider reports none), `FREE` in place of cost, and minimized rate limits. Native and opencode sessions are unaffected. Contract in [`docs/superpowers/specs/2026-07-14-ccr-fallback-statusline-design.md`](docs/superpowers/specs/2026-07-14-ccr-fallback-statusline-design.md).
+
 Source: `scripts/claude-status/main.go`. Rebuild after editing:
 
 ```bash

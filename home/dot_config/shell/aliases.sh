@@ -64,6 +64,9 @@ alias diskusage='du -sh * | sort -h'
 alias meminfo='free -h'
 alias cpuinfo='lscpu'
 
+# CCR — free/local fallback tier for Claude Code (use when Max caps out)
+alias ccrpick='bash ~/.claude-code-router/pick.sh'
+
 # Misc
 alias reload='source ~/.zshrc 2>/dev/null || source ~/.bashrc'
 alias dotfiles='cd "$(chezmoi source-path)"'

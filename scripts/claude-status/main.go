@@ -137,6 +137,35 @@ type Payload struct {
 	} `json:"worktree"`
 }
 
+// ── CCR fallback (out-of-band, from env stamped by pick.sh) ──────────────────
+// The Claude Code payload can't reveal a proxied backend, so a CCR fallback
+// session's real route/window/reasoning arrive via env. Zero value = native.
+type fallback struct {
+	Route     string // raw CCR_ACTIVE_ROUTE, "" = native session
+	Provider  string // "nvidia"
+	Model     string // display model, vendor prefix stripped: "deepseek-v4-pro"
+	CtxWindow int    // real context window in tokens, 0 = unknown
+	Reasoning bool   // route actually reasons (not stripped)
+}
+
+func parseFallback() fallback {
+	route := os.Getenv("CCR_ACTIVE_ROUTE")
+	if route == "" {
+		return fallback{}
+	}
+	fb := fallback{Route: route, Reasoning: os.Getenv("CCR_REASONING") == "on"}
+	if i := strings.IndexByte(route, ','); i >= 0 {
+		fb.Provider, fb.Model = route[:i], route[i+1:]
+	} else {
+		fb.Model = route
+	}
+	if i := strings.LastIndexByte(fb.Model, '/'); i >= 0 {
+		fb.Model = fb.Model[i+1:]
+	}
+	fb.CtxWindow, _ = strconv.Atoi(os.Getenv("CCR_CTX_WINDOW"))
+	return fb
+}
+
 // ── Git (with 5-second cache keyed on session_id) ────────────────────────────
 type gitState struct {
 	Branch    string
@@ -450,7 +479,7 @@ func layoutTier(cols int) tier {
 // ── Render ────────────────────────────────────────────────────────────────────
 // renderLines builds the status line(s) for the given terminal width.
 // verbose forces the diagnostics line even below the wide tier.
-func renderLines(p Payload, git *gitState, cols int, verbose bool) []string {
+func renderLines(p Payload, git *gitState, cols int, verbose bool, fb fallback) []string {
 	t := layoutTier(cols)
 	showDiag := t == wide || verbose
 
@@ -463,21 +492,34 @@ func renderLines(p Payload, git *gitState, cols int, verbose bool) []string {
 	}
 
 	// ── LINE 1 ────────────────────────────────────────────────────────────────
-	// Section: model  ([i] ⬡ Fable 5  high  caveman)
+	// Section: model — native shows ⬡ <label>; CCR fallback shows ⚡ <real model>.
 	var secModel string
-	if label := modelLabel(p.Model.ID, p.Model.DisplayName); label != "" {
-		s := ""
-		if p.Vim != nil && p.Vim.Mode != "" {
-			s = Gray + "[" + strings.ToLower(p.Vim.Mode[:1]) + "]" + Reset + " "
+	vimPrefix := ""
+	if p.Vim != nil && p.Vim.Mode != "" {
+		vimPrefix = Gray + "[" + strings.ToLower(p.Vim.Mode[:1]) + "]" + Reset + " "
+	}
+	outputStyle := ""
+	if p.OutputStyle != nil && p.OutputStyle.Name != "" && p.OutputStyle.Name != "default" {
+		outputStyle = "  " + Dim + p.OutputStyle.Name + Reset
+	}
+	switch {
+	case fb.Route != "":
+		s := vimPrefix + Yellow + Bold + "⚡ " + fb.Model + Reset
+		if fb.Provider != "" {
+			s += "  " + Dim + fb.Provider + Reset
 		}
-		s += Purple + Bold + "⬡ " + label + Reset
-		if p.Effort != nil && p.Effort.Level != "" {
+		if fb.Reasoning && p.Effort != nil && p.Effort.Level != "" {
 			s += "  " + Gray + p.Effort.Level + Reset
 		}
-		if p.OutputStyle != nil && p.OutputStyle.Name != "" && p.OutputStyle.Name != "default" {
-			s += "  " + Dim + p.OutputStyle.Name + Reset
+		secModel = s + outputStyle
+	default:
+		if label := modelLabel(p.Model.ID, p.Model.DisplayName); label != "" {
+			s := vimPrefix + Purple + Bold + "⬡ " + label + Reset
+			if p.Effort != nil && p.Effort.Level != "" {
+				s += "  " + Gray + p.Effort.Level + Reset
+			}
+			secModel = s + outputStyle
 		}
-		secModel = s
 	}
 
 	// Section: git context  (⎇ main ⑂wt ⇡2 ⇣1 +1 ~3 ?4 · owner/repo · PR #47 ✓)
@@ -569,11 +611,13 @@ func renderLines(p Payload, git *gitState, cols int, verbose bool) []string {
 
 	secGit := strings.Join(gitParts, sep)
 
-	// Section: cost  ($0.04  5m12s  agent: x)
+	// Section: cost — native shows $; fallback shows FREE (free/local routes).
 	secCost := ""
 	if t != narrow {
 		var costParts []string
-		if cs := fmtCost(p.Cost.TotalCostUSD); cs != "" {
+		if fb.Route != "" {
+			costParts = append(costParts, Green+"FREE"+Reset)
+		} else if cs := fmtCost(p.Cost.TotalCostUSD); cs != "" {
 			costParts = append(costParts, cs)
 		}
 		if ds := fmtDuration(p.Cost.TotalDurationMS); ds != "" {
@@ -599,7 +643,20 @@ func renderLines(p Payload, git *gitState, cols int, verbose bool) []string {
 		ctxBarWidth = 24 // shape reads faster than numbers from peripheral vision
 	}
 	var secCtx string
-	if p.ContextWindow.UsedPercentage != nil {
+	switch {
+	case fb.Route != "":
+		usedK := p.ContextWindow.TotalInputTokens / 1000
+		if fb.CtxWindow > 0 {
+			pct := float64(p.ContextWindow.TotalInputTokens) / float64(fb.CtxWindow) * 100
+			secCtx = sec(
+				fmt.Sprintf("ctx %s %s%.0f%%%s", bar(pct, ctxBarWidth), pctColor(pct), pct, Reset),
+				fmt.Sprintf("%s%dk/%dk%s", Gray, usedK, fb.CtxWindow/1000, Reset),
+			)
+		} else {
+			// window unknown (NVIDIA reports none) — show usage, no fake denominator
+			secCtx = fmt.Sprintf("ctx %s%dk in%s", Gray, usedK, Reset)
+		}
+	case p.ContextWindow.UsedPercentage != nil:
 		pct := *p.ContextWindow.UsedPercentage
 		usedK := p.ContextWindow.TotalInputTokens / 1000
 		totalK := p.ContextWindow.ContextWindowSize / 1000
@@ -618,28 +675,43 @@ func renderLines(p Payload, git *gitState, cols int, verbose bool) []string {
 		) + suffix
 	}
 
-	// Section: rate limits  (5h ███░ 38%▲ ↺ 3:45pm (2h30m) · 7d ████░ 61% ↺ Thu 9am (1d14h))
+	// Section: rate limits — native shows full bars; fallback minimizes to
+	// pct + unlock time (Max quota isn't moving while you're on free routes).
 	secRate := ""
 	if t != narrow && p.RateLimits != nil {
 		now := time.Now()
 		var rateParts []string
-		if fh := p.RateLimits.FiveHour; fh != nil {
-			rateParts = append(rateParts,
-				fmt.Sprintf("5h %s %s%.0f%%%s%s  %s",
-					bar(fh.UsedPercentage, 8),
+		if fb.Route != "" {
+			if fh := p.RateLimits.FiveHour; fh != nil {
+				rateParts = append(rateParts, fmt.Sprintf("5h %s%.0f%%%s  %s",
 					pctColor(fh.UsedPercentage), fh.UsedPercentage, Reset,
-					paceDelta(fh.UsedPercentage, fh.ResetsAt, 5*time.Hour, now),
 					fmtResetsAt(fh.ResetsAt, fh.UsedPercentage)))
-		}
-		if sd := p.RateLimits.SevenDay; sd != nil {
-			rateParts = append(rateParts,
-				fmt.Sprintf("7d %s %s%.0f%%%s%s  %s",
-					bar(sd.UsedPercentage, 8),
+			}
+			if sd := p.RateLimits.SevenDay; sd != nil {
+				rateParts = append(rateParts, fmt.Sprintf("7d %s%.0f%%%s  %s",
 					pctColor(sd.UsedPercentage), sd.UsedPercentage, Reset,
-					paceDelta(sd.UsedPercentage, sd.ResetsAt, 7*24*time.Hour, now),
 					fmtResetsAt(sd.ResetsAt, sd.UsedPercentage)))
+			}
+			secRate = strings.Join(rateParts, sep)
+		} else {
+			if fh := p.RateLimits.FiveHour; fh != nil {
+				rateParts = append(rateParts,
+					fmt.Sprintf("5h %s %s%.0f%%%s%s  %s",
+						bar(fh.UsedPercentage, 8),
+						pctColor(fh.UsedPercentage), fh.UsedPercentage, Reset,
+						paceDelta(fh.UsedPercentage, fh.ResetsAt, 5*time.Hour, now),
+						fmtResetsAt(fh.ResetsAt, fh.UsedPercentage)))
+			}
+			if sd := p.RateLimits.SevenDay; sd != nil {
+				rateParts = append(rateParts,
+					fmt.Sprintf("7d %s %s%.0f%%%s%s  %s",
+						bar(sd.UsedPercentage, 8),
+						pctColor(sd.UsedPercentage), sd.UsedPercentage, Reset,
+						paceDelta(sd.UsedPercentage, sd.ResetsAt, 7*24*time.Hour, now),
+						fmtResetsAt(sd.ResetsAt, sd.UsedPercentage)))
+			}
+			secRate = strings.Join(rateParts, sep)
 		}
-		secRate = strings.Join(rateParts, sep)
 	}
 
 	secVer := ""
@@ -835,7 +907,8 @@ func main() {
 	cols, _ := strconv.Atoi(os.Getenv("COLUMNS"))
 	verbose := os.Getenv("CLAUDE_STATUS_VERBOSE") == "1"
 
-	for _, line := range renderLines(p, getGitState(p.SessionID), cols, verbose) {
+	fb := parseFallback()
+	for _, line := range renderLines(p, getGitState(p.SessionID), cols, verbose, fb) {
 		fmt.Println(line)
 	}
 }

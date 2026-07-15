@@ -137,6 +137,35 @@ type Payload struct {
 	} `json:"worktree"`
 }
 
+// ── CCR fallback (out-of-band, from env stamped by pick.sh) ──────────────────
+// The Claude Code payload can't reveal a proxied backend, so a CCR fallback
+// session's real route/window/reasoning arrive via env. Zero value = native.
+type fallback struct {
+	Route     string // raw CCR_ACTIVE_ROUTE, "" = native session
+	Provider  string // "nvidia"
+	Model     string // display model, vendor prefix stripped: "deepseek-v4-pro"
+	CtxWindow int    // real context window in tokens, 0 = unknown
+	Reasoning bool   // route actually reasons (not stripped)
+}
+
+func parseFallback() fallback {
+	route := os.Getenv("CCR_ACTIVE_ROUTE")
+	if route == "" {
+		return fallback{}
+	}
+	fb := fallback{Route: route, Reasoning: os.Getenv("CCR_REASONING") == "on"}
+	if i := strings.IndexByte(route, ','); i >= 0 {
+		fb.Provider, fb.Model = route[:i], route[i+1:]
+	} else {
+		fb.Model = route
+	}
+	if i := strings.LastIndexByte(fb.Model, '/'); i >= 0 {
+		fb.Model = fb.Model[i+1:]
+	}
+	fb.CtxWindow, _ = strconv.Atoi(os.Getenv("CCR_CTX_WINDOW"))
+	return fb
+}
+
 // ── Git (with 5-second cache keyed on session_id) ────────────────────────────
 type gitState struct {
 	Branch    string
@@ -450,7 +479,7 @@ func layoutTier(cols int) tier {
 // ── Render ────────────────────────────────────────────────────────────────────
 // renderLines builds the status line(s) for the given terminal width.
 // verbose forces the diagnostics line even below the wide tier.
-func renderLines(p Payload, git *gitState, cols int, verbose bool) []string {
+func renderLines(p Payload, git *gitState, cols int, verbose bool, fb fallback) []string {
 	t := layoutTier(cols)
 	showDiag := t == wide || verbose
 
@@ -835,7 +864,8 @@ func main() {
 	cols, _ := strconv.Atoi(os.Getenv("COLUMNS"))
 	verbose := os.Getenv("CLAUDE_STATUS_VERBOSE") == "1"
 
-	for _, line := range renderLines(p, getGitState(p.SessionID), cols, verbose) {
+	fb := parseFallback()
+	for _, line := range renderLines(p, getGitState(p.SessionID), cols, verbose, fb) {
 		fmt.Println(line)
 	}
 }

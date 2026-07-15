@@ -641,7 +641,20 @@ func renderLines(p Payload, git *gitState, cols int, verbose bool, fb fallback) 
 		ctxBarWidth = 24 // shape reads faster than numbers from peripheral vision
 	}
 	var secCtx string
-	if p.ContextWindow.UsedPercentage != nil {
+	switch {
+	case fb.Route != "":
+		usedK := p.ContextWindow.TotalInputTokens / 1000
+		if fb.CtxWindow > 0 {
+			pct := float64(p.ContextWindow.TotalInputTokens) / float64(fb.CtxWindow) * 100
+			secCtx = sec(
+				fmt.Sprintf("ctx %s %s%.0f%%%s", bar(pct, ctxBarWidth), pctColor(pct), pct, Reset),
+				fmt.Sprintf("%s%dk/%dk%s", Gray, usedK, fb.CtxWindow/1000, Reset),
+			)
+		} else {
+			// window unknown (NVIDIA reports none) — show usage, no fake denominator
+			secCtx = fmt.Sprintf("ctx %s%dk in%s", Gray, usedK, Reset)
+		}
+	case p.ContextWindow.UsedPercentage != nil:
 		pct := *p.ContextWindow.UsedPercentage
 		usedK := p.ContextWindow.TotalInputTokens / 1000
 		totalK := p.ContextWindow.ContextWindowSize / 1000

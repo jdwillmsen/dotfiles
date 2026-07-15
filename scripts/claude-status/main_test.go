@@ -506,3 +506,32 @@ func TestRenderFallbackShowsReasoningWhenOn(t *testing.T) {
 		t.Error("reasoning shown when Reasoning=true (e.g. gpt-oss)")
 	}
 }
+
+// ── Fallback context window rendering ──────────────────────────────────────
+
+func TestRenderFallbackKnownWindowUsesRealDenominator(t *testing.T) {
+	p := fullPayload()
+	p.ContextWindow.TotalInputTokens = 15000
+	fb := fbNvidia()
+	fb.CtxWindow = 128000 // e.g. an OpenRouter/vLLM route that reported a window
+	joined := stripANSI(strings.Join(renderLines(p, testGit(), 110, false, fb), "\n"))
+	if !strings.Contains(joined, "15k/128k") {
+		t.Errorf("want real denominator 15k/128k in %q", joined)
+	}
+	if strings.Contains(joined, "/200k") {
+		t.Error("must not use Opus's 200k window in fallback")
+	}
+}
+
+func TestRenderFallbackUnknownWindowShowsTokensOnly(t *testing.T) {
+	p := fullPayload()
+	p.ContextWindow.TotalInputTokens = 15000
+	fb := fbNvidia() // CtxWindow 0 = unknown (NVIDIA)
+	joined := stripANSI(strings.Join(renderLines(p, testGit(), 110, false, fb), "\n"))
+	if !strings.Contains(joined, "15k in") {
+		t.Errorf("want tokens-only 'ctx 15k in' in %q", joined)
+	}
+	if strings.Contains(joined, "/200k") || strings.Contains(joined, "/128k") {
+		t.Error("no denominator when window unknown")
+	}
+}

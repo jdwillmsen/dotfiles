@@ -15,7 +15,8 @@
       "models": [
         "deepseek-ai/deepseek-v4-pro",
         "deepseek-ai/deepseek-v4-flash",
-        "qwen/qwen3.5-397b-a17b"
+        "qwen/qwen3.5-397b-a17b",
+        "z-ai/glm-5.2"
       ],
       "transformer": {
         "use": [
@@ -56,9 +57,9 @@
   ],
   "Router": {
     "default": "ollama,gpt-oss:20b",
-    "think": "nvidia,deepseek-ai/deepseek-v4-pro",
+    "think": "nvidia,z-ai/glm-5.2",
     "background": "gpu-stack,openai/gpt-oss-20b",
-    "longContext": "openrouter,qwen/qwen3-coder:free",
+    "longContext": "nvidia,z-ai/glm-5.2",
     "longContextThreshold": 60000
   }
 }

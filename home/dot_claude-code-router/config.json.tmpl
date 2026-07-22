@@ -43,7 +43,7 @@
       "api_base_url": "http://192.168.1.50:8000/v1/chat/completions",
       "api_key": "dummy",
       "models": [
-        "openai/gpt-oss-20b"
+        "qwen/qwen3-coder-30b-a3b"
       ]
     },
     {
@@ -58,7 +58,7 @@
   "Router": {
     "default": "ollama,gpt-oss:20b",
     "think": "nvidia,z-ai/glm-5.2",
-    "background": "gpu-stack,openai/gpt-oss-20b",
+    "background": "gpu-stack,qwen/qwen3-coder-30b-a3b",
     "longContext": "nvidia,z-ai/glm-5.2",
     "longContextThreshold": 60000
   }

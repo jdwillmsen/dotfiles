@@ -101,14 +101,10 @@ jobs:
           # so apply once into the sandbox first; verify then confirms apply
           # and verify agree on the resulting state.
           chez_apply "$cfg" "$dest"
-          # --exclude=scripts: run_before_00-write-ci-age-key.sh isn't
-          # run_once_, so chezmoi has no persisted "already applied" state
-          # for it — diff/verify always reports it as a pending "new file"
-          # regardless of destination state. That's expected for any
-          # always-run script, not real drift, so scripts are out of scope
-          # for this file-state check (tests/scripts/*.sh cover the scripts
-          # themselves).
-          chezmoi verify --source "$CHEZ_SRC" --config "$cfg" --destination "$dest" --exclude=scripts
+          # chez_verify re-renders under the same HOME override chez_apply
+          # used — templates embedding .chezmoi.homeDir in file content
+          # would otherwise drift against the sandbox (see tests/lib.sh).
+          chez_verify "$cfg" "$dest"
 
       - name: Smoke test — chezmoi apply into temp HOME
         # CHEZMOI_AGE_KEY is already the real secret from the job env (not a

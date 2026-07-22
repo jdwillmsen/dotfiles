@@ -59,3 +59,13 @@ chez_render() { chezmoi execute-template --source "$CHEZ_SRC" --config "$1" < "$
 # decryption. RUNNER_TEMP already lives outside $HOME (system temp), so it
 # poses none of the leak risk HOME does.
 chez_apply() { HOME="$2" chezmoi apply --source "$CHEZ_SRC" --config "$1" --destination "$2" --force; }
+
+# chez_verify CONFIG DEST — verify DEST with the same HOME override as
+# chez_apply. On Linux .chezmoi.homeDir follows $HOME, and templates may
+# embed it in file *content* (e.g. dot_claude-code-router/config.json.tmpl's
+# transformer path), so verify must render in the same context apply did —
+# otherwise every homeDir-embedding file reports drift against the sandbox.
+# --exclude=scripts: always-run scripts (no run_once_ state) would report as
+# pending "new file" regardless of destination state; tests/scripts/*.sh
+# cover the scripts themselves.
+chez_verify() { HOME="$2" chezmoi verify --source "$CHEZ_SRC" --config "$1" --destination "$2" --exclude=scripts; }

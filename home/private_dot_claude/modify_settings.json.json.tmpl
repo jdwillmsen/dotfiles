@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # Defaults contributed by dotfiles; existing on-disk (runtime) values always win.
+# env is sized for a 1M-context model: MCP results can be twice the stock 25k
+# budget before truncation, and bash gets past the 2min default that long
+# builds were clipping. Auto-compact is deliberately left at its ~90% default.
 DEFAULTS='{
-  "model": "fable",
+  "model": "opus",
   "statusLine": { "type": "command", "command": "claude-status", "refreshInterval": 60 },
   "subagentStatusLine": { "type": "command", "command": "claude-status -subagents" },
   "theme": "dark",
   "cleanupPeriodDays": 90,
   "skipDangerousModePermissionPrompt": true,
-  "skipAutoPermissionPrompt": true
+  "skipAutoPermissionPrompt": true,
+  "env": {
+    "MAX_MCP_OUTPUT_TOKENS": "50000",
+    "BASH_DEFAULT_TIMEOUT_MS": "180000"
+  }
 }'
 # chezmoi feeds the current file on our stdin. That stdin is captured here
 # (not left connected to python3) because a `python3 - <<PYEOF` heredoc would

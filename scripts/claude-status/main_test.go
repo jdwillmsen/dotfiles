@@ -287,6 +287,49 @@ func TestRenderExceeds200kWarning(t *testing.T) {
 	}
 }
 
+func TestRenderExceeds200kSuppressedOnLargeWindow(t *testing.T) {
+	p := fullPayload()
+	p.ExceedsTokens = true
+	p.ContextWindow.ContextWindowSize = 1_000_000
+	joined := stripANSI(strings.Join(renderLines(p, testGit(), 110, false, fallback{}), "\n"))
+	if strings.Contains(joined, ">200k") {
+		t.Error("200k warning must not fire on a 1M window")
+	}
+}
+
+func TestModelLabelSplitsVariantMarker(t *testing.T) {
+	for _, tc := range []struct {
+		id, display string
+		label, mark string
+	}{
+		{"claude-sonnet-4-6", "Sonnet", "Sonnet 4.6", ""},
+		{"claude-sonnet-4-6", "Sonnet 4.6", "Sonnet 4.6", ""},
+		{"claude-opus-5[1m]", "Opus 5 (1M context)", "Opus 5", "1M"},
+		{"claude-sonnet-4-6[1m]", "Sonnet 4.6 (1M context)", "Sonnet 4.6", "1M"},
+		{"claude-opus-5[1m]", "", "opus-5", "1M"},
+		{"claude-fable-5", "Fable", "Fable", ""},
+	} {
+		label, mark := modelLabel(tc.id, tc.display)
+		if label != tc.label || mark != tc.mark {
+			t.Errorf("modelLabel(%q, %q) = %q, %q; want %q, %q",
+				tc.id, tc.display, label, mark, tc.label, tc.mark)
+		}
+	}
+}
+
+func TestRenderVariantMarkerIsDimmedNotInline(t *testing.T) {
+	p := fullPayload()
+	p.Model.ID = "claude-opus-5[1m]"
+	p.Model.DisplayName = "Opus 5 (1M context)"
+	lines := renderLines(p, testGit(), 110, false, fallback{})
+	if !strings.Contains(lines[0], Dim+"1M"+Reset) {
+		t.Error("variant marker not rendered dim")
+	}
+	if strings.Contains(stripANSI(lines[0]), "(1M context)") {
+		t.Error("raw display_name parenthetical leaked into the label")
+	}
+}
+
 func TestRenderOutputStyleShownExceptDefault(t *testing.T) {
 	p := fullPayload()
 	p.OutputStyle = &struct {

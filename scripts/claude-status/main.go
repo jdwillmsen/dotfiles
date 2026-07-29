@@ -293,30 +293,58 @@ func run(args ...string) string {
 
 // ── Formatting helpers ────────────────────────────────────────────────────────
 var (
-	modelRe    = regexp.MustCompile(`^(.+?)-(\d+)-(\d+)(?:-\d+)?$`)
-	hasVersion = regexp.MustCompile(`\d+\.\d+`)
+	modelRe     = regexp.MustCompile(`^(.+?)-(\d+)-(\d+)(?:-\d+)?$`)
+	hasVersion  = regexp.MustCompile(`\d+\.\d+`)
+	parenSuffix = regexp.MustCompile(`\s*\(([^)]+)\)\s*$`)
+	idVariant   = regexp.MustCompile(`\[([^\]]+)\]$`)
 )
 
-// modelLabel combines display_name with version parsed from id.
+// splitParenSuffix peels a trailing parenthetical off a display name, keeping
+// only its first word — the part that carries signal.
 //
-//	"claude-sonnet-4-6" + "Sonnet"      →  "Sonnet 4.6"
-//	"claude-sonnet-4-6" + "Sonnet 4.6"  →  "Sonnet 4.6"  (no duplicate)
-func modelLabel(id, displayName string) string {
+//	"Opus 5 (1M context)"  →  "Opus 5", "1M"
+//	"Sonnet 4.6"           →  "Sonnet 4.6", ""
+func splitParenSuffix(displayName string) (base, marker string) {
+	ms := parenSuffix.FindStringSubmatch(displayName)
+	if ms == nil {
+		return displayName, ""
+	}
+	base = strings.TrimSpace(strings.TrimSuffix(displayName, ms[0]))
+	marker, _, _ = strings.Cut(strings.TrimSpace(ms[1]), " ")
+	return base, marker
+}
+
+// modelLabel combines display_name with version parsed from id, returning the
+// variant marker separately so the caller can dim it against the model name.
+//
+//	"claude-sonnet-4-6" + "Sonnet"              →  "Sonnet 4.6", ""
+//	"claude-sonnet-4-6" + "Sonnet 4.6"          →  "Sonnet 4.6", ""  (no duplicate)
+//	"claude-opus-5[1m]" + "Opus 5 (1M context)" →  "Opus 5", "1M"
+func modelLabel(id, displayName string) (label, marker string) {
+	displayName, marker = splitParenSuffix(displayName)
 	m := strings.TrimPrefix(id, "claude-")
+	// A bracketed variant ("[1m]") would defeat modelRe's version match, so peel
+	// it off — and use it as the marker when display_name carried no parenthetical.
+	if ms := idVariant.FindStringSubmatch(m); ms != nil {
+		m = strings.TrimSuffix(m, ms[0])
+		if marker == "" {
+			marker = strings.ToUpper(ms[1])
+		}
+	}
 	if ms := modelRe.FindStringSubmatch(m); ms != nil {
 		version := ms[2] + "." + ms[3]
 		if displayName != "" {
 			if hasVersion.MatchString(displayName) {
-				return displayName // display_name already includes version
+				return displayName, marker // display_name already includes version
 			}
-			return displayName + " " + version
+			return displayName + " " + version, marker
 		}
-		return ms[1] + " " + version
+		return ms[1] + " " + version, marker
 	}
 	if displayName != "" {
-		return displayName
+		return displayName, marker
 	}
-	return m
+	return m, marker
 }
 
 // pctColor returns a 4-tier color scaled to auto-compact territory.
@@ -513,8 +541,11 @@ func renderLines(p Payload, git *gitState, cols int, verbose bool, fb fallback) 
 		}
 		secModel = s + outputStyle
 	default:
-		if label := modelLabel(p.Model.ID, p.Model.DisplayName); label != "" {
+		if label, marker := modelLabel(p.Model.ID, p.Model.DisplayName); label != "" {
 			s := vimPrefix + Purple + Bold + "⬡ " + label + Reset
+			if marker != "" {
+				s += " " + Dim + marker + Reset
+			}
 			if p.Effort != nil && p.Effort.Level != "" {
 				s += "  " + Gray + p.Effort.Level + Reset
 			}
@@ -666,7 +697,9 @@ func renderLines(p Payload, git *gitState, cols int, verbose bool, fb fallback) 
 		} else if pct >= 85 {
 			suffix = "  " + Red + "⚡ soon" + Reset
 		}
-		if p.ExceedsTokens {
+		// exceeds_200k_tokens is only a warning on a 200k-window model. On a 1M
+		// window it fires at 20% used, where the pct bar is the honest signal.
+		if p.ExceedsTokens && p.ContextWindow.ContextWindowSize <= 200_000 {
 			suffix += "  " + BoldRed + "⚠ >200k" + Reset
 		}
 		secCtx = sec(

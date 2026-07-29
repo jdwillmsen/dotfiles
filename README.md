@@ -40,7 +40,7 @@ dotfiles/
 │   └── run_*                # side-effect scripts (TPM, Go build, MCP, plugins, rtk)
 ├── scripts/              # compiled tools (claude-status Go binary source)
 ├── tests/                # template unit tests, script unit tests, smoke test
-└── docs/                 # secrets, tmux, and design docs
+└── docs/                 # secrets, tmux, agentic workflow, and design docs
 ```
 
 ## Testing

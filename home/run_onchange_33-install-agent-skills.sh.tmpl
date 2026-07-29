@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+command -v npx &>/dev/null || { echo "npx not found — skipping agent skills"; exit 0; }
+
+# The skills CLI resolves project-vs-global from the working directory, so a run
+# from anywhere else silently installs into that repo instead of ~/.
+cd "$HOME"
+
+{{ range .agentSkills }}
+if [ -e "$HOME/.claude/skills/{{ .name }}" ]; then
+    echo "skill {{ .name }} already present — skipping"
+else
+    npx -y skills add {{ .source | quote }} --skill {{ .name | quote }} \
+        --global --agent claude-code --yes ||
+        echo "skill {{ .name }} install failed"
+fi
+{{ end }}
+
+# Report skills present but undeclared rather than deleting them: this file is
+# the source of truth for what *should* exist, but an undeclared skill may have
+# been added deliberately mid-session and silently deleting it would be hostile.
+declared=$'{{ range .agentSkills }}{{ .name }}\n{{ end }}{{ range .claudeSkillsDir }}{{ .name }}\n{{ end }}'
+# Skills that provision themselves outside this file.
+declared+=$'no-mistakes\naxi-quickref\njira-create\n'
+undeclared=""
+for d in "$HOME/.claude/skills"/*; do
+    [ -e "$d" ] || continue
+    n="$(basename "$d")"
+    grep -qxF "$n" <<< "$declared" || undeclared+=" $n"
+done
+if [ -n "$undeclared" ]; then
+    echo "note: undeclared skills present (add to .chezmoidata.yaml or remove):$undeclared"
+fi
+
+# A skill whose target vanished upstream leaves a symlink that resolves to
+# nothing; Claude Code then lists a skill it cannot read.
+for l in "$HOME/.claude/skills"/*; do
+    if [ -L "$l" ] && [ ! -e "$l" ]; then
+        echo "removing dangling skill symlink: $(basename "$l")"
+        rm -f "$l"
+    fi
+done
+
+echo "agent skills reconciled"

@@ -347,12 +347,12 @@ func modelLabel(id, displayName string) (label, marker string) {
 	return m, marker
 }
 
-// pctColor returns a 4-tier color scaled to auto-compact territory.
-// Auto-compact fires at ~90% by default, so tiers are anchored there.
+// pctColor returns a 4-tier color for quantities whose only meaningful scale is
+// percentage — rate limit quotas. The context bar uses ctxColor instead.
 func pctColor(pct float64) string {
 	switch {
 	case pct >= 90:
-		return BoldRed // compact imminent
+		return BoldRed
 	case pct >= 75:
 		return Red
 	case pct >= 50:
@@ -362,12 +362,64 @@ func pctColor(pct float64) string {
 	}
 }
 
-func bar(pct float64, width int) string {
+const defaultAutocompactPct = 90.0
+
+// autocompactPct reports where auto-compact fires, honouring the same override
+// Claude Code reads so the bar's red zone tracks the real trigger.
+func autocompactPct() float64 {
+	if v := os.Getenv("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 && f <= 100 {
+			return f
+		}
+	}
+	return defaultAutocompactPct
+}
+
+// ctxColor tiers the context bar on tokens of runway left rather than percent
+// used. 75% of a 1M window still leaves 250k to work in — more than an entire
+// 200k-model session — and shouldn't read as urgent; the same 75% of a 200k
+// window leaves 50k and should. Only the top tier stays on percent, because
+// auto-compact triggers on percent regardless of how many tokens that is.
+// Thresholds are chosen to reproduce the old tiers exactly on a 200k window.
+func ctxColor(pct float64, remaining int) string {
+	compactAt := autocompactPct()
+	switch {
+	case pct >= compactAt:
+		return BoldRed
+	// Whichever signal is more urgent wins: little runway left in absolute
+	// terms, or close enough to the trigger that the "⚡ soon" suffix is
+	// already showing — the bar and that suffix must not disagree.
+	case remaining <= 50_000 || pct >= compactAt-5:
+		return Red
+	case remaining < 150_000:
+		return Yellow
+	default:
+		return Green
+	}
+}
+
+// fmtWindowTokens renders a context-window quantity in the largest unit that
+// stays readable, so a 1M window reads as "1M" rather than "1000k". Distinct
+// from fmtTokens, which blanks a zero and drops the unit below 1000 — display
+// rules that suit a subagent row but would render a window as "ctx /1M".
+func fmtWindowTokens(n int) string {
+	if n >= 1_000_000 {
+		if n%1_000_000 == 0 {
+			return fmt.Sprintf("%dM", n/1_000_000)
+		}
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	}
+	return fmt.Sprintf("%dk", n/1000)
+}
+
+func bar(pct float64, width int) string { return barWith(pct, width, pctColor(pct)) }
+
+func barWith(pct float64, width int, color string) string {
 	filled := int(pct / 100 * float64(width))
 	if filled > width {
 		filled = width
 	}
-	return pctColor(pct) + strings.Repeat("█", filled) + Gray + strings.Repeat("░", width-filled) + Reset
+	return color + strings.Repeat("█", filled) + Gray + strings.Repeat("░", width-filled) + Reset
 }
 
 func fmtDuration(ms int64) string {
@@ -676,25 +728,27 @@ func renderLines(p Payload, git *gitState, cols int, verbose bool, fb fallback) 
 	var secCtx string
 	switch {
 	case fb.Route != "":
-		usedK := p.ContextWindow.TotalInputTokens / 1000
+		used := p.ContextWindow.TotalInputTokens
 		if fb.CtxWindow > 0 {
-			pct := float64(p.ContextWindow.TotalInputTokens) / float64(fb.CtxWindow) * 100
+			pct := float64(used) / float64(fb.CtxWindow) * 100
+			c := ctxColor(pct, fb.CtxWindow-used)
 			secCtx = sec(
-				fmt.Sprintf("ctx %s %s%.0f%%%s", bar(pct, ctxBarWidth), pctColor(pct), pct, Reset),
-				fmt.Sprintf("%s%dk/%dk%s", Gray, usedK, fb.CtxWindow/1000, Reset),
+				fmt.Sprintf("ctx %s %s%.0f%%%s", barWith(pct, ctxBarWidth, c), c, pct, Reset),
+				fmt.Sprintf("%s%s/%s%s", Gray, fmtWindowTokens(used), fmtWindowTokens(fb.CtxWindow), Reset),
 			)
 		} else {
 			// window unknown (NVIDIA reports none) — show usage, no fake denominator
-			secCtx = fmt.Sprintf("ctx %s%dk in%s", Gray, usedK, Reset)
+			secCtx = fmt.Sprintf("ctx %s%s in%s", Gray, fmtWindowTokens(used), Reset)
 		}
 	case p.ContextWindow.UsedPercentage != nil:
 		pct := *p.ContextWindow.UsedPercentage
-		usedK := p.ContextWindow.TotalInputTokens / 1000
-		totalK := p.ContextWindow.ContextWindowSize / 1000
+		used := p.ContextWindow.TotalInputTokens
+		remaining := p.ContextWindow.ContextWindowSize - used
+		compactAt := autocompactPct()
 		suffix := ""
-		if pct >= 90 {
+		if pct >= compactAt {
 			suffix = "  " + BoldRed + "⚡ compact" + Reset
-		} else if pct >= 85 {
+		} else if pct >= compactAt-5 {
 			suffix = "  " + Red + "⚡ soon" + Reset
 		}
 		// exceeds_200k_tokens is only a warning on a 200k-window model. On a 1M
@@ -702,9 +756,10 @@ func renderLines(p Payload, git *gitState, cols int, verbose bool, fb fallback) 
 		if p.ExceedsTokens && p.ContextWindow.ContextWindowSize <= 200_000 {
 			suffix += "  " + BoldRed + "⚠ >200k" + Reset
 		}
+		c := ctxColor(pct, remaining)
 		secCtx = sec(
-			fmt.Sprintf("ctx %s %s%.0f%%%s", bar(pct, ctxBarWidth), pctColor(pct), pct, Reset),
-			fmt.Sprintf("%s%dk/%dk%s", Gray, usedK, totalK, Reset),
+			fmt.Sprintf("ctx %s %s%.0f%%%s", barWith(pct, ctxBarWidth, c), c, pct, Reset),
+			fmt.Sprintf("%s%s/%s%s", Gray, fmtWindowTokens(used), fmtWindowTokens(p.ContextWindow.ContextWindowSize), Reset),
 		) + suffix
 	}
 

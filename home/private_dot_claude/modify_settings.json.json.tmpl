@@ -6,7 +6,7 @@ set -euo pipefail
 # builds were clipping. Auto-compact is deliberately left at its ~90% default.
 DEFAULTS='{
   "model": "opus",
-  "statusLine": { "type": "command", "command": "claude-status", "refreshInterval": 60 },
+  "statusLine": { "type": "command", "command": "claude-status", "refreshInterval": 10 },
   "subagentStatusLine": { "type": "command", "command": "claude-status -subagents" },
   "theme": "dark",
   "cleanupPeriodDays": 90,

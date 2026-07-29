@@ -5,14 +5,18 @@
 {{- if eq .machineRole "work" -}}
 {{-   $workIdentity = include "dot_config/private_git/encrypted_work-identity.age" | decrypt | fromYaml -}}
 {{- end -}}
+{{- /* Only the base layer: ~/.gitconfig -> ~/.gitconfig.local -> ~/.gitconfig-<profile>,
+       the latter two unmanaged and selected per gitdir. Defaults here are what a repo
+       gets when no machine-local layer claims it, so they use the GitHub noreply
+       address — a real address reaching public history is not recoverable. */ -}}
 [user]
     name = Jake Willmsen
 {{- if eq .machineRole "work" }}
-    email = {{ $workIdentity.email | default "jdwillmsen@gmail.com" }}
-    signingkey = {{ $workIdentity.signingkey | default "80F11F099D474F1F" }}
+    email = {{ $workIdentity.email | default "42048994+jdwillmsen@users.noreply.github.com" }}
+    signingkey = {{ $workIdentity.signingkey | default "949C342C7907CC24" }}
 {{- else }}
-    email = jdwillmsen@gmail.com
-    signingkey = 80F11F099D474F1F
+    email = 42048994+jdwillmsen@users.noreply.github.com
+    signingkey = 949C342C7907CC24
 {{- end }}
 
 [commit]
@@ -26,6 +30,22 @@
     autocrlf = input
     excludesfile = ~/.gitignore_global
     whitespace = fix,trailing-space,cr-at-eol
+{{- if lookPath "delta" }}
+    pager = delta
+
+{{/* Guarded on delta resolving at apply time: naming a pager that is not on PATH
+     breaks every paging command, so an un-provisioned machine gets no delta config
+     at all. Installed after a first apply, it takes effect on the next one. */ -}}
+[interactive]
+    diffFilter = delta --color-only
+
+[delta]
+    navigate = true
+    line-numbers = true
+
+[merge]
+    conflictstyle = zdiff3
+{{- end }}
 
 [init]
     defaultBranch = main

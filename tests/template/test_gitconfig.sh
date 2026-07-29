@@ -6,8 +6,11 @@ here="$(cd "$(dirname "$0")/../.." && pwd)"
 chez_require_key
 render() { chez_render "$(chez_init "$1")" "$here/home/dot_gitconfig.tmpl"; }
 p="$(render personal)"
-echo "$p" | grep -q "jdwillmsen@gmail.com" || { echo "FAIL: personal email"; exit 1; }
-echo "$p" | grep -q "signingkey = 80F11F099D474F1F" || { echo "FAIL: signing key"; exit 1; }
+# noreply, not the real address: this is the base layer, applying to any repo no
+# machine-local includeIf claims. A real address in public history is permanent.
+echo "$p" | grep -q "42048994+jdwillmsen@users.noreply.github.com" || { echo "FAIL: personal email"; exit 1; }
+echo "$p" | grep -q "jdwillmsen@gmail.com" && { echo "FAIL: real address must not be a template default"; exit 1; }
+echo "$p" | grep -q "signingkey = 949C342C7907CC24" || { echo "FAIL: signing key"; exit 1; }
 echo "$p" | grep -q "helper = store" && { echo "FAIL: plaintext store helper still present"; exit 1; }
 e="$(render ephemeral)"
 echo "$e" | grep -q "gpgsign = false" || { echo "FAIL: ephemeral should disable signing"; exit 1; }
@@ -24,5 +27,15 @@ echo "$p" | grep -q 'path = ~/.gitconfig.local' || { echo "FAIL: gitconfig.local
 dest="$(mktemp -d)"
 chez_apply "$(chez_init work)" "$dest" >/dev/null
 w="$(grep -A2 '\[user\]' "$dest/.gitconfig")"
-echo "$w" | grep -q "jdwillmsen@gmail.com" || { echo "FAIL: work role should fall back to default email for blank work-identity"; exit 1; }
+echo "$w" | grep -q "42048994+jdwillmsen@users.noreply.github.com" || { echo "FAIL: work role should fall back to default email for blank work-identity"; exit 1; }
+
+# delta config is gated on the binary resolving at apply time — naming a pager
+# that is not on PATH breaks every paging command. Assert whichever branch this
+# machine is actually in, so both are covered across CI and dev machines.
+if command -v delta &>/dev/null; then
+    echo "$p" | grep -q "pager = delta" || { echo "FAIL: delta present but pager not configured"; exit 1; }
+    echo "$p" | grep -q "diffFilter = delta --color-only" || { echo "FAIL: delta diffFilter missing"; exit 1; }
+else
+    echo "$p" | grep -q "delta" && { echo "FAIL: delta config emitted without the binary"; exit 1; }
+fi
 echo "PASS"

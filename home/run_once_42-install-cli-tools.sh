@@ -20,9 +20,16 @@ install_one() {
     if [ -n "$brew_id" ] && command -v brew &>/dev/null; then
         brew install "$brew_id" || echo "$cmd brew install failed"
     elif [ -n "$winget_id" ] && command -v winget &>/dev/null; then
-        winget install --id "$winget_id" --silent \
-            --accept-package-agreements --accept-source-agreements ||
-            echo "$cmd winget install failed"
+        # An MSI-based tool (starship) lands outside this shell's inherited PATH,
+        # so command -v misses it and winget then exits non-zero with "no upgrade
+        # found" — reported as a failure when nothing is wrong. Ask winget first.
+        if winget list --id "$winget_id" --exact &>/dev/null; then
+            echo "$cmd already installed — restart your shell to pick it up on PATH"
+        else
+            winget install --id "$winget_id" --silent \
+                --accept-package-agreements --accept-source-agreements ||
+                echo "$cmd winget install failed"
+        fi
     elif [ -n "$scoop_id" ] && command -v scoop &>/dev/null; then
         scoop install "$scoop_id" || echo "$cmd scoop install failed"
     elif [ -n "$cargo_id" ] && command -v cargo &>/dev/null; then

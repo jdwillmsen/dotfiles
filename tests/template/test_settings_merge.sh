@@ -15,7 +15,7 @@ echo "$out" | "$PY" -c 'import json,sys; d=json.load(sys.stdin); \
  assert d["theme"]=="light", "user theme lost"; \
  assert d["model"]=="haiku", "user model overwritten"; \
  assert d["statusLine"]["command"]=="claude-status", "statusLine missing"; \
- assert d["statusLine"]["refreshInterval"]==60, "refreshInterval default missing"; \
+ assert d["statusLine"]["refreshInterval"]==10, "refreshInterval default missing"; \
  assert d["subagentStatusLine"]["command"]=="claude-status -subagents", "subagentStatusLine missing"; print("PASS")'
 
 # A fresh install (no existing file) takes the dotfiles model default.
@@ -38,4 +38,4 @@ existing='{"statusLine":{"type":"command","command":"my-status"}}'
 out="$(printf '%s' "$existing" | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
 echo "$out" | "$PY" -c 'import json,sys; d=json.load(sys.stdin); \
  assert d["statusLine"]["command"]=="my-status", "user statusLine command overwritten"; \
- assert d["statusLine"]["refreshInterval"]==60, "refreshInterval not merged into existing statusLine"; print("PASS")'
+ assert d["statusLine"]["refreshInterval"]==10, "refreshInterval not merged into existing statusLine"; print("PASS")'

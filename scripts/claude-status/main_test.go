@@ -330,6 +330,86 @@ func TestRenderVariantMarkerIsDimmedNotInline(t *testing.T) {
 	}
 }
 
+// The 200k tiers are the calibration this was tuned against, so they must come
+// out of the token-based rule unchanged; only the 1M rows are new behaviour.
+func TestCtxColorPreserves200kTiersAndRelaxes1M(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		pct    float64
+		window int
+		want   string
+	}{
+		{"200k 25%", 25, 200_000, Green},
+		{"200k 50%", 50, 200_000, Yellow},
+		{"200k 75%", 75, 200_000, Red},
+		{"200k 90%", 90, 200_000, BoldRed},
+		{"1M 26%", 26, 1_000_000, Green},
+		{"1M 50% still roomy", 50, 1_000_000, Green},
+		{"1M 75% no longer urgent", 75, 1_000_000, Green},
+		// 150k of runway left, but the "⚡ soon" suffix is already showing — the
+		// bar tracks it rather than staying green underneath a warning.
+		{"1M 85% matches soon-suffix", 85, 1_000_000, Red},
+		{"1M 80% roomy and quiet", 80, 1_000_000, Green},
+		{"1M 90% compact imminent", 90, 1_000_000, BoldRed},
+	} {
+		used := int(tc.pct / 100 * float64(tc.window))
+		if got := ctxColor(tc.pct, tc.window-used); got != tc.want {
+			t.Errorf("%s: ctxColor(%v, %d) = %q, want %q",
+				tc.name, tc.pct, tc.window-used, got, tc.want)
+		}
+	}
+}
+
+func TestCtxColorHonoursAutocompactOverride(t *testing.T) {
+	t.Setenv("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", "60")
+	if got := ctxColor(65, 350_000); got != BoldRed {
+		t.Errorf("past the overridden compact threshold = %q, want BoldRed", got)
+	}
+	if got := ctxColor(55, 450_000); got == BoldRed {
+		t.Error("below the overridden threshold must not be BoldRed")
+	}
+}
+
+func TestAutocompactPctRejectsGarbage(t *testing.T) {
+	for _, bad := range []string{"", "abc", "0", "-10", "150"} {
+		t.Setenv("CLAUDE_AUTOCOMPACT_PCT_OVERRIDE", bad)
+		if got := autocompactPct(); got != defaultAutocompactPct {
+			t.Errorf("override %q = %v, want fallback %v", bad, got, defaultAutocompactPct)
+		}
+	}
+}
+
+func TestFmtWindowTokens(t *testing.T) {
+	for _, tc := range []struct {
+		in   int
+		want string
+	}{
+		{260_000, "260k"},
+		{1_000_000, "1M"},
+		{1_500_000, "1.5M"},
+		{200_000, "200k"},
+	} {
+		if got := fmtWindowTokens(tc.in); got != tc.want {
+			t.Errorf("fmtWindowTokens(%d) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestRenderMillionWindowDenominatorNotThousandK(t *testing.T) {
+	p := fullPayload()
+	pct := 26.0
+	p.ContextWindow.UsedPercentage = &pct
+	p.ContextWindow.TotalInputTokens = 260_000
+	p.ContextWindow.ContextWindowSize = 1_000_000
+	joined := stripANSI(strings.Join(renderLines(p, testGit(), 110, false, fallback{}), "\n"))
+	if strings.Contains(joined, "1000k") {
+		t.Error("1M window still rendering as 1000k")
+	}
+	if !strings.Contains(joined, "260k/1M") {
+		t.Errorf("want 260k/1M in %q", joined)
+	}
+}
+
 func TestRenderOutputStyleShownExceptDefault(t *testing.T) {
 	p := fullPayload()
 	p.OutputStyle = &struct {

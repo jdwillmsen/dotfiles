@@ -349,6 +349,7 @@ A ticket is Ready when a competent contributor — human or agent — could star
 - [ ] Summary ≤80 chars, action verb, specific noun — greppable and unambiguous in a backlog list
 - [ ] Problem/Objective states current state and desired state, one sentence each
 - [ ] ≥1 evidence artifact: exact log/error text, file path + line, screenshot, incident timestamp, or command output — never paraphrased
+- [ ] Evidence carries a date (command timestamp, "observed YYYY-MM-DD", or the session's date) — a reader picking this up later needs to know how stale it is; anything gathered more than ~a week before filing is re-verified against live state before being written down as fact, not assumed still true
 - [ ] Parent anchored to a verified Epic (searched, scope-checked — not guessed) — no orphans
 - [ ] Acceptance criteria / deliverables are **observable**: a reviewer can answer "done?" yes/no without interpretation
 - [ ] Dependencies enumerated as issue keys (`Blocks:` / `Blocked by:` / "none") — verified live via JQL, not from memory

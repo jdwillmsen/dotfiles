@@ -39,3 +39,5 @@ target/
 
 # OS temp
 .cache/
+
+**/.claude/settings.local.json

@@ -8,11 +8,15 @@ skills (progressive disclosure), reference tables in repo docs.
 - Human attention belongs at the **start** (planning, requirements, design) and
   **end** (verification, quality bar) of a task; agents own the middle.
   Parallelize independent work across agents/worktrees.
-- Reproduce bugs end-to-end **before** fixing (`diagnose` skill).
+- Reproduce bugs end-to-end **before** fixing
+  (`mattpocock-skills:diagnosing-bugs`).
 - Don't over-weight development cost: models inherit human time estimates and
   pick cheap/low-quality paths. Optimize for correctness and review cost.
-- Long-running/overnight loops (`/loop`, ralph-loop) always get **hard caps**:
-  max iterations, token budget, and an explicit stop condition. Never uncapped.
+- Long-running/overnight loops (`/loop`, ralph-loop, `gnhf`) always get **hard
+  caps**: max iterations, token budget, explicit stop condition. Never uncapped.
+- Never install skills casually — they run with full agent permissions, and
+  popular ones have benchmarked *worse* while costing more. Rationale and the
+  full tool inventory: `docs/agentic-workflow.md` (dotfiles repo).
 
 ## Code Comments
 

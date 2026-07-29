@@ -14,3 +14,28 @@ claudePlugins:
 claudeSkillsDir:
   - name: mattpocock-skills
     url: "https://github.com/mattpocock/skills"
+# Individually-extracted upstream skills, installed via the vercel-labs skills
+# CLI. Kept separate from claudeSkillsDir because those repos are whole-repo
+# clones; these pull one skill folder out of a repo that is mostly something
+# else (no-mistakes and lavish-axi are CLI projects that happen to ship a skill).
+# Do not add mattpocock/skills here — it arrives via claudeSkillsDir above, and
+# declaring it twice is what caused every skill in it to load twice.
+# no-mistakes is deliberately absent: `no-mistakes init` installs its own skill
+# at user level, so pulling it from here as well would install it twice.
+agentSkills:
+  - name: axi
+    source: kunchenguid/axi
+  - name: lavish
+    source: kunchenguid/lavish-axi
+  - name: find-skills
+    source: vercel-labs/skills
+# CLIs the skills above drive. lavish is absent because its skill shells out to
+# `npx -y lavish-axi`, so there is nothing to install.
+agentClis:
+  - name: no-mistakes
+    kind: script
+    posixUrl: "https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh"
+    windowsUrl: "https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.ps1"
+  - name: gnhf
+    kind: npm
+    package: gnhf

@@ -18,9 +18,14 @@ zstyle ':completion:*' matcher-list 'm:{a-z}={A-Z}'
 # Directory navigation
 setopt AUTO_CD AUTO_PUSHD PUSHD_IGNORE_DUPS
 
-# Prompt
+# Prompt — starship supersedes PS1 when present; the literal stays as the fallback
+# so a machine without it still gets a readable prompt.
 autoload -U colors && colors
 PS1="%{$fg[green]%}%n@%m%{$reset_color%}:%{$fg[blue]%}%~%{$reset_color%}%# "
+if command -v starship &>/dev/null; then eval "$(starship init zsh)"; fi
+
+# zoxide (provides `z`) registers a chpwd hook, so it needs compinit to have run
+if command -v zoxide &>/dev/null; then eval "$(zoxide init zsh)"; fi
 
 # nvm
 export NVM_DIR="$HOME/.nvm"

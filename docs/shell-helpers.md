@@ -1,8 +1,12 @@
 # Shell Helpers Reference
 
-Worktree helpers, sourced automatically in both shells. Moved out of the global
-CLAUDE.md so sessions don't pay the token cost of reference tables; the hard
-rules live there, the lookup detail lives here.
+Worktree helpers. Moved out of the global CLAUDE.md so sessions don't pay the
+token cost of reference tables; the hard rules live there, the lookup detail
+lives here.
+
+Bash only. The script uses `mapfile` and 0-indexed arrays, neither of which zsh
+provides, so `.zshrc` deliberately does not source it and the file returns early
+if sourced by a non-bash shell. PowerShell has its own implementation below.
 
 ## Git Bash (`~/.bashrc` → `~/.claude/scripts/worktree-helpers.sh`)
 
@@ -18,8 +22,29 @@ wtd feat/auth-jwt       # remove worktree + delete branch (tab-completes)
 wtd -f feat/auth-jwt    # force remove
 wtd -k feat/auth-jwt    # keep branch, remove worktree only
 wtp                     # prune stale metadata + fetch --prune
-wtclean                 # remove all merged-branch worktrees
+wtclean                 # remove merged-branch worktrees (prompts)
+wtclean -n              # list what would be removed, change nothing
+wtclean -y              # remove without prompting (required non-interactively)
 ```
+
+### How `wtclean` decides a branch is merged
+
+`git branch --merged` is not enough. Squash merges rewrite SHAs, so a
+squash-merged branch never becomes an ancestor of the default branch and an
+ancestry check reports nothing to clean — in a squash-only repo it can never
+clean anything. `wtclean` tries ancestry first (correct and offline for
+fast-forward and merge-commit workflows), then falls back to asking the forge:
+
+```bash
+gh pr list --head <branch> --state merged
+```
+
+Without `gh`, a squash-merged branch is reported unmerged and kept. That is
+deliberate — the function deletes, so "no verdict" has to mean "keep".
+
+Non-interactively (`[ ! -t 0 ]`), `wtclean` refuses and exits 2 rather than
+prompting. A bare `read` on closed stdin returns empty, which reads as
+"declined", and an agent would see a silent no-op that looks like success.
 
 ## PowerShell (`~/.claude/scripts/worktree-helpers.ps1`)
 

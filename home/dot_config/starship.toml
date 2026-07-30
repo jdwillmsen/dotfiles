@@ -1,65 +1,167 @@
 # Starship prompt. Activated by the `command -v starship` guard in .bashrc, so
 # this file only takes effect on machines where run_once_42 installed the binary.
-# Glyphs below come from the Nerd Font private use area — run_once_44 installs
-# the family, and the terminal must be pointed at it or they render as tofu.
+# Glyphs come from the Nerd Font private use area — run_once_44 installs the
+# family, and the terminal must be pointed at it or they render as tofu.
 
+palette = "mocha"
+
+# Two lines on purpose: context grows (deep paths, long branches, k8s context,
+# language versions) and a single line would push the cursor far right and wrap
+# mid-command. The frame keeps the typing column fixed regardless of context.
 format = """
+[╭─](frame)\
 $username\
 $directory\
 $git_branch\
+$git_state\
 $git_status\
+$nodejs$python$golang$rust$java\
+$kubernetes\
 $cmd_duration\
+$jobs\
 $line_break\
-$character"""
+[╰─](frame)$character"""
+
+right_format = "$status$time"
 
 add_newline = true
 
+[character]
+success_symbol = "[❯](green)"
+error_symbol = "[❯](red)"
+vimcmd_symbol = "[❮](peach)"
+
+# --- context ------------------------------------------------------------------
+
+# The Windows Terminal Git Bash profile sets "elevate": true, so this renders on
+# every prompt. A literal badge beats the bare username it replaced: "jdwil" and
+# "Administrator" both read as names, and only one of them means admin rights.
+[username]
+format = "[ ADMIN ](bg:red fg:crust bold)[ ](fg:red)"
+show_always = false
+
 [directory]
-# Repo-relative paths keep the prompt short inside deep trees; the three-segment
-# cap bounds it everywhere else.
+# Repo-relative keeps deep trees short; the repo name is kept so the path still
+# says which project you are in.
 truncate_to_repo = true
-truncation_length = 3
-truncation_symbol = "…/"
-style = "bold cyan"
+truncation_length = 4
+# No ellipsis prefix: with truncate_to_repo the first component is the repo
+# name, and "…/dotfiles" reads as a cut-off path when it is actually the root.
+truncation_symbol = ""
+# Git Bash speaks POSIX paths; starship would otherwise print the Windows
+# separator and the prompt would disagree with everything you type into it.
+use_os_path_sep = false
+style = "blue bold"
+read_only = " "
+read_only_style = "red"
+format = "[$path]($style)[$read_only]($read_only_style) "
+
+# --- git ----------------------------------------------------------------------
 
 [git_branch]
 symbol = " "
-style = "bold purple"
+style = "mauve bold"
+format = "[$symbol$branch]($style) "
+
+# Rebase/merge/bisect state is the most useful thing a prompt can surface,
+# because it changes what the next command should be.
+[git_state]
+style = "peach bold"
+format = "[\\($state( $progress_current/$progress_total)\\)]($style) "
 
 [git_status]
-style = "bold yellow"
+style = "yellow"
+format = "[$all_status$ahead_behind]($style) "
+conflicted = "[~${count}](red) "
+ahead = "⇡${count} "
+behind = "⇣${count} "
+diverged = "⇕⇡${ahead_count}⇣${behind_count} "
+untracked = "?${count} "
+stashed = "[*${count}](sapphire) "
+modified = "!${count} "
+staged = "[+${count}](green) "
+renamed = "»${count} "
+deleted = "[✘${count}](red) "
+
+# --- toolchains ---------------------------------------------------------------
+# Version modules are detection-gated by starship, so each costs a segment only
+# inside a project that actually uses that toolchain.
+
+[nodejs]
+symbol = " "
+style = "green"
+format = "[$symbol($version)]($style) "
+
+[python]
+symbol = " "
+style = "yellow"
+format = "[$symbol($version)( \\($virtualenv\\))]($style) "
+
+[golang]
+symbol = " "
+style = "sky"
+format = "[$symbol($version)]($style) "
+
+[rust]
+symbol = " "
+style = "peach"
+format = "[$symbol($version)]($style) "
+
+[java]
+symbol = " "
+style = "red"
+format = "[$symbol($version)]($style) "
+
+# Off by default upstream, and worth enabling here: acting on the wrong cluster
+# is expensive and invisible without a prompt segment.
+[kubernetes]
+disabled = false
+symbol = "󱃾 "
+style = "sapphire"
+format = "[$symbol$context( \\($namespace\\))]($style) "
+detect_files = ["kubeconfig", "Chart.yaml", "skaffold.yaml"]
+detect_folders = ["k8s", "helm", "helm-charts", "manifests"]
+
+# --- feedback -----------------------------------------------------------------
 
 [cmd_duration]
-# Below two seconds the timing is noise and costs a prompt line's worth of width.
+# Below two seconds the number is noise; above it, it is the thing you wanted.
 min_time = 2000
-format = "took [$duration]($style) "
-style = "yellow"
+style = "overlay"
+format = "[󰔟 $duration]($style) "
 
-[character]
-success_symbol = "[❯](bold green)"
-error_symbol = "[❯](bold red)"
+[jobs]
+symbol = " "
+style = "sapphire"
+number_threshold = 1
+format = "[$symbol$number]($style) "
 
-# --- Elevated-shell indicator -------------------------------------------------
-# The Windows Terminal Git Bash profile sets "elevate": true, so every shell runs
-# as Administrator and this module renders on every prompt. That makes it the one
-# module here with a real trade-off rather than a cosmetic default, because a
-# permanent warning is the kind users stop seeing.
-#
-# TODO(jdwil): tune the three settings below to how you want elevation surfaced.
-#   - `format` — the text. Currently the bare username, which is what produced
-#     the "Administrator" you didn't recognise. A literal marker ("⚡ ADMIN",
-#     "[root]") reads faster than a name you have to interpret.
-#   - `style_root` — how loud. `bold red` is maximum salience; `dimmed yellow`
-#     concedes that you've accepted the risk and want it out of the way.
-#   - `show_always` — `false` shows it only when elevated, so the indicator
-#     carries information. `true` shows it always, which costs width but means a
-#     *missing* marker never reads as "not elevated" when the module is broken.
-#
-# The trade-off: you deliberately chose to keep elevation on, so this marker is
-# your only standing cue that everything you run has admin rights. Loud enough to
-# notice before a destructive command, quiet enough that you don't filter it out.
-[username]
-format = "[$user]($style) in "
-style_root = "bold red"
-style_user = "bold yellow"
-show_always = false
+# Right-aligned so a failure is visible without shifting the command column.
+[status]
+disabled = false
+style = "red bold"
+symbol = "✘ "
+format = "[$symbol$common_meaning$signal_name$maybe_int]($style) "
+
+[time]
+disabled = false
+time_format = "%H:%M"
+style = "overlay"
+format = "[$time]($style)"
+
+# --- palette ------------------------------------------------------------------
+# Catppuccin Mocha. Kept as a named palette so the styles above read as intent
+# ("mauve", "overlay") rather than hex, and retheming is a single block.
+
+[palettes.mocha]
+frame = "#585b70"
+overlay = "#6c7086"
+crust = "#11111b"
+red = "#f38ba8"
+peach = "#fab387"
+yellow = "#f9e2af"
+green = "#a6e3a1"
+sky = "#89dceb"
+sapphire = "#74c7ec"
+blue = "#89b4fa"
+mauve = "#cba6f7"

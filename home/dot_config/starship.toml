@@ -26,6 +26,12 @@ right_format = "$status$time"
 
 add_newline = true
 
+# The 30ms default is not enough to list a cold C:\Windows\System32, and a scan
+# that times out both warns above the prompt and silently drops the detection-
+# gated modules. This is a ceiling, not a cost: directories that scan fast still
+# return immediately.
+scan_timeout = 100
+
 [character]
 success_symbol = "[❯](green)"
 error_symbol = "[❯](red)"

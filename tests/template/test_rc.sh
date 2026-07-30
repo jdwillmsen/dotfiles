@@ -11,5 +11,10 @@ echo "$out" | grep -q 'SDKMAN_DIR' || { echo "FAIL: sdkman block missing"; exit 
 for rc in dot_bashrc dot_zshrc; do
     grep -q 'shell/local\.sh"; do' "$here/home/$rc" \
         || { echo "FAIL: local.sh not last in $rc source loop"; exit 1; }
+    # zoxide 0.10.0 ships a Windows init whose __zoxide_pwd lost its command
+    # substitution; both rc files must redefine it or every cd errors.
+    # shellcheck disable=SC2016  # matching the literal, unexpanded rc line
+    grep -q '__zoxide_pwd() { \\command cygpath -w "\$(\\builtin pwd -L)"; }' "$here/home/$rc" \
+        || { echo "FAIL: zoxide cygpath pwd override missing in $rc"; exit 1; }
 done
 echo "PASS"

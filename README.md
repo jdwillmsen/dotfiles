@@ -64,7 +64,29 @@ The prompt renders git and status glyphs from the Nerd Font private use area. `r
 
 Note the family name: winget's MSI registers `JetBrainsMono NF`, while the upstream Nerd Fonts archives use `JetBrainsMono Nerd Font`. The install script's presence check accepts both.
 
-The `username` module renders only for elevated/root shells, so an `Administrator`/`root` marker in the prompt means the shell has admin rights — not that the config is broken.
+Terminal colours and font size are deliberately left alone — Windows Terminal rewrites `settings.json` on every UI change, so anything managed here would fight the app for ownership. `font.face` is the one setting worth applying by hand.
+
+### Layout
+
+```
+╭─ ADMIN  dotfiles/scripts/claude-status   main  +2 !1   v1.26.0  󰔟 3s
+╰─❯                                                                  ✘ NOTFOUND  23:25
+```
+
+Two lines, because context grows: deep paths, long branch names, a Kubernetes context and a toolchain version can all appear at once. On one line that pushes the cursor rightward and wraps mid-command; the frame pins the typing column so it never moves. A stable command column also makes scrollback skimmable — you can see where each command starts.
+
+| Segment | Appears |
+|---|---|
+| `ADMIN` badge | Elevated shells only. A badge, not a bare username — `jdwil` and `Administrator` both read as names, and only one means admin rights. |
+| Path | Repo-relative inside a repo, `~` at home. `use_os_path_sep = false` keeps POSIX separators, since Git Bash paths are what you type. |
+| `git_state` | Rebase/merge/bisect with progress — it changes what the next command should be. |
+| `git_status` | `+` staged, `!` modified, `?` untracked, `⇡⇣` ahead/behind, `*` stashed. |
+| Toolchain versions | Detection-gated by starship, so each costs a segment only in a project that uses it. |
+| Kubernetes | Enabled (off by default upstream): acting on the wrong cluster is expensive and otherwise invisible. |
+| `cmd_duration` | Past 2s. |
+| Right side | Exit status and clock, so a failure never shifts the command column. |
+
+Colours come from a named `[palettes.mocha]` block, so styles read as intent (`mauve`, `overlay`, `frame`) rather than hex and retheming is one block.
 
 ## Claude Code status line
 

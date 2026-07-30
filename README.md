@@ -52,6 +52,20 @@ for t in tests/scripts/*.sh; do bash "$t"; done        # run_* script unit tests
 find home -name 'run_*.sh' -exec shellcheck -s bash {} +
 ```
 
+## Shell prompt
+
+[starship](https://starship.rs/) (`home/dot_config/starship.toml`), activated by a `command -v starship` guard in `.bashrc` — machines without the binary fall back to a plain `PS1`, so the config is safe to ship everywhere.
+
+The prompt renders git and status glyphs from the Nerd Font private use area. `run_once_44-install-nerd-font.sh` installs the family, **but installing it is not enough — the terminal has to be pointed at it**, or every glyph shows as tofu. On Windows Terminal that is `profiles.defaults.font.face`:
+
+```jsonc
+"defaults": { "font": { "face": "JetBrainsMono NF" } }
+```
+
+Note the family name: winget's MSI registers `JetBrainsMono NF`, while the upstream Nerd Fonts archives use `JetBrainsMono Nerd Font`. The install script's presence check accepts both.
+
+The `username` module renders only for elevated/root shells, so an `Administrator`/`root` marker in the prompt means the shell has admin rights — not that the config is broken.
+
 ## Claude Code status line
 
 A three-line footer in the Claude Code prompt, built as a Go binary for fast startup. Shows model, git context, cost, session duration, context window fill (color-tiered to auto-compact threshold), rate limits, cache stats, and more.

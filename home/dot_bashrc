@@ -5,6 +5,16 @@ case $- in
     *) return ;;
 esac
 
+# Elevated launchers (a Windows Terminal profile with "elevate", runas, an admin
+# shortcut) hand the shell C:\Windows\System32 as its cwd. Starship rescans cwd
+# for its detection-gated modules on every prompt, and a cold scan of System32's
+# ~5000 entries takes ~16s — past any scan_timeout worth setting, so the prompt
+# warns and silently drops those modules. Runs before the rest of init because
+# zoxide caches pwd at load time.
+case "${PWD,,}" in
+    /?/windows/system32) cd "$HOME" || : ;;
+esac
+
 # Shared config; local.sh is unmanaged machine-local config and stays last
 # so its definitions override the managed files.
 for f in "$HOME/.config/shell/exports.sh" "$HOME/.config/shell/aliases.sh" "$HOME/.config/shell/functions.sh" "$HOME/.config/shell/local.sh"; do

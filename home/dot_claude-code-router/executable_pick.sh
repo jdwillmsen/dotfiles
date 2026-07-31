@@ -31,15 +31,6 @@ case "$n" in *[!0-9]*|"") echo "  not a number" >&2; exit 1;; esac
 sel="${routes[$((n-1))]:-}"
 [ -n "$sel" ] || { echo "  out of range" >&2; exit 1; }
 
-# set it as the default route, reload service
-( cd "$ccrdir" && node -e '
-  const fs = require("fs");
-  const c = require("./config.json");
-  c.Router.default = process.argv[1];
-  fs.writeFileSync("./config.json", JSON.stringify(c, null, 2));
-' "$sel" )
-ccr restart >/dev/null 2>&1 || true
-
 # ── Stamp fallback state for the statusline (read by claude-status) ───────────
 provider="${sel%%,*}"
 model="${sel#*,}"
@@ -53,10 +44,12 @@ if ( cd "$ccrdir" && node -e '
   process.exit(use.includes("strip-reasoning") ? 0 : 1);
 ' "$provider" ); then reason="off"; fi
 
-# Context window: best-effort live query of the provider's /v1/models.
+# Reachability + context window, from one best-effort query of the provider's
+# /v1/models. Any HTTP answer counts as reachable — 401 and 404 are normal, as
+# providers gate or omit that route — so only a transport failure is conclusive.
 # OpenRouter reports context_length, vLLM reports max_model_len; NVIDIA reports
 # neither → empty → statusline shows tokens-only.
-ctxwin="$( cd "$ccrdir" && node -e '
+probe="$( cd "$ccrdir" && node -e '
   const http = require("http"), https = require("https");
   const c = require("./config.json");
   const p = (c.Providers || []).find(p => p.name === process.argv[1]);
@@ -67,19 +60,37 @@ ctxwin="$( cd "$ccrdir" && node -e '
   const keyRef = (p.api_key || "").replace(/^\$/, "");
   const auth = (keyRef && process.env[keyRef]) ? process.env[keyRef] : (p.api_key || "");
   const lib = url.startsWith("https") ? https : http;
+  const done = (s) => { process.stdout.write(s); process.exit(0); };
   const req = lib.get(url, { headers: auth ? { Authorization: "Bearer " + auth } : {}, timeout: 4000 }, res => {
     let b = ""; res.on("data", d => b += d); res.on("end", () => {
+      let w = "";
       try {
         const m = (JSON.parse(b).data || []).find(x => x.id === model);
-        const w = m && (m.context_length || m.max_model_len);
-        if (w) process.stdout.write(String(w));
+        w = (m && (m.context_length || m.max_model_len)) || "";
       } catch (e) {}
-      process.exit(0);
+      done("up " + w);
     });
   });
-  req.on("error", () => process.exit(0));
-  req.on("timeout", () => { req.destroy(); process.exit(0); });
-' "$provider" "$model" 2>/dev/null || true )"
+  req.on("error", (e) => done("down " + p.api_base_url + " (" + e.code + ")"));
+  req.on("timeout", () => { req.destroy(); done("down " + p.api_base_url + " (timeout)"); });
+' "$provider" "$model" 2>/dev/null )" || probe=""
+
+# An unreachable upstream still leaves the router itself answering, so it
+# surfaces inside the TUI as an opaque `fetch failed` retry loop with no
+# mention of which host is down. Say it here, where it is actionable.
+ctxwin=""
+case "$probe" in
+  "up "*) ctxwin="${probe#up }" ;;
+  "down "*)
+    echo "  ✖ provider unreachable: ${probe#down }" >&2
+    if [ -t 0 ]; then
+      read -rp "  launch anyway? [y/N] " yn
+      case "$yn" in [yY]*) ;; *) echo "  cancelled"; exit 1 ;; esac
+    else
+      exit 1
+    fi
+    ;;
+esac
 
 export CCR_ACTIVE_ROUTE="$sel"
 export CCR_REASONING="$reason"
@@ -87,29 +98,65 @@ export CCR_REASONING="$reason"
 
 echo "  → launching Claude Code on: $sel"
 echo ""
-# Launch the same `claude` binary you run daily (stable in mintty) pointed at the
-# local router — NOT `ccr code`, whose spawner asserts on process-title in Git-Bash
-# (libuv util.c:412). These are the exact env vars `ccr code` injects.
-# Wait for the router to actually accept connections — `ccr restart` returns
-# before the port is up, and Claude Code's first requests race it (ConnectionRefused).
+# Nothing above this point mutates state, so an abandoned pick leaves the
+# previous default route intact rather than pointing at a route it refused.
+( cd "$ccrdir" && node -e '
+  const fs = require("fs");
+  const c = require("./config.json");
+  c.Router.default = process.argv[1];
+  fs.writeFileSync("./config.json", JSON.stringify(c, null, 2));
+' "$sel" )
+
+# ── Router boot ──────────────────────────────────────────────────────────────
+# The port is the only ground truth: ccr decides "is it running?" from a PID
+# file and never touches the socket, so a PID left behind by a service that
+# died before it listened reads as running forever. Clearing that file when
+# nothing answers is what lets a wedged router recover.
+# `ccr restart` is also the only command that daemonises. `ccr start` runs the
+# server in the foreground — and returns instantly when the PID file is present
+# — so it can neither recover the router nor be waited on.
+ccrurl="$(cd "$ccrdir" && node -e '
+  const c = require("./config.json");
+  console.log("http://" + (c.HOST || "127.0.0.1") + ":" + (c.PORT || 3456));
+')"
+bootlog="$ccrdir/pick-boot.log"
+
+router_up() { curl -s --max-time 1 -o /dev/null "$ccrurl/"; }
 wait_router() {
-  for _ in $(seq 1 30); do
-    if curl -s --max-time 1 -o /dev/null "http://127.0.0.1:3456/"; then return 0; fi
+  for _ in $(seq 1 "${CCRPICK_WAIT_TRIES:-40}"); do
+    router_up && return 0
     sleep 0.5
   done
   return 1
 }
+
+router_up || rm -f "$ccrdir/.claude-code-router.pid"
+ccr restart >"$bootlog" 2>&1 || true
 if ! wait_router; then
-  echo "  router down — starting ccr…"
-  ccr start >/dev/null 2>&1 || true
-  wait_router || echo "  ⚠ router still not answering on 127.0.0.1:3456 — check: ccr status" >&2
+  # Launching anyway just moves the failure into the TUI as an opaque
+  # ConnectionRefused, with ccr's own output discarded — so stop here and show it.
+  echo "  ✖ router never came up on $ccrurl — not launching Claude Code" >&2
+  echo "  ── ccr boot output ($bootlog) ──" >&2
+  tail -n 20 "$bootlog" >&2 || true
+  # shellcheck disable=SC2012  # ccr names its logs from a timestamp; no spaces to mishandle
+  last_log="$(ls -1t "$ccrdir"/logs/*.log 2>/dev/null | head -n 1 || true)"
+  if [ -n "$last_log" ]; then
+    echo "  ── last router log ($last_log) ──" >&2
+    tail -n 20 "$last_log" >&2 || true
+  fi
+  ccr status >&2 2>&1 || true
+  exit 1
 fi
 
+# Launch the same `claude` binary you run daily (stable in mintty) pointed at the
+# local router — NOT `ccr code`, whose spawner asserts on process-title in Git-Bash
+# (libuv util.c:412). These are the exact env vars `ccr code` injects.
+#
 # Header trick: Claude Code renders whatever ANTHROPIC_MODEL names in its banner,
 # and CCR routes "provider,model" ids directly — so the TUI banner shows the real route.
 export ANTHROPIC_MODEL="$sel"
 
-export ANTHROPIC_BASE_URL="http://127.0.0.1:3456"
+export ANTHROPIC_BASE_URL="$ccrurl"
 export ANTHROPIC_AUTH_TOKEN="test"
 export ANTHROPIC_API_KEY=""
 export NO_PROXY="127.0.0.1"
@@ -121,4 +168,5 @@ unset CLAUDE_CODE_USE_BEDROCK
 # on slow free-tier models cost more than they protect. Override per-launch:
 #   CCRPICK_PERMISSION_FLAG="" ccrpick               (native prompting)
 #   CCRPICK_PERMISSION_FLAG="--permission-mode acceptEdits" ccrpick
+# shellcheck disable=SC2086  # unquoted on purpose: an empty override must drop the flag, not pass ""
 exec claude ${CCRPICK_PERMISSION_FLAG-"--dangerously-skip-permissions"}   # runs in your current project dir, not the config dir

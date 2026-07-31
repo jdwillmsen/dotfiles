@@ -13,9 +13,9 @@ timeout="$(awk '
     /^scan_timeout[ \t]*=/ { gsub(/[^0-9]/, ""); print; exit }
 ' "$cfg")"
 
-# Must stay above starship's 30ms default: at the default a cold
-# C:\Windows\System32 times out, which warns above every prompt and drops the
-# detection-gated modules from it.
+# Must stay above starship's 30ms default, which is tight enough that ordinary
+# large repos time out and lose their detection-gated modules. No value covers
+# a cold C:\Windows\System32 (~16s); the .bashrc cwd guard handles that.
 [ -n "$timeout" ] && [ "$timeout" -gt 30 ] \
     || { echo "FAIL: top-level scan_timeout is '${timeout:-unset}', not above the 30ms default"; exit 1; }
 

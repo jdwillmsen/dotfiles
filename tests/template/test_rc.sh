@@ -6,6 +6,15 @@ here="$(cd "$(dirname "$0")/../.." && pwd)"
 out="$(cat "$here/home/dot_bashrc")"
 echo "$out" | grep -q '\.config/shell/aliases.sh' || { echo "FAIL: aliases not sourced"; exit 1; }
 echo "$out" | grep -q 'SDKMAN_DIR' || { echo "FAIL: sdkman block missing"; exit 1; }
+# Elevated shells inherit System32 as cwd, where starship's per-prompt scan
+# times out and drops the detection-gated modules. The guard must also precede
+# the zoxide block, which caches pwd at load time.
+# shellcheck disable=SC2016  # matching the literal, unexpanded rc line
+echo "$out" | grep -qF '/?/windows/system32) cd "$HOME"' \
+    || { echo "FAIL: System32 cwd guard missing in dot_bashrc"; exit 1; }
+[ "$(grep -n 'windows/system32' "$here/home/dot_bashrc" | cut -d: -f1)" \
+    -lt "$(grep -n 'zoxide init bash' "$here/home/dot_bashrc" | cut -d: -f1)" ] \
+    || { echo "FAIL: System32 cwd guard must come before zoxide init"; exit 1; }
 # local.sh must be the last entry of the source loop in both rc files so
 # unmanaged machine-local definitions override the managed ones.
 for rc in dot_bashrc dot_zshrc; do

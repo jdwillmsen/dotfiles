@@ -26,10 +26,12 @@ right_format = "$status$time"
 
 add_newline = true
 
-# The 30ms default is not enough to list a cold C:\Windows\System32, and a scan
-# that times out both warns above the prompt and silently drops the detection-
-# gated modules. This is a ceiling, not a cost: directories that scan fast still
-# return immediately.
+# Above the 30ms default so large-but-usable trees (fat monorepos, network
+# shares) still resolve their detection-gated modules rather than dropping them
+# after a timeout. A ceiling, not a cost: fast directories return immediately.
+# Deliberately not sized for C:\Windows\System32 — a cold scan there is ~16s, so
+# no timeout both avoids the warning and keeps the prompt usable. That case is
+# handled by the cwd guard in .bashrc, which keeps shells out of System32.
 scan_timeout = 100
 
 [character]

@@ -78,7 +78,7 @@ ctxwin="$( cd "$ccrdir" && node -e '
   });
   req.on("error", () => process.exit(0));
   req.on("timeout", () => { req.destroy(); process.exit(0); });
-' "$provider" "$model" 2>/dev/null || true )"
+' "$provider" "$model" 2>/dev/null )" || ctxwin=""
 
 export CCR_ACTIVE_ROUTE="$sel"
 export CCR_REASONING="$reason"
@@ -86,9 +86,6 @@ export CCR_REASONING="$reason"
 
 echo "  → launching Claude Code on: $sel"
 echo ""
-# Launch the same `claude` binary you run daily (stable in mintty) pointed at the
-# local router — NOT `ccr code`, whose spawner asserts on process-title in Git-Bash
-# (libuv util.c:412). These are the exact env vars `ccr code` injects.
 # ── Router boot ──────────────────────────────────────────────────────────────
 # The port is the only ground truth: ccr decides "is it running?" from a PID
 # file and never touches the socket, so a PID left behind by a service that
@@ -130,6 +127,10 @@ if ! wait_router; then
   exit 1
 fi
 
+# Launch the same `claude` binary you run daily (stable in mintty) pointed at the
+# local router — NOT `ccr code`, whose spawner asserts on process-title in Git-Bash
+# (libuv util.c:412). These are the exact env vars `ccr code` injects.
+#
 # Header trick: Claude Code renders whatever ANTHROPIC_MODEL names in its banner,
 # and CCR routes "provider,model" ids directly — so the TUI banner shows the real route.
 export ANTHROPIC_MODEL="$sel"

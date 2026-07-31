@@ -31,14 +31,6 @@ case "$n" in *[!0-9]*|"") echo "  not a number" >&2; exit 1;; esac
 sel="${routes[$((n-1))]:-}"
 [ -n "$sel" ] || { echo "  out of range" >&2; exit 1; }
 
-# set it as the default route; the service is restarted once, just before launch
-( cd "$ccrdir" && node -e '
-  const fs = require("fs");
-  const c = require("./config.json");
-  c.Router.default = process.argv[1];
-  fs.writeFileSync("./config.json", JSON.stringify(c, null, 2));
-' "$sel" )
-
 # ── Stamp fallback state for the statusline (read by claude-status) ───────────
 provider="${sel%%,*}"
 model="${sel#*,}"
@@ -52,10 +44,12 @@ if ( cd "$ccrdir" && node -e '
   process.exit(use.includes("strip-reasoning") ? 0 : 1);
 ' "$provider" ); then reason="off"; fi
 
-# Context window: best-effort live query of the provider's /v1/models.
+# Reachability + context window, from one best-effort query of the provider's
+# /v1/models. Any HTTP answer counts as reachable — 401 and 404 are normal, as
+# providers gate or omit that route — so only a transport failure is conclusive.
 # OpenRouter reports context_length, vLLM reports max_model_len; NVIDIA reports
 # neither → empty → statusline shows tokens-only.
-ctxwin="$( cd "$ccrdir" && node -e '
+probe="$( cd "$ccrdir" && node -e '
   const http = require("http"), https = require("https");
   const c = require("./config.json");
   const p = (c.Providers || []).find(p => p.name === process.argv[1]);
@@ -66,19 +60,37 @@ ctxwin="$( cd "$ccrdir" && node -e '
   const keyRef = (p.api_key || "").replace(/^\$/, "");
   const auth = (keyRef && process.env[keyRef]) ? process.env[keyRef] : (p.api_key || "");
   const lib = url.startsWith("https") ? https : http;
+  const done = (s) => { process.stdout.write(s); process.exit(0); };
   const req = lib.get(url, { headers: auth ? { Authorization: "Bearer " + auth } : {}, timeout: 4000 }, res => {
     let b = ""; res.on("data", d => b += d); res.on("end", () => {
+      let w = "";
       try {
         const m = (JSON.parse(b).data || []).find(x => x.id === model);
-        const w = m && (m.context_length || m.max_model_len);
-        if (w) process.stdout.write(String(w));
+        w = (m && (m.context_length || m.max_model_len)) || "";
       } catch (e) {}
-      process.exit(0);
+      done("up " + w);
     });
   });
-  req.on("error", () => process.exit(0));
-  req.on("timeout", () => { req.destroy(); process.exit(0); });
-' "$provider" "$model" 2>/dev/null )" || ctxwin=""
+  req.on("error", (e) => done("down " + p.api_base_url + " (" + e.code + ")"));
+  req.on("timeout", () => { req.destroy(); done("down " + p.api_base_url + " (timeout)"); });
+' "$provider" "$model" 2>/dev/null )" || probe=""
+
+# An unreachable upstream still leaves the router itself answering, so it
+# surfaces inside the TUI as an opaque `fetch failed` retry loop with no
+# mention of which host is down. Say it here, where it is actionable.
+ctxwin=""
+case "$probe" in
+  "up "*) ctxwin="${probe#up }" ;;
+  "down "*)
+    echo "  ✖ provider unreachable: ${probe#down }" >&2
+    if [ -t 0 ]; then
+      read -rp "  launch anyway? [y/N] " yn
+      case "$yn" in [yY]*) ;; *) echo "  cancelled"; exit 1 ;; esac
+    else
+      exit 1
+    fi
+    ;;
+esac
 
 export CCR_ACTIVE_ROUTE="$sel"
 export CCR_REASONING="$reason"
@@ -86,6 +98,15 @@ export CCR_REASONING="$reason"
 
 echo "  → launching Claude Code on: $sel"
 echo ""
+# Nothing above this point mutates state, so an abandoned pick leaves the
+# previous default route intact rather than pointing at a route it refused.
+( cd "$ccrdir" && node -e '
+  const fs = require("fs");
+  const c = require("./config.json");
+  c.Router.default = process.argv[1];
+  fs.writeFileSync("./config.json", JSON.stringify(c, null, 2));
+' "$sel" )
+
 # ── Router boot ──────────────────────────────────────────────────────────────
 # The port is the only ground truth: ccr decides "is it running?" from a PID
 # file and never touches the socket, so a PID left behind by a service that

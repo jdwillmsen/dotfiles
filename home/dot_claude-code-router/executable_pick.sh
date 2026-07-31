@@ -31,14 +31,13 @@ case "$n" in *[!0-9]*|"") echo "  not a number" >&2; exit 1;; esac
 sel="${routes[$((n-1))]:-}"
 [ -n "$sel" ] || { echo "  out of range" >&2; exit 1; }
 
-# set it as the default route, reload service
+# set it as the default route; the service is restarted once, just before launch
 ( cd "$ccrdir" && node -e '
   const fs = require("fs");
   const c = require("./config.json");
   c.Router.default = process.argv[1];
   fs.writeFileSync("./config.json", JSON.stringify(c, null, 2));
 ' "$sel" )
-ccr restart >/dev/null 2>&1 || true
 
 # ── Stamp fallback state for the statusline (read by claude-status) ───────────
 provider="${sel%%,*}"
@@ -90,26 +89,52 @@ echo ""
 # Launch the same `claude` binary you run daily (stable in mintty) pointed at the
 # local router — NOT `ccr code`, whose spawner asserts on process-title in Git-Bash
 # (libuv util.c:412). These are the exact env vars `ccr code` injects.
-# Wait for the router to actually accept connections — `ccr restart` returns
-# before the port is up, and Claude Code's first requests race it (ConnectionRefused).
+# ── Router boot ──────────────────────────────────────────────────────────────
+# The port is the only ground truth: ccr decides "is it running?" from a PID
+# file and never touches the socket, so a PID left behind by a service that
+# died before it listened reads as running forever. Clearing that file when
+# nothing answers is what lets a wedged router recover.
+# `ccr restart` is also the only command that daemonises. `ccr start` runs the
+# server in the foreground — and returns instantly when the PID file is present
+# — so it can neither recover the router nor be waited on.
+ccrurl="$(cd "$ccrdir" && node -e '
+  const c = require("./config.json");
+  console.log("http://" + (c.HOST || "127.0.0.1") + ":" + (c.PORT || 3456));
+')"
+bootlog="$ccrdir/pick-boot.log"
+
+router_up() { curl -s --max-time 1 -o /dev/null "$ccrurl/"; }
 wait_router() {
-  for _ in $(seq 1 30); do
-    if curl -s --max-time 1 -o /dev/null "http://127.0.0.1:3456/"; then return 0; fi
+  for _ in $(seq 1 "${CCRPICK_WAIT_TRIES:-40}"); do
+    router_up && return 0
     sleep 0.5
   done
   return 1
 }
+
+router_up || rm -f "$ccrdir/.claude-code-router.pid"
+ccr restart >"$bootlog" 2>&1 || true
 if ! wait_router; then
-  echo "  router down — starting ccr…"
-  ccr start >/dev/null 2>&1 || true
-  wait_router || echo "  ⚠ router still not answering on 127.0.0.1:3456 — check: ccr status" >&2
+  # Launching anyway just moves the failure into the TUI as an opaque
+  # ConnectionRefused, with ccr's own output discarded — so stop here and show it.
+  echo "  ✖ router never came up on $ccrurl — not launching Claude Code" >&2
+  echo "  ── ccr boot output ($bootlog) ──" >&2
+  tail -n 20 "$bootlog" >&2 || true
+  # shellcheck disable=SC2012  # ccr names its logs from a timestamp; no spaces to mishandle
+  last_log="$(ls -1t "$ccrdir"/logs/*.log 2>/dev/null | head -n 1 || true)"
+  if [ -n "$last_log" ]; then
+    echo "  ── last router log ($last_log) ──" >&2
+    tail -n 20 "$last_log" >&2 || true
+  fi
+  ccr status >&2 2>&1 || true
+  exit 1
 fi
 
 # Header trick: Claude Code renders whatever ANTHROPIC_MODEL names in its banner,
 # and CCR routes "provider,model" ids directly — so the TUI banner shows the real route.
 export ANTHROPIC_MODEL="$sel"
 
-export ANTHROPIC_BASE_URL="http://127.0.0.1:3456"
+export ANTHROPIC_BASE_URL="$ccrurl"
 export ANTHROPIC_AUTH_TOKEN="test"
 export ANTHROPIC_API_KEY=""
 export NO_PROXY="127.0.0.1"
@@ -121,4 +146,5 @@ unset CLAUDE_CODE_USE_BEDROCK
 # on slow free-tier models cost more than they protect. Override per-launch:
 #   CCRPICK_PERMISSION_FLAG="" ccrpick               (native prompting)
 #   CCRPICK_PERMISSION_FLAG="--permission-mode acceptEdits" ccrpick
+# shellcheck disable=SC2086  # unquoted on purpose: an empty override must drop the flag, not pass ""
 exec claude ${CCRPICK_PERMISSION_FLAG-"--dangerously-skip-permissions"}   # runs in your current project dir, not the config dir

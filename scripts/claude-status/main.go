@@ -33,7 +33,7 @@ var sep = "  " + Gray + "│" + Reset + "  "
 // osc8 makes text clickable in terminals that support hyperlinks
 // (Windows Terminal, iTerm2, Kitty, WezTerm); others render it as plain text.
 func osc8(url, text string) string {
-	if url == "" {
+	if url == "" || hasControl(url) || hasControl(text) {
 		return text
 	}
 	return "\033]8;;" + url + "\033\\" + text + "\033]8;;\033\\"

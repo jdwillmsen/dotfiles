@@ -687,3 +687,56 @@ func TestRenderFallbackRateLimitsMinimized(t *testing.T) {
 		t.Errorf("minimized rate limits must have no bar cells: %q", rateLine)
 	}
 }
+
+// ── jira ticket segment ───────────────────────────────────────────────────────
+
+func jiraPayload(t *testing.T) Payload {
+	t.Helper()
+	p := fullPayload()
+	p.Workspace.GitWorktree = t.TempDir()
+	return p
+}
+
+func TestRenderTicketSegmentIsHyperlinked(t *testing.T) {
+	cfg := &jiraConfig{SiteBase: "https://example.atlassian.net", Projects: []string{"ABC"}}
+	git := &gitState{Branch: "feat/ABC-123-fix-login"}
+	lines := renderLinesWithJira(jiraPayload(t), git, 200, false, fallback{}, cfg)
+	joined := strings.Join(lines, "\n")
+
+	if !strings.Contains(joined, "https://example.atlassian.net/browse/ABC-123") {
+		t.Errorf("ticket not hyperlinked:\n%s", joined)
+	}
+	plain := stripANSI(joined)
+	if !strings.Contains(plain, "ABC-123") {
+		t.Errorf("ticket key missing:\n%s", plain)
+	}
+	if strings.Count(plain, "ABC-123") != 1 {
+		t.Errorf("key rendered %d times, want exactly 1 (stripped from branch):\n%s",
+			strings.Count(plain, "ABC-123"), plain)
+	}
+	if !strings.Contains(plain, "fix-login") {
+		t.Errorf("branch remainder lost:\n%s", plain)
+	}
+}
+
+func TestRenderTicketDroppedAtNarrow(t *testing.T) {
+	cfg := &jiraConfig{SiteBase: "https://example.atlassian.net", Projects: []string{"ABC"}}
+	git := &gitState{Branch: "feat/ABC-123-fix-login"}
+	plain := stripANSI(strings.Join(
+		renderLinesWithJira(jiraPayload(t), git, 60, false, fallback{}, cfg), "\n"))
+
+	// Narrow drops the segment, so the branch must keep the key — otherwise it
+	// vanishes from the statusline entirely.
+	if !strings.Contains(plain, "ABC-123") {
+		t.Errorf("narrow: key vanished:\n%s", plain)
+	}
+}
+
+func TestRenderNoTicketWithoutConfig(t *testing.T) {
+	git := &gitState{Branch: "feat/ABC-123-fix-login"}
+	plain := stripANSI(strings.Join(
+		renderLinesWithJira(jiraPayload(t), git, 200, false, fallback{}, nil), "\n"))
+	if !strings.Contains(plain, "feat/ABC-123-fix-login") {
+		t.Errorf("nil cfg must leave the branch untouched:\n%s", plain)
+	}
+}

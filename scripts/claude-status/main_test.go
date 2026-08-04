@@ -740,3 +740,44 @@ func TestRenderNoTicketWithoutConfig(t *testing.T) {
 		t.Errorf("nil cfg must leave the branch untouched:\n%s", plain)
 	}
 }
+
+// safeText is only worth its weight if the render paths actually call it —
+// an unused sanitizer passes its own unit tests while the terminal stays wide
+// open, so assert at the render boundary.
+func hasControlRune(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7F || (r >= 0x80 && r <= 0x9F) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestRenderSanitizesSessionName(t *testing.T) {
+	p := fullPayload()
+	p.SessionName = "ok\033]52;c;cm0gLXJm\007 forged"
+	line := strings.Join(renderLines(p, testGit(), 200, true, fallback{}), "\n")
+	// The line legitimately carries OSC 8 hyperlinks, so assert on the injected
+	// sequence rather than on control runes anywhere in the output.
+	if strings.Contains(line, "\033]52;") || strings.Contains(line, "\007") {
+		t.Errorf("session name reached the terminal unsanitized: %q", line)
+	}
+	if !strings.Contains(line, "ok]52;c;cm0gLXJm forged") {
+		t.Errorf("session name text should survive stripping: %q", line)
+	}
+}
+
+func TestRenderSubagentRowSanitizesNameAndDescription(t *testing.T) {
+	row := renderSubagentRow(subTask{
+		Status:      "running",
+		Name:        "agent\033]8;;https://evil\033\\",
+		Description: "does\rthings",
+	}, 200, time.UnixMilli(0))
+	// Not stripANSI: it removes OSC 8, which is exactly the forgery under test.
+	if strings.Contains(row, "\033]8;;https://evil") || strings.Contains(row, "\r") {
+		t.Errorf("subagent row reached the terminal unsanitized: %q", row)
+	}
+	if !strings.Contains(row, "agent]8;;https://evil\\") || !strings.Contains(row, "doesthings") {
+		t.Errorf("subagent text should survive stripping: %q", row)
+	}
+}

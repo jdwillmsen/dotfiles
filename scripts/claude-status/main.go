@@ -871,8 +871,8 @@ func renderLinesWithJira(p Payload, git *gitState, cols int, verbose bool, fb fa
 		secTokens := strings.Join(tokenParts, "  ")
 
 		secSession := ""
-		if p.SessionName != "" {
-			secSession = Dim + p.SessionName + Reset
+		if name := safeText(p.SessionName, 64); name != "" {
+			secSession = Dim + name + Reset
 		}
 
 		lines = append(lines, joinSections(secCache, secTokens, secSession))
@@ -954,7 +954,7 @@ func renderSubagentRow(t subTask, cols int, now time.Time) string {
 		cols = 80
 	}
 
-	head := statusGlyph(t.Status) + " " + Bold + t.Name + Reset
+	head := statusGlyph(t.Status) + " " + Bold + safeText(t.Name, 64) + Reset
 
 	var tail string
 	if tk := fmtTokens(t.TokenCount); tk != "" {
@@ -966,9 +966,9 @@ func renderSubagentRow(t subTask, cols int, now time.Time) string {
 		}
 	}
 
-	desc := t.Description
+	desc := safeText(t.Description, 400)
 	if desc == "" {
-		desc = t.Label
+		desc = safeText(t.Label, 400)
 	}
 	if desc != "" {
 		budget := cols - visibleLen(head) - visibleLen(tail) - 2

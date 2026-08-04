@@ -94,7 +94,9 @@ A three-line footer in the Claude Code prompt, built as a Go binary for fast sta
 
 When a session is launched through the CCR (claude-code-router) fallback tier via `ccrpick`, the footer reflects the *real* proxied backend instead of Claude Code's native labels: `⚡ <model>` with the provider, reasoning shown only when the route actually reasons, the routed model's context window (or tokens-only when the provider reports none), `FREE` in place of cost, and minimized rate limits. Native and opencode sessions are unaffected. Contract in [`docs/superpowers/specs/2026-07-14-ccr-fallback-statusline-design.md`](docs/superpowers/specs/2026-07-14-ccr-fallback-statusline-design.md).
 
-Source: `scripts/claude-status/main.go`. Rebuild after editing:
+The footer also shows the session's Jira ticket as a clickable segment beside the PR — `◈ ABC-123`, linked to the issue. The key is moved out of the branch label rather than added alongside it, so `feat/ABC-123-fix-login` renders as `⎇ feat/fix-login  │  ◈ ABC-123` and the line is no wider than before. Resolved from a per-worktree `claude-jira-ticket` override file, else from the branch name gated on a project allowlist. Off entirely until `~/.config/claude-jira.json` exists — see [`docs/shell-helpers.md`](docs/shell-helpers.md#cj--ticket-named-claude-code-launcher) for that file and the matching `cj` launcher. Contract in [`docs/superpowers/specs/2026-08-02-jira-session-tracking-design.md`](docs/superpowers/specs/2026-08-02-jira-session-tracking-design.md).
+
+Source: `scripts/claude-status/main.go`, `scripts/claude-status/jira.go`. Rebuild after editing:
 
 ```bash
 cd scripts/claude-status && go build -o ~/.local/bin/claude-status .

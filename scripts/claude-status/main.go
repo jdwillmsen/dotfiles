@@ -33,7 +33,7 @@ var sep = "  " + Gray + "│" + Reset + "  "
 // osc8 makes text clickable in terminals that support hyperlinks
 // (Windows Terminal, iTerm2, Kitty, WezTerm); others render it as plain text.
 func osc8(url, text string) string {
-	if url == "" {
+	if url == "" || hasControl(url) || hasControl(text) {
 		return text
 	}
 	return "\033]8;;" + url + "\033\\" + text + "\033]8;;\033\\"
@@ -560,6 +560,10 @@ func layoutTier(cols int) tier {
 // renderLines builds the status line(s) for the given terminal width.
 // verbose forces the diagnostics line even below the wide tier.
 func renderLines(p Payload, git *gitState, cols int, verbose bool, fb fallback) []string {
+	return renderLinesWithJira(p, git, cols, verbose, fb, loadJiraConfig(jiraConfigPath()))
+}
+
+func renderLinesWithJira(p Payload, git *gitState, cols int, verbose bool, fb fallback, cfg *jiraConfig) []string {
 	t := layoutTier(cols)
 	showDiag := t == wide || verbose
 
@@ -625,6 +629,17 @@ func renderLines(p Payload, git *gitState, cols int, verbose bool, fb fallback) 
 		branch = git.Branch
 	}
 
+	root := p.Workspace.GitWorktree
+	if root == "" {
+		root = cwd
+	}
+	ticketKey := resolveTicketKey(root, branch, cfg)
+	// Narrow drops the ticket segment, so the branch must keep the key there or
+	// it disappears from the statusline entirely.
+	if ticketKey != "" && t != narrow {
+		branch = stripTicketKey(branch, ticketKey)
+	}
+
 	if branch != "" || worktreeName != "" {
 		display := branch
 		if display == "" {
@@ -661,6 +676,12 @@ func renderLines(p Payload, git *gitState, cols int, verbose bool, fb fallback) 
 			gitParts = append(gitParts, Blue+osc8(url, repo.Owner+"/"+repo.Name)+Reset)
 		} else if project := filepath.Base(cwd); project != "" && project != "." {
 			gitParts = append(gitParts, Blue+project+Reset)
+		}
+
+		// The ticket and the PR are the same work item at two stages.
+		if ticketKey != "" {
+			gitParts = append(gitParts,
+				Yellow+osc8(ticketURL(cfg, ticketKey), "◈ "+ticketKey)+Reset)
 		}
 
 		if p.PR != nil {
@@ -850,8 +871,8 @@ func renderLines(p Payload, git *gitState, cols int, verbose bool, fb fallback) 
 		secTokens := strings.Join(tokenParts, "  ")
 
 		secSession := ""
-		if p.SessionName != "" {
-			secSession = Dim + p.SessionName + Reset
+		if name := safeText(p.SessionName, 64); name != "" {
+			secSession = Dim + name + Reset
 		}
 
 		lines = append(lines, joinSections(secCache, secTokens, secSession))
@@ -933,7 +954,7 @@ func renderSubagentRow(t subTask, cols int, now time.Time) string {
 		cols = 80
 	}
 
-	head := statusGlyph(t.Status) + " " + Bold + t.Name + Reset
+	head := statusGlyph(t.Status) + " " + Bold + safeText(t.Name, 64) + Reset
 
 	var tail string
 	if tk := fmtTokens(t.TokenCount); tk != "" {
@@ -945,9 +966,9 @@ func renderSubagentRow(t subTask, cols int, now time.Time) string {
 		}
 	}
 
-	desc := t.Description
+	desc := safeText(t.Description, 400)
 	if desc == "" {
-		desc = t.Label
+		desc = safeText(t.Label, 400)
 	}
 	if desc != "" {
 		budget := cols - visibleLen(head) - visibleLen(tail) - 2

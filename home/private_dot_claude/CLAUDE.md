@@ -22,9 +22,10 @@ skills (progressive disclosure), reference tables in repo docs.
 
 Self-documenting code; comment **why**, never what. Comment only: workarounds
 (with cause), surprising decisions, invariants/units, security/concurrency
-caveats, gnarly algorithms. No noise comments, no external references (ticket
-IDs, URLs, names — traceability goes in commits/PRs). Update or delete comments
-in any touched block; never comment out dead code. Match surrounding density.
+caveats, gnarly algorithms. No noise comments, no external references (URLs,
+names) — traceability goes in commits/PRs. Ticket IDs stay out of comments; the
+branch name and PR title are where they belong. Update or delete comments in any
+touched block; never comment out dead code. Match surrounding density.
 
 ## Shipping — PR only, reviewed
 
@@ -43,7 +44,9 @@ in any touched block; never comment out dead code. Match surrounding density.
 - Agent sessions: native `EnterWorktree` (branches fresh from origin under
   `.claude/worktrees/`). Terminal: `gwta <name>` / `wtd` / `wtclean` — full
   command reference in `docs/shell-helpers.md` (dotfiles repo).
-- Branch names: `feat/`, `fix/`, `chore/`, `docs/`, `refactor/` + kebab-case.
+- Branch names: `feat/`, `fix/`, `chore/`, `docs/`, `refactor/` + ticket key +
+  kebab-case — `feat/JDWLABS-123-fix-login-retry`. The key is what the
+  statusline and `cj` resolve; omit it only for work with no ticket.
 - **main is a merge target only**: no direct commits or pushes — everything
   lands via PR with green CI (dotfiles enforces this with a GitHub ruleset).
 - **Refresh main immediately after every merge**: `git pull --ff-only`. If it

@@ -53,3 +53,32 @@ serve() {
     local port="${1:-8000}"
     python3 -m http.server "$port"
 }
+
+# Launch Claude Code named after the current worktree's Jira ticket, so the
+# /resume picker and tab title are scannable. Deliberately NOT named `claude`:
+# shadowing the real binary breaks `claude agents --json` and recurses.
+cj() {
+    local cfg="$HOME/.config/claude-jira.json" gitdir key branch projects
+    gitdir=$(git rev-parse --git-dir 2>/dev/null) || { command claude "$@"; return; }
+
+    if [ -r "$gitdir/claude-jira-ticket" ]; then
+        key=$(head -c 256 "$gitdir/claude-jira-ticket" | head -n 1 | tr -d '[:space:]')
+    fi
+
+    if [ -z "$key" ] && [ -r "$cfg" ]; then
+        projects=$(tr -d ' \n' < "$cfg" |
+            sed -n 's/.*"projects":\[\([^]]*\)\].*/\1/p' | tr -d '"' | tr ',' '|')
+        if [ -n "$projects" ]; then
+            # --show-current, not rev-parse: it still reports the branch on an
+            # unborn HEAD, i.e. a fresh worktree before its first commit.
+            branch=$(git branch --show-current 2>/dev/null)
+            key=$(printf '%s' "$branch" | grep -oiE "(^|[/_-])($projects)-[0-9]+" |
+                head -n 1 | sed -E 's@^[/_-]@@' | tr '[:lower:]' '[:upper:]')
+        fi
+    fi
+
+    case "$key" in
+        [A-Z][A-Z0-9]*-[1-9]*) command claude -n "$key" "$@" ;;
+        *) command claude "$@" ;;
+    esac
+}

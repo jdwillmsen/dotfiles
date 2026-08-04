@@ -687,3 +687,97 @@ func TestRenderFallbackRateLimitsMinimized(t *testing.T) {
 		t.Errorf("minimized rate limits must have no bar cells: %q", rateLine)
 	}
 }
+
+// ── jira ticket segment ───────────────────────────────────────────────────────
+
+func jiraPayload(t *testing.T) Payload {
+	t.Helper()
+	p := fullPayload()
+	p.Workspace.GitWorktree = t.TempDir()
+	return p
+}
+
+func TestRenderTicketSegmentIsHyperlinked(t *testing.T) {
+	cfg := &jiraConfig{SiteBase: "https://example.atlassian.net", Projects: []string{"ABC"}}
+	git := &gitState{Branch: "feat/ABC-123-fix-login"}
+	lines := renderLinesWithJira(jiraPayload(t), git, 200, false, fallback{}, cfg)
+	joined := strings.Join(lines, "\n")
+
+	if !strings.Contains(joined, "https://example.atlassian.net/browse/ABC-123") {
+		t.Errorf("ticket not hyperlinked:\n%s", joined)
+	}
+	plain := stripANSI(joined)
+	if !strings.Contains(plain, "ABC-123") {
+		t.Errorf("ticket key missing:\n%s", plain)
+	}
+	if strings.Count(plain, "ABC-123") != 1 {
+		t.Errorf("key rendered %d times, want exactly 1 (stripped from branch):\n%s",
+			strings.Count(plain, "ABC-123"), plain)
+	}
+	if !strings.Contains(plain, "fix-login") {
+		t.Errorf("branch remainder lost:\n%s", plain)
+	}
+}
+
+func TestRenderTicketDroppedAtNarrow(t *testing.T) {
+	cfg := &jiraConfig{SiteBase: "https://example.atlassian.net", Projects: []string{"ABC"}}
+	git := &gitState{Branch: "feat/ABC-123-fix-login"}
+	plain := stripANSI(strings.Join(
+		renderLinesWithJira(jiraPayload(t), git, 60, false, fallback{}, cfg), "\n"))
+
+	// Narrow drops the segment, so the branch must keep the key — otherwise it
+	// vanishes from the statusline entirely.
+	if !strings.Contains(plain, "ABC-123") {
+		t.Errorf("narrow: key vanished:\n%s", plain)
+	}
+}
+
+func TestRenderNoTicketWithoutConfig(t *testing.T) {
+	git := &gitState{Branch: "feat/ABC-123-fix-login"}
+	plain := stripANSI(strings.Join(
+		renderLinesWithJira(jiraPayload(t), git, 200, false, fallback{}, nil), "\n"))
+	if !strings.Contains(plain, "feat/ABC-123-fix-login") {
+		t.Errorf("nil cfg must leave the branch untouched:\n%s", plain)
+	}
+}
+
+// safeText is only worth its weight if the render paths actually call it —
+// an unused sanitizer passes its own unit tests while the terminal stays wide
+// open, so assert at the render boundary.
+func hasControlRune(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7F || (r >= 0x80 && r <= 0x9F) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestRenderSanitizesSessionName(t *testing.T) {
+	p := fullPayload()
+	p.SessionName = "ok\033]52;c;cm0gLXJm\007 forged"
+	line := strings.Join(renderLines(p, testGit(), 200, true, fallback{}), "\n")
+	// The line legitimately carries OSC 8 hyperlinks, so assert on the injected
+	// sequence rather than on control runes anywhere in the output.
+	if strings.Contains(line, "\033]52;") || strings.Contains(line, "\007") {
+		t.Errorf("session name reached the terminal unsanitized: %q", line)
+	}
+	if !strings.Contains(line, "ok]52;c;cm0gLXJm forged") {
+		t.Errorf("session name text should survive stripping: %q", line)
+	}
+}
+
+func TestRenderSubagentRowSanitizesNameAndDescription(t *testing.T) {
+	row := renderSubagentRow(subTask{
+		Status:      "running",
+		Name:        "agent\033]8;;https://evil\033\\",
+		Description: "does\rthings",
+	}, 200, time.UnixMilli(0))
+	// Not stripANSI: it removes OSC 8, which is exactly the forgery under test.
+	if strings.Contains(row, "\033]8;;https://evil") || strings.Contains(row, "\r") {
+		t.Errorf("subagent row reached the terminal unsanitized: %q", row)
+	}
+	if !strings.Contains(row, "agent]8;;https://evil\\") || !strings.Contains(row, "doesthings") {
+		t.Errorf("subagent text should survive stripping: %q", row)
+	}
+}

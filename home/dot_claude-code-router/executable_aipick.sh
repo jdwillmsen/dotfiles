@@ -22,8 +22,8 @@ read -rp "  tool # > " tool
 case "$tool" in
   q) echo "  cancelled"; exit 0 ;;
   1) exec bash "$ccrdir/pick.sh" ;;
-  2) ;;
-  *) echo "  not a valid choice (qwen-code lands in a later task)" >&2; exit 1 ;;
+  2|3) ;;
+  *) echo "  not a valid choice" >&2; exit 1 ;;
 esac
 
 # ── Model picker (Aider / Qwen Code) — same provider/model list pick.sh uses ──
@@ -78,5 +78,20 @@ case "$tool" in
     fi
     echo "  → launching aider on: $sel"
     exec aider --openai-api-base "$base" --openai-api-key "$key" --model "openai/$model"
+    ;;
+  3)
+    if [ "${AIPICK_DRY_RUN:-}" = "1" ]; then
+      echo "  DRY-RUN OPENAI_API_KEY=*** OPENAI_BASE_URL=\"$base\" OPENAI_MODEL=\"$model\" qwen"
+      exit 0
+    fi
+    if ! command -v qwen >/dev/null 2>&1; then
+      echo "  ✖ qwen not installed — run: npm i -g @qwen-code/qwen-code" >&2
+      exit 1
+    fi
+    export OPENAI_API_KEY="$key"
+    export OPENAI_BASE_URL="$base"
+    export OPENAI_MODEL="$model"
+    echo "  → launching qwen on: $sel"
+    exec qwen
     ;;
 esac

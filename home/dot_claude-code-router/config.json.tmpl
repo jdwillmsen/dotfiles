@@ -16,7 +16,10 @@
         "deepseek-ai/deepseek-v4-pro",
         "deepseek-ai/deepseek-v4-flash",
         "qwen/qwen3.5-397b-a17b",
-        "z-ai/glm-5.2"
+        "z-ai/glm-5.2",
+        "qwen/qwen3-coder-480b-a35b-instruct",
+        "minimaxai/minimax-m3",
+        "moonshotai/kimi-k2.6"
       ],
       "transformer": {
         "use": [
@@ -29,7 +32,6 @@
       "api_base_url": "https://openrouter.ai/api/v1/chat/completions",
       "api_key": "$OPENROUTER_API_KEY",
       "models": [
-        "qwen/qwen3-coder:free",
         "qwen/qwen3-next-80b-a3b-instruct:free"
       ],
       "transformer": {
@@ -57,9 +59,9 @@
   ],
   "Router": {
     "default": "ollama,gpt-oss:20b",
-    "think": "nvidia,z-ai/glm-5.2",
+    "think": "nvidia,moonshotai/kimi-k2.6",
     "background": "gpu-stack,qwen/qwen3-coder-30b-a3b",
-    "longContext": "nvidia,z-ai/glm-5.2",
+    "longContext": "nvidia,minimaxai/minimax-m3",
     "longContextThreshold": 60000
   }
 }

@@ -73,8 +73,15 @@ case "$tool" in
       exit 0
     fi
     if ! command -v aider >/dev/null 2>&1; then
-      echo "  ✖ aider not installed — run: pipx install aider-chat" >&2
-      exit 1
+      echo "  aider not found — installing..." >&2
+      if command -v pipx >/dev/null 2>&1; then
+        pipx install aider-chat
+      elif command -v pip >/dev/null 2>&1; then
+        pip install --user aider-chat
+      else
+        echo "  ✖ neither pipx nor pip found — install pipx first: https://pipx.pypa.io" >&2
+        exit 1
+      fi
     fi
     echo "  → launching aider on: $sel"
     exec aider --openai-api-base "$base" --openai-api-key "$key" --model "openai/$model"
@@ -85,8 +92,13 @@ case "$tool" in
       exit 0
     fi
     if ! command -v qwen >/dev/null 2>&1; then
-      echo "  ✖ qwen not installed — run: npm i -g @qwen-code/qwen-code" >&2
-      exit 1
+      echo "  qwen not found — installing..." >&2
+      if command -v npm >/dev/null 2>&1; then
+        npm i -g @qwen-code/qwen-code
+      else
+        echo "  ✖ npm not found — install Node.js/npm first" >&2
+        exit 1
+      fi
     fi
     export OPENAI_API_KEY="$key"
     export OPENAI_BASE_URL="$base"

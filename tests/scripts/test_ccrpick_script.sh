@@ -35,13 +35,13 @@ cp "$script" "$tmp/home/.claude-code-router/pick.sh"
 printf '#!/usr/bin/env bash\necho "ccr $*"\n' >"$bin/ccr"
 chmod +x "$bin/ccr"
 
-write_config() {  # $1 = provider base url
+write_config() {  # $1 = provider base url, $2 = optional "transformer" JSON block
     cat >"$tmp/home/.claude-code-router/config.json" <<JSON
 {
   "HOST": "127.0.0.1",
   "PORT": 3456,
   "Providers": [
-    { "name": "fake", "api_base_url": "$1", "api_key": "none", "models": ["m1"] }
+    { "name": "fake", "api_base_url": "$1", "api_key": "none", "models": ["m1"]${2:+, \"transformer\": $2} }
   ],
   "Router": { "default": "fake,m1" }
 }
@@ -96,15 +96,45 @@ case "$out" in
     *) echo "FAIL: no diagnostic on router-down path:"; echo "$out"; exit 1 ;;
 esac
 
-# Healthy router and provider: launch, with the base URL taken from the config
-# and the context window taken from the provider's own /v1/models.
+# Healthy router and provider: launch, with the base URL taken from the config,
+# the context window taken from the provider's own /v1/models, and reasoning
+# left "on" — this provider has no strip-reasoning transformer configured.
 printf '#!/usr/bin/env bash\nexit 0\n' >"$bin/curl"
-printf '#!/usr/bin/env bash\n{ echo "$ANTHROPIC_BASE_URL"; echo "$CCR_CTX_WINDOW"; } >"%s/env"\n' "$tmp" >"$bin/claude"
+printf '#!/usr/bin/env bash\n{ echo "$ANTHROPIC_BASE_URL"; echo "$CCR_CTX_WINDOW"; echo "$CCR_REASONING"; } >"%s/env"\n' "$tmp" >"$bin/claude"
 chmod +x "$bin/curl" "$bin/claude"
 run_picker >/dev/null
 [ "$(sed -n 1p "$tmp/env")" = "http://127.0.0.1:3456" ] \
     || { echo "FAIL: base URL not derived from config: $(sed -n 1p "$tmp/env")"; exit 1; }
 [ "$(sed -n 2p "$tmp/env")" = "4096" ] \
     || { echo "FAIL: context window not read from provider: $(sed -n 2p "$tmp/env")"; exit 1; }
+[ "$(sed -n 3p "$tmp/env")" = "on" ] \
+    || { echo "FAIL: reasoning should default to on without a strip-reasoning transformer: $(sed -n 3p "$tmp/env")"; exit 1; }
+
+# A provider with the strip-reasoning transformer: reasoning flips to "off".
+write_config "http://127.0.0.1:$(cat "$tmp/port")/v1/chat/completions" '{ "use": ["strip-reasoning"] }'
+run_picker >/dev/null
+[ "$(sed -n 3p "$tmp/env")" = "off" ] \
+    || { echo "FAIL: strip-reasoning transformer should flip reasoning off: $(sed -n 3p "$tmp/env")"; exit 1; }
+
+# Router's default model id isn't in the provider's own /v1/models response
+# (e.g. a stale/delisted slug): context window stays unset rather than
+# reporting a stale or fabricated number.
+cat >"$tmp/srv-nomatch.js" <<'JS'
+const http = require("http"), fs = require("fs");
+const s = http.createServer((req, res) => {
+  res.setHeader("content-type", "application/json");
+  res.end(JSON.stringify({ data: [{ id: "some-other-model", context_length: 4096 }] }));
+});
+s.listen(0, "127.0.0.1", () => fs.writeFileSync(process.argv[2], String(s.address().port)));
+JS
+kill "$srv" 2>/dev/null || true
+node "$tmp/srv-nomatch.js" "$tmp/port2" &
+srv=$!
+for _ in $(seq 1 50); do [ -s "$tmp/port2" ] && break; sleep 0.1; done
+[ -s "$tmp/port2" ] || { echo "FAIL: stub provider (no-match) never bound a port"; exit 1; }
+write_config "http://127.0.0.1:$(cat "$tmp/port2")/v1/chat/completions"
+run_picker >/dev/null
+[ -z "$(sed -n 2p "$tmp/env")" ] \
+    || { echo "FAIL: context window should stay unset when the model id isn't in /v1/models: $(sed -n 2p "$tmp/env")"; exit 1; }
 
 echo "PASS"

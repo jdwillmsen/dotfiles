@@ -69,7 +69,7 @@ base="${resolved#*$'\t'}"
 case "$tool" in
   2)
     if [ "${AIPICK_DRY_RUN:-}" = "1" ]; then
-      echo "  DRY-RUN aider --openai-api-base \"$base\" --openai-api-key \"$key\" --model \"openai/$model\""
+      echo "  DRY-RUN OPENAI_API_KEY=*** OPENAI_API_BASE=\"$base\" aider --model \"openai/$model\""
       exit 0
     fi
     if ! command -v aider >/dev/null 2>&1; then
@@ -82,9 +82,13 @@ case "$tool" in
         echo "  ✖ neither pipx nor pip found — install pipx first: https://pipx.pypa.io" >&2
         exit 1
       fi
+      hash -r
+      command -v aider >/dev/null 2>&1 || { echo "  ✖ aider installed but not on PATH — open a new shell or add its install dir to PATH" >&2; exit 1; }
     fi
+    export OPENAI_API_KEY="$key"
+    export OPENAI_API_BASE="$base"
     echo "  → launching aider on: $sel"
-    exec aider --openai-api-base "$base" --openai-api-key "$key" --model "openai/$model"
+    exec aider --model "openai/$model"
     ;;
   3)
     if [ "${AIPICK_DRY_RUN:-}" = "1" ]; then
@@ -99,6 +103,8 @@ case "$tool" in
         echo "  ✖ npm not found — install Node.js/npm first" >&2
         exit 1
       fi
+      hash -r
+      command -v qwen >/dev/null 2>&1 || { echo "  ✖ qwen installed but not on PATH — open a new shell or add its install dir to PATH" >&2; exit 1; }
     fi
     export OPENAI_API_KEY="$key"
     export OPENAI_BASE_URL="$base"

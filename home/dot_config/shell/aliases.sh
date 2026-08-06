@@ -68,6 +68,7 @@ alias cpuinfo='lscpu'
 alias ccrpick='bash ~/.claude-code-router/pick.sh'
 alias aipick='bash ~/.claude-code-router/aipick.sh'
 alias orfree='bash ~/.claude-code-router/refresh-openrouter-free.sh'
+alias orcheck='bash ~/.claude-code-router/check-openrouter-freshness.sh'
 
 # Misc
 alias reload='source ~/.zshrc 2>/dev/null || source ~/.bashrc'

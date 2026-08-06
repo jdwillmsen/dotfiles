@@ -87,4 +87,61 @@ out="$(printf '2\n1\n' | HOME="$tmp" PATH="$tmp/bin:$bash_dir:$node_dir:/usr/bin
 echo "$out" | grep -q "PIPX_INSTALL_CALLED: install aider-chat" \
     || { echo "FAIL: pipx auto-install not triggered when aider missing"; echo "$out"; exit 1; }
 
+# ── Task 5: input-validation edge cases ──
+write_config "ollama"
+
+set +e
+out="$(printf '9\n' | HOME="$tmp" bash "$script" 2>&1)"; rc=$?
+set -e
+[ "$rc" -eq 0 ] && { echo "FAIL: exited 0 on out-of-range tool #"; echo "$out"; exit 1; }
+echo "$out" | grep -q "not a valid choice" \
+    || { echo "FAIL: no diagnostic for out-of-range tool #"; echo "$out"; exit 1; }
+
+out="$(printf '2\nq\n' | HOME="$tmp" bash "$script")"
+echo "$out" | grep -q "cancelled" \
+    || { echo "FAIL: q at model picker didn't cancel"; echo "$out"; exit 1; }
+
+set +e
+out="$(printf '2\nabc\n' | HOME="$tmp" bash "$script" 2>&1)"; rc=$?
+set -e
+[ "$rc" -eq 0 ] && { echo "FAIL: exited 0 on non-numeric model #"; echo "$out"; exit 1; }
+echo "$out" | grep -q "not a number" \
+    || { echo "FAIL: no diagnostic for non-numeric model #"; echo "$out"; exit 1; }
+
+set +e
+out="$(printf '2\n99\n' | HOME="$tmp" bash "$script" 2>&1)"; rc=$?
+set -e
+[ "$rc" -eq 0 ] && { echo "FAIL: exited 0 on out-of-range model #"; echo "$out"; exit 1; }
+echo "$out" | grep -q "out of range" \
+    || { echo "FAIL: no diagnostic for out-of-range model #"; echo "$out"; exit 1; }
+
+# empty model list — the provider exists but lists nothing to pick
+cat >"$tmp/.claude-code-router/config.json" <<'JSON'
+{ "Providers": [ { "name": "ollama", "api_base_url": "http://x", "api_key": "x", "models": [] } ] }
+JSON
+set +e
+out="$(printf '2\n' | HOME="$tmp" bash "$script" 2>&1)"; rc=$?
+set -e
+[ "$rc" -eq 0 ] && { echo "FAIL: exited 0 with an empty model list"; echo "$out"; exit 1; }
+echo "$out" | grep -q "no models in config" \
+    || { echo "FAIL: no diagnostic for empty model list"; echo "$out"; exit 1; }
+
+# malformed config.json — fail loudly, not a silent empty picker
+echo "not json" >"$tmp/.claude-code-router/config.json"
+set +e
+out="$(printf '2\n' | HOME="$tmp" bash "$script" 2>&1)"; rc=$?
+set -e
+[ "$rc" -eq 0 ] && { echo "FAIL: exited 0 with malformed config.json"; echo "$out"; exit 1; }
+write_config "ollama"
+
+# missing config.json entirely
+rm -f "$tmp/.claude-code-router/config.json"
+set +e
+out="$(printf '1\n' | HOME="$tmp" bash "$script" 2>&1)"; rc=$?
+set -e
+[ "$rc" -eq 0 ] && { echo "FAIL: exited 0 with no config.json"; echo "$out"; exit 1; }
+echo "$out" | grep -q "no CCR config" \
+    || { echo "FAIL: no diagnostic for missing config.json"; echo "$out"; exit 1; }
+write_config "ollama"
+
 echo "PASS"

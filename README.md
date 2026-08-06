@@ -5,7 +5,7 @@
 [![Managed with chezmoi](https://img.shields.io/badge/managed%20with-chezmoi-4B8D9A)](https://www.chezmoi.io/)
 [![Go](https://img.shields.io/github/go-mod/go-version/jdwillmsen/dotfiles?filename=scripts%2Fclaude-status%2Fgo.mod&label=go)](scripts/claude-status/go.mod)
 [![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-informational)](#targets)
-[![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue)](LICENSE)
+[![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue)](LICENSE.md)
 
 Personal development environment for Jake Willmsen — shell, git, and Claude Code, managed with [chezmoi](https://www.chezmoi.io/) and installable on any machine or devcontainer with a single command.
 

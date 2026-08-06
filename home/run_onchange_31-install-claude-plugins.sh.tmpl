@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 command -v claude &>/dev/null || { echo "claude CLI not found — skipping plugins"; exit 0; }
+# mattpocock-skills moved from a manual claudeSkillsDir clone to this plugin
+# marketplace; remove the old clone so it doesn't load twice.
+rm -rf "$HOME/.claude/skills/mattpocock-skills"
 {{ range .claudePlugins.marketplaces }}
 if ! claude plugin marketplace list 2>/dev/null | grep -qw {{ .name }}; then
     claude plugin marketplace add {{ .url | quote }} || echo "marketplace {{ .name }} add failed"

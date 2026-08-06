@@ -19,8 +19,9 @@ done
 echo "$skills" | grep -q 'skills add.*no-mistakes' && { echo "FAIL: no-mistakes must not install via the skills CLI"; exit 1; }
 echo "$skills" | grep -q 'no-mistakes' || { echo "FAIL: no-mistakes missing from the declared allowlist"; exit 1; }
 
-# Same trap in the other direction: mattpocock arrives via claudeSkillsDir, and
-# listing it here too is what made every one of its skills load twice.
+# Same trap in the other direction: mattpocock arrives via its own plugin
+# marketplace (claudePlugins), and listing it here too is what made every one
+# of its skills load twice.
 echo "$skills" | grep -q 'skills add.*mattpocock' && { echo "FAIL: mattpocock must not be in agentSkills"; exit 1; }
 
 # The CLI resolves global-vs-project from the working directory, so a missing

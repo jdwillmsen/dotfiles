@@ -1,6 +1,33 @@
 # dotfiles
 
+[![CI](https://github.com/jdwillmsen/dotfiles/actions/workflows/ci.yml/badge.svg)](https://github.com/jdwillmsen/dotfiles/actions/workflows/ci.yml)
+[![GitGuardian scan](https://img.shields.io/badge/secrets%20scan-GitGuardian-000000)](https://github.com/jdwillmsen/dotfiles/security)
+[![Managed with chezmoi](https://img.shields.io/badge/managed%20with-chezmoi-4B8D9A)](https://www.chezmoi.io/)
+[![Go](https://img.shields.io/github/go-mod/go-version/jdwillmsen/dotfiles?filename=scripts%2Fclaude-status%2Fgo.mod&label=go)](scripts/claude-status/go.mod)
+[![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-informational)](#targets)
+[![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue)](LICENSE)
+
 Personal development environment for Jake Willmsen — shell, git, and Claude Code, managed with [chezmoi](https://www.chezmoi.io/) and installable on any machine or devcontainer with a single command.
+
+## Highlights
+
+- **One-command install** on Windows, macOS, or Linux, including WSL and devcontainers/Codespaces.
+- **Per-machine templating** — a single source tree renders differently for personal vs. work vs. ephemeral (CI/Codespaces) machines.
+- **Deep Claude Code integration** — hooks, MCP servers, a Go-built statusline (cost, context-window fill, rate limits, Jira ticket), and plugin/skill installs kept current via marketplaces.
+- **Secrets done right** — work git identity and other sensitive values are age-encrypted and decrypted at apply time; nothing sensitive lives in plaintext in the repo.
+- **Tested and CI-gated** — template and script unit tests plus a full smoke-apply run on every push; `shellcheck` and `gofmt`/`go vet` enforced.
+- **Idempotent by design** — `chezmoi apply` is safe to re-run at any time; install scripts detect existing state before acting.
+
+## Contents
+
+- [Install](#install)
+- [Secrets](#secrets)
+- [Targets](#targets)
+- [Structure](#structure)
+- [Testing](#testing)
+- [Shell prompt](#shell-prompt)
+- [Claude Code status line](#claude-code-status-line)
+- [GitHub Codespaces](#github-codespaces)
 
 ## Install
 

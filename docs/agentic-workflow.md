@@ -30,7 +30,7 @@ manual step on a new machine.
 | **lavish** | Interactive HTML planning artifacts instead of a wall-of-text plan. | Skill via `agentSkills`; the CLI itself runs through `npx -y lavish-axi`, so nothing is installed |
 | **gnhf** | Long-running unattended loop with hard token/iteration caps. Built for overnight runs. | CLI via `agentClis` |
 | **whisper-local** | Local voice input. The highest-leverage single change — dictation is roughly 3× typing throughput. | `run_onchange_after_50-install-whisper-local.sh.tmpl` |
-| **mattpocock/skills** | General engineering skills (tdd, diagnosing-bugs, code-review, …). | `claudeSkillsDir` git clone; loads namespaced as `mattpocock-skills:*` |
+| **mattpocock/skills** | General engineering skills (tdd, diagnosing-bugs, code-review, …). | `claudePlugins` marketplace install; loads namespaced as `mattpocock-skills:*` |
 | **caveman** | Token-efficient output mode. | `claudePlugins` marketplace install |
 
 ### Deliberately skipped

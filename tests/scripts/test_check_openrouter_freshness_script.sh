@@ -8,6 +8,9 @@ refresh_script="$here/home/dot_claude-code-router/executable_refresh-openrouter-
 shellcheck -s bash "$script"
 bash -n "$script"
 
+grep -q "alias orcheck='bash ~/.claude-code-router/check-openrouter-freshness.sh'" "$here/home/dot_config/shell/aliases.sh" \
+    || { echo "FAIL: no orcheck alias"; exit 1; }
+
 tmp="$(mktemp -d)"
 trap "rm -rf '$tmp'" EXIT
 mkdir -p "$tmp/.claude-code-router"

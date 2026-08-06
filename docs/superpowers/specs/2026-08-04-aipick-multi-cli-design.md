@@ -60,8 +60,11 @@ read `Providers`).
        `pip install --user aider-chat`. Neither present → error, tell user to
        install `pipx` first (no cascading package-manager installs).
      - `qwen` → `npm i -g @qwen-code/qwen-code`. `npm` missing → error.
+     - After install: `hash -r` then re-check `command -v` for the binary —
+       catches an install that succeeded but landed outside `$PATH`.
    - Launch:
-     - Aider: `exec aider --openai-api-base "$base" --openai-api-key "$key" --model "openai/$model"`
+     - Aider: `export OPENAI_API_KEY="$key" OPENAI_API_BASE="$base"; exec aider --model "openai/$model"`
+       — env vars, not `--openai-api-key`, so the key never appears in `ps`/process args.
      - Qwen Code: `export OPENAI_API_KEY="$key" OPENAI_BASE_URL="$base" OPENAI_MODEL="$model"; exec qwen`
    - Both `exec` in the caller's `$PWD` (current project dir), same as
      `pick.sh` does for `claude`.
@@ -98,7 +101,7 @@ GET https://openrouter.ai/api/v1/models
 ```
 
 Filter to entries where `pricing.prompt == "0"` and `pricing.completion ==
-"0"`, print `id` one per line (or `--json` for a ready-to-paste array).
+"0"`, print `id` one per line.
 Read-only — never touches `config.json`. Run it whenever you want to check
 what's currently free; paste what you want into the `openrouter` provider's
 `models[]` by hand.

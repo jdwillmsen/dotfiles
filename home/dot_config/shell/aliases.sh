@@ -66,6 +66,8 @@ alias cpuinfo='lscpu'
 
 # CCR — free/local fallback tier for Claude Code (use when Max caps out)
 alias ccrpick='bash ~/.claude-code-router/pick.sh'
+alias aipick='bash ~/.claude-code-router/aipick.sh'
+alias orfree='bash ~/.claude-code-router/refresh-openrouter-free.sh'
 
 # Misc
 alias reload='source ~/.zshrc 2>/dev/null || source ~/.bashrc'

@@ -14,17 +14,19 @@ claudePlugins:
   marketplaces:
     - name: caveman
       url: "https://github.com/JuliusBrussee/caveman"
+    - name: mattpocock
+      url: "https://github.com/mattpocock/skills"
   install:
     - caveman@caveman
-claudeSkillsDir:
-  - name: mattpocock-skills
-    url: "https://github.com/mattpocock/skills"
+    - mattpocock-skills@mattpocock
+claudeSkillsDir: []
 # Individually-extracted upstream skills, installed via the vercel-labs skills
 # CLI. Kept separate from claudeSkillsDir because those repos are whole-repo
 # clones; these pull one skill folder out of a repo that is mostly something
 # else (no-mistakes and lavish-axi are CLI projects that happen to ship a skill).
-# Do not add mattpocock/skills here — it arrives via claudeSkillsDir above, and
-# declaring it twice is what caused every skill in it to load twice.
+# Do not add mattpocock/skills here — it arrives via claudePlugins above (its
+# repo now ships a marketplace manifest), and declaring it twice loads every
+# skill in it twice.
 # no-mistakes is deliberately absent: `no-mistakes init` installs its own skill
 # at user level, so pulling it from here as well would install it twice.
 agentSkills:

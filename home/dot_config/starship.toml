@@ -32,7 +32,9 @@ add_newline = true
 # Deliberately not sized for C:\Windows\System32 — a cold scan there is ~16s, so
 # no timeout both avoids the warning and keeps the prompt usable. That case is
 # handled by the cwd guard in .bashrc, which keeps shells out of System32.
-scan_timeout = 100
+# 100ms still wasn't enough headroom on elevated shells (UAC/AV overhead pushes
+# even small repos to 150-600ms cold) — measured on this machine before bumping.
+scan_timeout = 1000
 
 [character]
 success_symbol = "[❯](green)"

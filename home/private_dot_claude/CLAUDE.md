@@ -55,6 +55,12 @@ touched block; never comment out dead code. Match surrounding density.
 - Squash merges rewrite SHAs: verify merged by tree diff
   (`git diff HEAD origin/main --stat` empty), not `git branch --contains`.
 - Never nest worktrees; never `git checkout main` from a worktree.
+- **Parallel agents on git work = separate worktrees, no exceptions.** Any
+  time 2+ agents touch git state concurrently (parallel `Agent`/`Workflow`
+  dispatch, subagent-driven dev, worktree-per-task fanout), each gets its own
+  worktree (`isolation: "worktree"` / `EnterWorktree`). Never share one
+  working tree across concurrent agents — same rule as solo work above, just
+  enforced per-agent instead of per-session.
 
 ## Shell
 

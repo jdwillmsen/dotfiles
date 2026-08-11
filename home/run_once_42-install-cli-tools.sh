@@ -1,18 +1,40 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Package ids diverge per manager (delta is "git-delta" on brew and cargo, "delta"
-# on scoop), so each tool carries its own row rather than assuming one name.
-# Fields: command|brew|winget|scoop|cargo — empty field means that manager is skipped.
+# Package ids diverge per manager (delta is "git-delta" on brew, apt and cargo,
+# "delta" on scoop), so each tool carries its own row rather than assuming one name.
+# Fields: command|brew|winget|scoop|apt|cargo — empty field means that manager is skipped.
+# An apt id may be written pkg>binary when the Debian package installs the tool
+# under a different binary name than upstream (fd ships as fdfind).
 TOOLS='
-delta|git-delta|dandavison.delta|delta|git-delta
-fd|fd|sharkdp.fd|fd|fd-find
-eza|eza|eza-community.eza|eza|eza
-zoxide|zoxide|ajeetdsouza.zoxide|zoxide|zoxide
-starship|starship|Starship.Starship|starship|starship
+delta|git-delta|dandavison.delta|delta|git-delta|git-delta
+fd|fd|sharkdp.fd|fd|fd-find>fdfind|fd-find
+eza|eza|eza-community.eza|eza|eza|eza
+zoxide|zoxide|ajeetdsouza.zoxide|zoxide|zoxide|zoxide
+starship|starship|Starship.Starship|starship||starship
+fzf|fzf|junegunn.fzf|fzf|fzf|
+direnv|direnv|direnv.direnv|direnv|direnv|
+nvim|neovim|Neovim.Neovim|neovim|neovim|
 '
 
+# apt is the only manager here that needs root. `chezmoi apply` runs unattended
+# (CI, devcontainers, bootstrap), so a password prompt would hang it — require
+# a non-interactive sudo and fall through to the next manager otherwise.
+apt_install() {
+    local cmd=$1 spec=$2
+    local pkg=${spec%%>*} altbin=${spec#*>}
+    DEBIAN_FRONTEND=noninteractive sudo -n apt-get install -y -qq "$pkg" || {
+        echo "$cmd apt install failed"; return 0
+    }
+    # Shim the Debian binary name onto the upstream one, or the next apply sees
+    # the tool as still missing and reinstalls it every time.
+    if [ "$altbin" != "$spec" ] && ! command -v "$cmd" &>/dev/null; then
+        mkdir -p "$HOME/.local/bin"
+        ln -sf "$(command -v "$altbin")" "$HOME/.local/bin/$cmd"
+    fi
+}
+
 install_one() {
-    local cmd=$1 brew_id=$2 winget_id=$3 scoop_id=$4 cargo_id=$5
+    local cmd=$1 brew_id=$2 winget_id=$3 scoop_id=$4 apt_id=$5 cargo_id=$6
     if command -v "$cmd" &>/dev/null; then
         echo "$cmd already installed — skipping"; return 0
     fi
@@ -32,18 +54,20 @@ install_one() {
         fi
     elif [ -n "$scoop_id" ] && command -v scoop &>/dev/null; then
         scoop install "$scoop_id" || echo "$cmd scoop install failed"
+    elif [ -n "$apt_id" ] && command -v apt-get &>/dev/null && sudo -n true 2>/dev/null; then
+        apt_install "$cmd" "$apt_id"
     elif [ -n "$cargo_id" ] && command -v cargo &>/dev/null; then
         cargo install "$cargo_id" || echo "$cmd cargo install failed"
     else
-        echo "$cmd requires brew, winget, scoop, or cargo — install one first"
+        echo "$cmd requires brew, winget, scoop, passwordless-sudo apt, or cargo — install one first"
     fi
 }
 
 # A single tool failing must not abort the rest, so install_one never returns
 # non-zero and the loop runs to completion under `set -e`.
-while IFS='|' read -r cmd brew_id winget_id scoop_id cargo_id; do
+while IFS='|' read -r cmd brew_id winget_id scoop_id apt_id cargo_id; do
     [ -n "$cmd" ] || continue
-    install_one "$cmd" "$brew_id" "$winget_id" "$scoop_id" "$cargo_id"
+    install_one "$cmd" "$brew_id" "$winget_id" "$scoop_id" "$apt_id" "$cargo_id"
 done <<< "$TOOLS"
 
 echo "CLI tool provisioning complete"

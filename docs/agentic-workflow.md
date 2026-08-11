@@ -18,6 +18,12 @@ Models inherit human time-estimates from their training data and will quietly
 choose the cheap, low-quality path unless told the tradeoff is different. Correctness
 and review cost dominate; generation cost is close to free.
 
+"Let agents own the middle" only holds if the agent can keep running when you
+stop watching. A devbox worked from over plain SSH doesn't survive closing the
+laptop; see [`persistence.md`](persistence.md) for the tmux/linger/continuum
+stack that turns the devbox into a persistent host any client can attach to
+and walk away from.
+
 ## What is installed, and how it is enforced
 
 Everything below is provisioned from this repo. Nothing here should require a

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Rebuild trigger — reinstalls plugins whenever dot_tmux.conf's plugin list
+# changes, not just once, since TPM's own install script is interactive-only.
+# {{ include "dot_tmux.conf" | sha256sum }}
+command -v tmux &>/dev/null || { echo "tmux not found — skipping plugin install"; exit 0; }
+TPM_DIR="$HOME/.tmux/plugins/tpm"
+[ -x "$TPM_DIR/bin/install_plugins" ] || { echo "TPM not installed — skipping plugin install"; exit 0; }
+TMUX_CONFIG_FILE="$HOME/.tmux.conf" "$TPM_DIR/bin/install_plugins" || echo "tmux plugin install failed"

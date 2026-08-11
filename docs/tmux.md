@@ -2,6 +2,11 @@
 
 tmux is a terminal multiplexer — it lets you run multiple terminals inside a single terminal window, keep sessions alive after you disconnect, and pick back up where you left off.
 
+On a devbox worked from over SSH, tmux is the first of three persistence
+layers — see [`persistence.md`](persistence.md) for the full model (surviving
+a disconnect vs. surviving a reboot vs. surviving zero logged-in sessions) and
+how it enables running agent work unattended.
+
 ## Concepts
 
 | Term | What it means |
@@ -70,6 +75,19 @@ tmux new -s work
 tmux switch -t work        # from inside tmux
 tmux attach -t dotfiles    # from outside tmux
 ```
+
+## Surviving a tmux server death
+
+`tmux-resurrect` and `tmux-continuum` are installed via TPM and save the pane
+layout (working directories, and vim/nvim sessions) to disk every 15 minutes,
+restoring it automatically the next time a tmux server starts cold — the
+state a VM reboot leaves you in. This does not resume a running program's
+in-memory state, only its pane and working directory.
+
+| Key (Ctrl+A then) | Action |
+|-----|--------|
+| `Ctrl+s` | Save layout now |
+| `Ctrl+r` | Restore last saved layout |
 
 ## Auto-start (optional)
 

@@ -21,6 +21,7 @@ Personal development environment for Jake Willmsen — shell, git, and Claude Co
 ## Contents
 
 - [Install](#install)
+- [Provisioning](#provisioning)
 - [Secrets](#secrets)
 - [Targets](#targets)
 - [Structure](#structure)
@@ -36,6 +37,16 @@ sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply jdwillmsen
 ```
 
 You'll be prompted for a machine role (see Targets below). Re-running `chezmoi apply` is always safe — templates and scripts are idempotent.
+
+## Provisioning
+
+`chezmoi apply` installs everything that can be installed as the logged-in user — CLI tools, Python tooling, cloud CLIs — and never prompts for a password. Machine-level setup that genuinely needs root is a separate, explicit step:
+
+```bash
+sudo scripts/provision-swap.sh    # zram + swapfile tiers, sysctl tuning, systemd-oomd
+```
+
+See [`docs/provisioning.md`](docs/provisioning.md) for what each layer does and why, including the kernel-package trap that silently disables zram after an upgrade.
 
 ## Secrets
 
@@ -65,9 +76,9 @@ dotfiles/
 │   ├── private_dot_claude/   # ~/.claude — settings (merged), CLAUDE.md, commands, hooks
 │   ├── private_dot_codex/    # ~/.codex — AGENTS.md, config.toml, skills
 │   └── run_*                # side-effect scripts (TPM, Go build, MCP, plugins, rtk)
-├── scripts/              # compiled tools (claude-status Go binary source)
+├── scripts/              # compiled tools (claude-status Go source) + root provisioning
 ├── tests/                # template unit tests, script unit tests, smoke test
-└── docs/                 # secrets, tmux, agentic workflow, and design docs
+└── docs/                 # secrets, provisioning, tmux, agentic workflow, design docs
 ```
 
 ## Testing
@@ -76,7 +87,7 @@ dotfiles/
 bash tests/smoke.sh                                    # chezmoi apply into a temp HOME, assert key files
 for t in tests/template/*.sh; do bash "$t"; done       # template rendering unit tests
 for t in tests/scripts/*.sh; do bash "$t"; done        # run_* script unit tests
-find home -name 'run_*.sh' -exec shellcheck -s bash {} +
+find home scripts -name '*.sh' -exec shellcheck -s bash {} +
 ```
 
 ## Shell prompt

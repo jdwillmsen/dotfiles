@@ -109,6 +109,29 @@ second guard every CI run would pay for it. `47` carries the same runtime `CI`
 guard — the job that needs Go provisions its own toolchain — but stays enabled
 for ephemeral machines, which still render a statusline.
 
+## Download integrity
+
+Two of these scripts fetch an archive and put its contents on `PATH`, so both
+verify it against the vendor's own digest and refuse an artifact they cannot
+check, rather than installing it anyway:
+
+| Artifact | Digest source |
+|---|---|
+| Go tarball (`47`) | the `sha256` field of the object naming that file in the version index — not the first `sha256` in the document, which belongs to the source archive |
+| terraform zip (`46`) | `terraform_<version>_SHA256SUMS` alongside the release |
+
+Go's pinned fallback version carries a pinned digest with it, so a machine that
+cannot reach the version index still installs a verified archive. Go earns the
+stricter treatment because it lands ahead of the system directories on `PATH`
+*and* builds `claude-status`, which Claude Code executes on every statusline
+render — a swapped archive there compromises every later build.
+
+Three paths remain unverified, and knowingly so: the uv installer is a
+pipe-to-shell, the AWS CLI publishes only a detached GPG signature (which needs
+a key imported before it means anything), and `az` comes from PyPI through uv.
+All are HTTPS fetches from vendor-controlled hosts, so the exposure is a vendor
+or CDN compromise rather than anything a network attacker can reach.
+
 ## Testing
 
 All layers are covered by the script unit tests, which run in CI:

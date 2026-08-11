@@ -4,10 +4,24 @@ set -euo pipefail
 # env is sized for a 1M-context model: MCP results can be twice the stock 25k
 # budget before truncation, and bash gets past the 2min default that long
 # builds were clipping. Auto-compact is deliberately left at its ~90% default.
-DEFAULTS='{
-  "model": "opus",
+#
+# statusLine defaults only when Go is present — claude-status is built by
+# run_onchange_after_20-build-claude-status.sh.tmpl, which needs Go and
+# silently no-ops without it. Defaulting to a command that will never exist
+# leaves Claude Code pointed at a broken statusline with no obvious signal;
+# gating here keeps the two in sync and falls back to Claude Code's own
+# default statusline instead. The DOTFILES WARNING prefix is grep-able from
+# `chezmoi apply -v` output.
+STATUS_LINE_KEYS=""
+if command -v go >/dev/null 2>&1; then
+    STATUS_LINE_KEYS='
   "statusLine": { "type": "command", "command": "claude-status", "refreshInterval": 10 },
-  "subagentStatusLine": { "type": "command", "command": "claude-status -subagents" },
+  "subagentStatusLine": { "type": "command", "command": "claude-status -subagents" },'
+else
+    echo "DOTFILES WARNING: Go not found — claude-status will not be built, leaving statusLine at Claude Code's default" >&2
+fi
+DEFAULTS='{
+  "model": "opus",'"$STATUS_LINE_KEYS"'
   "theme": "dark",
   "cleanupPeriodDays": 90,
   "skipDangerousModePermissionPrompt": true,

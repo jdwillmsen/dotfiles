@@ -5,6 +5,11 @@ here="$(cd "$(dirname "$0")/../.." && pwd)"
 . "$here/tests/lib.sh"
 chez_require_key
 render() { chez_render "$(chez_init "$1")" "$here/home/dot_gitconfig.tmpl"; }
+# Snapshot before anything below applies: an apply installs delta (run_once_42),
+# so checking at the end would test a binary that did not exist when $p was
+# rendered — the two branches below would then disagree by construction.
+delta_present=0
+if command -v delta &>/dev/null; then delta_present=1; fi
 p="$(render personal)"
 # noreply, not the real address: this is the base layer, applying to any repo no
 # machine-local includeIf claims. A real address in public history is permanent.
@@ -32,7 +37,7 @@ echo "$w" | grep -q "42048994+jdwillmsen@users.noreply.github.com" || { echo "FA
 # delta config is gated on the binary resolving at apply time — naming a pager
 # that is not on PATH breaks every paging command. Assert whichever branch this
 # machine is actually in, so both are covered across CI and dev machines.
-if command -v delta &>/dev/null; then
+if [ "$delta_present" = 1 ]; then
     echo "$p" | grep -q "pager = delta" || { echo "FAIL: delta present but pager not configured"; exit 1; }
     echo "$p" | grep -q "diffFilter = delta --color-only" || { echo "FAIL: delta diffFilter missing"; exit 1; }
 else

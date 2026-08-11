@@ -43,10 +43,11 @@ You'll be prompted for a machine role (see Targets below). Re-running `chezmoi a
 `chezmoi apply` installs everything that can be installed as the logged-in user — CLI tools, Python tooling, cloud CLIs — and never prompts for a password. Machine-level setup that genuinely needs root is a separate, explicit step:
 
 ```bash
-sudo scripts/provision-swap.sh    # zram + swapfile tiers, sysctl tuning, systemd-oomd
+sudo scripts/provision-swap.sh          # zram + swapfile tiers, sysctl tuning, systemd-oomd
+sudo scripts/provision-persistence.sh   # loginctl enable-linger, so a detached tmux server survives zero logins
 ```
 
-See [`docs/provisioning.md`](docs/provisioning.md) for what each layer does and why, including the kernel-package trap that silently disables zram after an upgrade.
+See [`docs/provisioning.md`](docs/provisioning.md) for what each layer does and why, including the kernel-package trap that silently disables zram after an upgrade, and [`docs/persistence.md`](docs/persistence.md) for the full session-persistence model (tmux, linger, resurrect/continuum).
 
 ## Secrets
 
@@ -78,7 +79,7 @@ dotfiles/
 │   └── run_*                # side-effect scripts (TPM, Go build, MCP, plugins, rtk)
 ├── scripts/              # compiled tools (claude-status Go source) + root provisioning
 ├── tests/                # template unit tests, script unit tests, smoke test
-└── docs/                 # secrets, provisioning, tmux, agentic workflow, design docs
+└── docs/                 # secrets, provisioning, tmux, persistence, agentic workflow, design docs
 ```
 
 ## Testing

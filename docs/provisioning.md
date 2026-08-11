@@ -39,6 +39,26 @@ each carries its own language servers, which are ideal swap candidates while
 idle, and parallel builds spike hard but briefly. Without swap, any overshoot
 became an abrupt OOM kill with no warning window.
 
+## Session persistence
+
+```bash
+sudo scripts/provision-persistence.sh
+```
+
+Idempotent; re-run it any time (a no-op once linger is already enabled).
+Environment override: `TARGET_USER` (defaults to the user that invoked
+`sudo`).
+
+Enables `loginctl enable-linger` for the target user, so their systemd
+instance — and anything running under it, a detached tmux server included —
+survives the last SSH session closing rather than being torn down with it.
+Without this, a devbox with no other persistence layers still loses
+everything the moment nobody is logged in, even with tmux in front of it: a
+detached tmux server has no active login session to hide behind. See
+[`persistence.md`](persistence.md) for how this combines with tmux and
+tmux-resurrect/continuum into the full model, and why each layer alone is
+insufficient.
+
 ## User-level toolchain
 
 These run as part of `chezmoi apply` and need no root:
@@ -78,15 +98,21 @@ second guard every CI run would pay for it.
 
 ## Testing
 
-Both layers are covered by the script unit tests, which run in CI:
+All layers are covered by the script unit tests, which run in CI:
 
 ```bash
 bash tests/scripts/test_provision_swap_script.sh
 bash tests/scripts/test_toolchain_scripts.sh
+bash tests/scripts/test_provision_persistence_script.sh
+bash tests/scripts/test_tmux_plugins_script.sh
 ```
 
 They shellcheck each script and assert the invariants that are easy to break by
 accident: the zram tier outranking the swapfile, `linux-generic` rather than a
 version-pinned module package, six fields per row in the tool table, `sudo -n`
-on every privileged call, and no `cond && action` line continuations, which
-abort the whole script under `set -e` whenever the condition is false.
+on every privileged call, no `cond && action` line continuations (which abort
+the whole script under `set -e` whenever the condition is false), the
+persistence script's root check running before it enables linger with a
+`$SUDO_USER` fallback, and the tmux plugin installer being keyed to
+`dot_tmux.conf` changes with resurrect/continuum actually declared and
+auto-restore on.

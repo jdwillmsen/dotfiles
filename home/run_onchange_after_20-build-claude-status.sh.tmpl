@@ -3,6 +3,9 @@ set -euo pipefail
 # Rebuild trigger — hashes every .go file so adding a source file (not just
 # editing main.go) also retriggers the build:
 # {{ range (glob (joinPath .chezmoi.sourceDir ".." "scripts" "claude-status" "*.go")) }}{{ include . | sha256sum }}{{ end }}
+# Go may have been installed into ~/.local/bin by this same apply, a directory
+# the apply shell inherited its PATH from before it existed.
+export PATH="$HOME/.local/bin:$PATH"
 command -v go &>/dev/null || { echo "DOTFILES WARNING: Go not found — skipping claude-status build" >&2; exit 0; }
 SRC="{{ joinPath .chezmoi.sourceDir ".." "scripts" "claude-status" }}"
 mkdir -p "$HOME/.local/bin"

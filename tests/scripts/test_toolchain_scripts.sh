@@ -4,7 +4,8 @@ here="$(cd "$(dirname "$0")/../.." && pwd)"
 cli="$here/home/run_once_42-install-cli-tools.sh"
 py="$here/home/run_once_45-install-python-tools.sh"
 cloud="$here/home/run_once_46-install-cloud-clis.sh"
-shellcheck -s bash "$cli" "$py" "$cloud"
+go="$here/home/run_once_47-install-go.sh"
+shellcheck -s bash "$cli" "$py" "$cloud" "$go"
 
 fail() { echo "FAIL: $1"; exit 1; }
 
@@ -62,8 +63,22 @@ done
 grep -q 'releases/latest' "$cloud" || fail "terraform version lookup missing"
 grep -q 'TERRAFORM_FALLBACK_VERSION' "$cloud" || fail "terraform pinned fallback missing"
 
+# --- 47: go ------------------------------------------------------------------
+# The statusline build is the reason Go is here; a distro package that trails
+# go.mod's pinned toolchain would fail that build rather than skip it.
+grep -q 'apt-get\|apt install' "$go" && fail "go must come from the upstream tarball, not a distro package"
+grep -q 'command -v go &>/dev/null' "$go" || fail "go missing idempotency guard"
+grep -q 'GO_FALLBACK_VERSION' "$go" || fail "go pinned fallback missing"
+grep -q '${CI:-}' "$go" || fail "go install not skipped under CI"
+
+# The build script runs in its own process; without the PATH prepend it cannot
+# see a Go that this same apply just installed, and silently skips the build.
+build="$here/home/run_onchange_after_20-build-claude-status.sh.tmpl"
+grep -q 'export PATH="$HOME/.local/bin:$PATH"' "$build" ||
+    fail "claude-status build must put ~/.local/bin on PATH before probing for go"
+
 # --- shared: set -e hazards --------------------------------------------------
-for s in "$cli" "$py" "$cloud"; do
+for s in "$cli" "$py" "$cloud" "$go"; do
     grep -qE '^[[:space:]]*(command -v|\[ -n).*&&$' "$s" &&
         fail "$(basename "$s"): trailing '&&' continuation aborts under set -e"
 done

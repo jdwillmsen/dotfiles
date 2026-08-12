@@ -100,14 +100,20 @@ build script runs in its own process, so it prepends `~/.local/bin` to `PATH`
 before probing for `go`; without that it cannot see a toolchain the same apply
 just installed.
 
-`46` is skipped on ephemeral machines (see `home/.chezmoiignore`) and again at
-runtime whenever `CI` is set. Both are needed: the ignore rule covers machines
-initialised with the ephemeral role, while the runtime check catches the smoke
-test, which deliberately applies with a real machine role into a throwaway
-`HOME`. The gcloud tarball alone is a few hundred megabytes, so without the
-second guard every CI run would pay for it. `47` carries the same runtime `CI`
-guard — the job that needs Go provisions its own toolchain — but stays enabled
-for ephemeral machines, which still render a statusline.
+`46` is skipped on ephemeral machines (see `home/.chezmoiignore`), and both `46`
+and `47` are skipped whenever `CI` is set. The ephemeral rule covers machines
+initialised with that role; the `CI` rule catches the smoke test, which
+deliberately applies with a real machine role into a throwaway `HOME`. The
+gcloud tarball alone is a few hundred megabytes, so without it every CI run
+would pay for that download. `47` is otherwise enabled for ephemeral machines,
+which still render a statusline.
+
+The `CI` skip is an ignore rule rather than only the runtime `[ -z "${CI:-}" ]`
+guard the scripts still carry, because chezmoi records a `run_once_` script as
+executed whenever it exits 0 — including the exit that reports "skipping". A
+machine that ever applied with `CI` set would then never install those tools
+again. An ignored script leaves no such state behind. The runtime guards remain
+for anyone running a script directly.
 
 ## Download integrity
 

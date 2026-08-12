@@ -32,18 +32,29 @@ grep -qE 'sudo[^-]*apt-get' "$cli" && ! grep -q 'sudo -n apt-get' "$cli" &&
 # package has to be an explicit, reviewed edit here rather than a one-word diff
 # in the table that reads like every other manager id.
 APT_ALLOWED='git-delta fd-find eza zoxide fzf direnv neovim unzip'
+# Whole-token comparison, not `grep -w`: a hyphen is a word boundary to grep,
+# so `fd` and `find` would both pass against the allowed `fd-find`, and a
+# security boundary that accepts substrings of its own entries is not one.
+apt_allowed() {
+    local want="$1" p
+    [ -n "$want" ] || return 1
+    for p in $APT_ALLOWED; do
+        [ "$p" = "$want" ] && return 0
+    done
+    return 1
+}
 while IFS= read -r row; do
     apt_field="$(awk -F'|' '{print $5}' <<< "$row")"
     [ -n "$apt_field" ] || continue
     pkg="${apt_field%%>*}"
-    grep -qw -- "$pkg" <<< "$APT_ALLOWED" ||
+    apt_allowed "$pkg" ||
         fail "apt package '$pkg' is not in the reviewed allowlist"
 done <<< "$rows"
 # Same boundary, other script: unzip is the only package it may install.
 # Process substitution, not a pipeline: `fail` in a piped-into loop runs in a
 # subshell and its exit never reaches this script.
 while IFS= read -r pkg; do
-    grep -qw -- "$pkg" <<< "$APT_ALLOWED" ||
+    apt_allowed "$pkg" ||
         fail "cloud CLI script installs unreviewed apt package '$pkg'"
 done < <(grep -oE 'sudo -n apt-get install[^|]*' "$cloud" | awk '{print $NF}')
 

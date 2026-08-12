@@ -4,21 +4,18 @@ mcp:
     args:
       - "-y"
       - "@playwright/mcp@latest"
-  Atlassian:
-    command: npx
-    args:
-      - "-y"
-      - "mcp-remote@latest"
-      - "https://mcp.atlassian.com/v1/mcp/authv2"
 claudePlugins:
   marketplaces:
     - name: caveman
       url: "https://github.com/JuliusBrussee/caveman"
     - name: mattpocock
       url: "https://github.com/mattpocock/skills"
+    - name: claude-plugins-official
+      url: "anthropics/claude-plugins-official"
   install:
     - caveman@caveman
     - mattpocock-skills@mattpocock
+    - atlassian@claude-plugins-official
 claudeSkillsDir: []
 # Individually-extracted upstream skills, installed via the vercel-labs skills
 # CLI. Kept separate from claudeSkillsDir because those repos are whole-repo

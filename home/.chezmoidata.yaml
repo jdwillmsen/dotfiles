@@ -15,7 +15,23 @@ claudePlugins:
   install:
     - caveman@caveman
     - mattpocock-skills@mattpocock
-    - atlassian@claude-plugins-official
+    # atlassian@claude-plugins-official arrives via #44. These 12 accreted by
+    # hand on the primary machine over months; listing them is what makes a
+    # fresh box (or devbox) actually match instead of only getting
+    # caveman/mattpocock-skills/atlassian.
+    - claude-code-setup@claude-plugins-official
+    - commit-commands@claude-plugins-official
+    - context7@claude-plugins-official
+    - frontend-design@claude-plugins-official
+    - gopls-lsp@claude-plugins-official
+    - learning-output-style@claude-plugins-official
+    - pr-review-toolkit@claude-plugins-official
+    - ralph-loop@claude-plugins-official
+    - remember@claude-plugins-official
+    - security-guidance@claude-plugins-official
+    - session-report@claude-plugins-official
+    - superpowers@claude-plugins-official
+    - typescript-lsp@claude-plugins-official
 claudeSkillsDir: []
 # Individually-extracted upstream skills, installed via the vercel-labs skills
 # CLI. Kept separate from claudeSkillsDir because those repos are whole-repo

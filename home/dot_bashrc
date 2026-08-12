@@ -15,6 +15,17 @@ case "${PWD,,}" in
     /?/windows/system32) cd "$HOME" || : ;;
 esac
 
+# User-local bin dirs (chezmoi's ~/bin, pipx/uv-managed ~/.local/bin). .profile
+# already adds these for login shells, but tmux panes and other interactive
+# non-login shells only source this file, so chezmoi/claude/no-mistakes etc.
+# were invisible there without this duplicate.
+for d in "$HOME/bin" "$HOME/.local/bin"; do
+    case ":$PATH:" in
+        *":$d:"*) ;;
+        *) [ -d "$d" ] && PATH="$d:$PATH" ;;
+    esac
+done
+
 # Shared config; local.sh is unmanaged machine-local config and stays last
 # so its definitions override the managed files.
 for f in "$HOME/.config/shell/exports.sh" "$HOME/.config/shell/aliases.sh" "$HOME/.config/shell/functions.sh" "$HOME/.config/shell/local.sh"; do

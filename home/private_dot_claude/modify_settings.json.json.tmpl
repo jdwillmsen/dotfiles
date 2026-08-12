@@ -29,6 +29,30 @@ DEFAULTS='{
   "env": {
     "MAX_MCP_OUTPUT_TOKENS": "50000",
     "BASH_DEFAULT_TIMEOUT_MS": "180000"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "rtk hook claude" }
+        ]
+      }
+    ]
+  },
+  "skillOverrides": {
+    "tdd": "off",
+    "prototype": "off",
+    "grill-me": "off",
+    "grill-with-docs": "off",
+    "improve-codebase-architecture": "off",
+    "to-issues": "off",
+    "to-prd": "off",
+    "triage": "off",
+    "write-a-skill": "off",
+    "zoom-out": "off",
+    "lavish": "off",
+    "setup-matt-pocock-skills": "off"
   }
 }'
 # chezmoi feeds the current file on our stdin. That stdin is captured here

@@ -69,6 +69,7 @@ These run as part of `chezmoi apply` and need no root:
 | `run_once_42-install-cli-tools.sh` | delta, fd, eza, zoxide, starship, fzf, direnv, nvim |
 | `run_once_45-install-python-tools.sh` | uv, pipx |
 | `run_once_46-install-cloud-clis.sh` | terraform, aws, gcloud, az |
+| `run_once_47-install-go.sh` | Go toolchain |
 
 `42` is table-driven across brew, winget, scoop, apt, and cargo, in that order —
 prebuilt-binary managers first, cargo last because it compiles from source. The
@@ -89,12 +90,47 @@ points symlinked into `~/.local/bin`, deliberately avoiding the vendor
 installers that would register root-owned apt repositories and signing keys.
 `az` is a Python application, so it installs as a uv tool.
 
+`47` exists because the statusline is a Go binary built from
+`scripts/claude-status` during an apply: without a toolchain that build is
+skipped and Claude Code silently falls back to its default statusline, so Go is
+a dependency of this repo rather than a preference. It comes from the upstream
+tarball, not a distro package — `go.mod` pins a toolchain that distro packages
+trail by a release or more, which would fail the build rather than skip it. The
+build script runs in its own process, so it prepends `~/.local/bin` to `PATH`
+before probing for `go`; without that it cannot see a toolchain the same apply
+just installed.
+
 `46` is skipped on ephemeral machines (see `home/.chezmoiignore`) and again at
 runtime whenever `CI` is set. Both are needed: the ignore rule covers machines
 initialised with the ephemeral role, while the runtime check catches the smoke
 test, which deliberately applies with a real machine role into a throwaway
 `HOME`. The gcloud tarball alone is a few hundred megabytes, so without the
-second guard every CI run would pay for it.
+second guard every CI run would pay for it. `47` carries the same runtime `CI`
+guard — the job that needs Go provisions its own toolchain — but stays enabled
+for ephemeral machines, which still render a statusline.
+
+## Download integrity
+
+Two of these scripts fetch an archive and put its contents on `PATH`, so both
+verify it against the vendor's own digest and refuse an artifact they cannot
+check, rather than installing it anyway:
+
+| Artifact | Digest source |
+|---|---|
+| Go tarball (`47`) | the `sha256` field of the object naming that file in the version index — not the first `sha256` in the document, which belongs to the source archive |
+| terraform zip (`46`) | `terraform_<version>_SHA256SUMS` alongside the release |
+
+Go's pinned fallback version carries a pinned digest with it, so a machine that
+cannot reach the version index still installs a verified archive. Go earns the
+stricter treatment because it lands ahead of the system directories on `PATH`
+*and* builds `claude-status`, which Claude Code executes on every statusline
+render — a swapped archive there compromises every later build.
+
+Three paths remain unverified, and knowingly so: the uv installer is a
+pipe-to-shell, the AWS CLI publishes only a detached GPG signature (which needs
+a key imported before it means anything), and `az` comes from PyPI through uv.
+All are HTTPS fetches from vendor-controlled hosts, so the exposure is a vendor
+or CDN compromise rather than anything a network attacker can reach.
 
 ## Testing
 

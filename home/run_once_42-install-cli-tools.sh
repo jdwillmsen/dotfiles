@@ -26,10 +26,17 @@ apt_install() {
         echo "$cmd apt install failed"; return 0
     }
     # Shim the Debian binary name onto the upstream one, or the next apply sees
-    # the tool as still missing and reinstalls it every time.
+    # the tool as still missing and reinstalls it every time. Resolve the target
+    # first: an unresolvable name would hand ln an empty operand, and its failure
+    # under `set -e` takes down every tool still queued behind this one.
     if [ "$altbin" != "$spec" ] && ! command -v "$cmd" &>/dev/null; then
+        local target
+        target="$(command -v "$altbin" || true)"
+        if [ -z "$target" ]; then
+            echo "$cmd installed as $altbin but $altbin is not on PATH — no shim"; return 0
+        fi
         mkdir -p "$HOME/.local/bin"
-        ln -sf "$(command -v "$altbin")" "$HOME/.local/bin/$cmd"
+        ln -sf "$target" "$HOME/.local/bin/$cmd"
     fi
 }
 

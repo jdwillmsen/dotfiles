@@ -50,14 +50,26 @@ install_terraform() {
         sed -n 's/.*"tag_name": *"v\([0-9.]*\)".*/\1/p' | head -1)"
     version=${version:-$TERRAFORM_FALLBACK_VERSION}
 
+    local base="https://releases.hashicorp.com/terraform/${version}"
+    local archive="terraform_${version}_linux_amd64.zip"
     tmp="$(mktemp -d)"
-    if curl -fsSL --max-time 120 -o "$tmp/tf.zip" \
-        "https://releases.hashicorp.com/terraform/${version}/terraform_${version}_linux_amd64.zip"; then
+    if ! curl -fsSL --max-time 120 -o "$tmp/tf.zip" "$base/$archive"; then
+        echo "terraform download failed"; rm -rf "$tmp"; return 0
+    fi
+    # The vendor publishes a digest for every artifact; a binary that lands on
+    # PATH and then provisions infrastructure is not worth installing unchecked.
+    local want got
+    want="$(curl -fsSL --max-time 30 "$base/terraform_${version}_SHA256SUMS" 2>/dev/null |
+        awk -v a="$archive" '$2 == a { print $1; exit }')"
+    got="$(sha256sum "$tmp/tf.zip" | awk '{print $1}')"
+    if [ -z "$want" ]; then
+        echo "terraform checksums unavailable — not installing" >&2
+    elif [ "$want" != "$got" ]; then
+        echo "terraform checksum mismatch (got $got, want $want) — not installing" >&2
+    else
         mkdir -p "$BIN"
         unzip -oq "$tmp/tf.zip" -d "$tmp" && install -m 0755 "$tmp/terraform" "$BIN/terraform" &&
             echo "terraform $version installed"
-    else
-        echo "terraform download failed"
     fi
     rm -rf "$tmp"
 }

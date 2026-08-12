@@ -6,6 +6,10 @@ run_once_40-install-rtk.sh
 run_once_46-install-cloud-clis.sh
 .config/claude-jira.json
 {{ end }}
+{{ if env "CI" }}
+run_once_46-install-cloud-clis.sh
+run_once_47-install-go.sh
+{{ end }}
 {{ if ne .chezmoi.os "windows" }}
 AppData/**
 {{ end }}

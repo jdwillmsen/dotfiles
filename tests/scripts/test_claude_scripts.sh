@@ -7,11 +7,11 @@ cfg="$(chez_init personal)"
 render() { chez_render "$cfg" "$here/$1"; }
 mcp="$(render home/run_onchange_30-install-claude-mcp.sh.tmpl)"
 echo "$mcp" | shellcheck -s bash -
-echo "$mcp" | grep -q '@playwright/mcp' || { echo "FAIL: mcp server args missing from rendered script"; exit 1; }
-# Atlassian is a marketplace plugin now, not a hand-rolled mcp-remote shim.
-# Both paths register the same tools, so the shim coming back would double-load
-# them rather than fail loudly.
+# Atlassian and playwright are both marketplace plugins now, not hand-rolled
+# mcp-remote/npx shims. Both paths would register the same tools, so a shim
+# coming back would double-load them rather than fail loudly.
 echo "$mcp" | grep -q 'mcp.atlassian.com' && { echo "FAIL: atlassian mcp-remote shim is back in .chezmoidata.yaml"; exit 1; }
+echo "$mcp" | grep -q '@playwright/mcp' && { echo "FAIL: playwright npx shim is back in .chezmoidata.yaml"; exit 1; }
 
 # Regression: a single (or double) quote in an mcp data value must not break
 # the generated script. Overlay a temp source tree with a quote-bearing mcp
@@ -44,6 +44,7 @@ echo "$plug" | grep -q 'mattpocock/skills' || { echo "FAIL: mattpocock/skills mi
 # a plugin id is inert without the marketplace that serves it.
 echo "$plug" | grep -q 'anthropics/claude-plugins-official' || { echo "FAIL: official plugin marketplace missing"; exit 1; }
 echo "$plug" | grep -q 'atlassian@claude-plugins-official' || { echo "FAIL: atlassian plugin not installed"; exit 1; }
+echo "$plug" | grep -q 'playwright@claude-plugins-official' || { echo "FAIL: playwright plugin not installed"; exit 1; }
 
 skills_dir="$(render home/run_onchange_32-install-claude-skills-dir.sh.tmpl)"
 echo "$skills_dir" | shellcheck -s bash -

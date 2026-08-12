@@ -29,6 +29,10 @@ tmux ls                     # list running sessions
 
 This config uses **Ctrl+A** as the prefix (more ergonomic than the default Ctrl+B).
 
+Rather than memorising the tables below, press **Ctrl+A then `?`** for a
+grouped, scrollable overlay of every binding — see
+[the cheatsheet](#cheatsheet-tmux-cheat).
+
 ### No prefix needed
 
 | Key | Action |
@@ -88,6 +92,32 @@ in-memory state, only its pane and working directory.
 |-----|--------|
 | `Ctrl+s` | Save layout now |
 | `Ctrl+r` | Restore last saved layout |
+
+## Cheatsheet: `tmux-cheat`
+
+`tmux-cheat` prints every binding grouped by what it acts on. It parses
+`~/.tmux.conf` at runtime and merges in the stock tmux bindings that config
+does not override, so it cannot drift from the tables in this document —
+when the two disagree, `tmux-cheat` is right.
+
+| Where | How |
+|-------|-----|
+| Inside tmux | `Ctrl+A` `?` — overlay, `q` to close, session untouched |
+| Shell | `tk` (all bindings), `tkc` (only this config's) |
+| Search | `tk pane` — matches key, action, group, or the underlying tmux command |
+| Browser | `tk --html --out ~/tmux-keys.html` |
+
+`Ctrl+A` `/` still opens tmux's own raw `list-keys` table, which is the
+authority when a binding looks wrong.
+
+### For agents
+
+`tmux-cheat` follows [AXI](agentic-workflow.md): `--toon` emits a
+token-efficient table, `--json` the same data plus the raw tmux command per
+binding, and unknown flags fail with exit code 2 and the valid flag list.
+The `tmux-keys` skill (`~/.claude/skills/tmux-keys`) points agents at it, so
+Claude answers "what key splits a pane?" from the real config instead of from
+generic tmux knowledge.
 
 ## Auto-start (optional)
 

@@ -1,9 +1,4 @@
-mcp:
-  playwright:
-    command: npx
-    args:
-      - "-y"
-      - "@playwright/mcp@latest"
+mcp: {}
 claudePlugins:
   marketplaces:
     - name: caveman
@@ -15,10 +10,14 @@ claudePlugins:
   install:
     - caveman@caveman
     - mattpocock-skills@mattpocock
-    # atlassian@claude-plugins-official arrives via #44. These 12 accreted by
-    # hand on the primary machine over months; listing them is what makes a
-    # fresh box (or devbox) actually match instead of only getting
-    # caveman/mattpocock-skills/atlassian.
+    - atlassian@claude-plugins-official
+    # playwright superseded its hand-rolled mcp.playwright shim above, same
+    # move as #44 did for Atlassian: the plugin self-registers the same
+    # @playwright/mcp server, so the manual npx entry is redundant now.
+    - playwright@claude-plugins-official
+    # These 12 accreted by hand on the primary machine over months; listing
+    # them is what makes a fresh box (or devbox) actually match instead of
+    # only getting caveman/mattpocock-skills/atlassian/playwright.
     - claude-code-setup@claude-plugins-official
     - commit-commands@claude-plugins-official
     - context7@claude-plugins-official

@@ -1,0 +1,647 @@
+#!/usr/bin/env bash
+# tmux-cheat — grouped, colourised tmux keybinding reference.
+#
+# Bindings are read from the tmux config at runtime rather than duplicated
+# here, so the cheatsheet cannot drift from the config it documents. Stock
+# tmux bindings worth remembering are merged in and suppressed when the
+# config rebinds the same key in the same key table.
+set -uo pipefail
+
+VERSION="1.0.0"
+SELF="${BASH_SOURCE[0]}"
+
+# --version must answer before any work happens; agent harnesses probe it
+# on every session start.
+case "${1-}" in
+-v | -V | --version)
+  if [ "$#" -eq 1 ]; then
+    printf '%s\n' "$VERSION"
+    exit 0
+  fi
+  ;;
+esac
+
+CONF="${TMUX_CHEAT_CONF:-$HOME/.tmux.conf}"
+FORMAT=pretty
+FILTER=""
+SCOPE=all
+OUT=""
+FORCE_COLOR=0
+
+die_usage() {
+  printf 'error: %s\n' "$1"
+  shift
+  for line in "$@"; do printf 'help: %s\n' "$line"; done
+  exit 2
+}
+
+usage() {
+  cat <<'EOF'
+tmux-cheat — grouped tmux keybinding reference, read from your live tmux config.
+
+usage: tmux-cheat [SEARCH] [flags]
+
+arguments:
+  SEARCH            case-insensitive filter over key, action, and group
+
+flags:
+  --toon            TOON output for agents (token-efficient, default for --format)
+  --json            JSON output
+  --html            self-contained HTML page
+  --plain           uncoloured text (also implied when stdout is not a terminal)
+  --color           force colour even when piping into a pager
+  --popup           render inside a tmux display-popup overlay (needs a tmux session)
+  --custom          only bindings defined in your config
+  --defaults        only stock tmux bindings
+  --out PATH        write output to PATH instead of stdout
+  --conf PATH       read a different config (default: ~/.tmux.conf)
+  -h, --help        this help
+  -v, --version     print version
+
+examples:
+  tmux-cheat                  # full cheatsheet
+  tmux-cheat pane             # everything matching "pane"
+  tmux-cheat --toon --custom  # agent-readable list of your own bindings
+  tmux-cheat --html --out ~/tmux-keys.html
+EOF
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+  -h | --help)
+    usage
+    exit 0
+    ;;
+  -v | -V | --version)
+    printf '%s\n' "$VERSION"
+    exit 0
+    ;;
+  --toon) FORMAT=toon ;;
+  --json) FORMAT=json ;;
+  --html) FORMAT=html ;;
+  --plain) FORMAT=plain ;;
+  --color) FORCE_COLOR=1 ;;
+  --popup) FORMAT=popup ;;
+  --custom) SCOPE=custom ;;
+  --defaults) SCOPE=defaults ;;
+  --out)
+    OUT="${2-}"
+    [ -n "$OUT" ] || die_usage "--out needs a path" "tmux-cheat --html --out ~/tmux-keys.html"
+    shift
+    ;;
+  --conf)
+    CONF="${2-}"
+    [ -n "$CONF" ] || die_usage "--conf needs a path" "tmux-cheat --conf ~/.config/tmux/tmux.conf"
+    shift
+    ;;
+  -*)
+    die_usage "unknown flag $1" \
+      "valid flags: --toon --json --html --plain --color --popup --custom --defaults --out --conf --help --version" \
+      "run 'tmux-cheat --help' for the full reference"
+    ;;
+  *)
+    [ -z "$FILTER" ] || die_usage "only one SEARCH term is accepted (got '$FILTER' and '$1')" \
+      "tmux-cheat pane"
+    FILTER="$1"
+    ;;
+  esac
+  shift
+done
+
+if [ ! -r "$CONF" ]; then
+  printf 'error: cannot read tmux config at %s\n' "$CONF"
+  printf 'help: pass a different path with: tmux-cheat --conf PATH\n'
+  exit 1
+fi
+
+# --- collection -------------------------------------------------------------
+# Parallel arrays; index is the record id.
+declare -a G_GROUP=() G_TABLE=() G_KEY=() G_DESC=() G_SRC=() G_CMD=()
+declare -A SEEN=()   # "<table> <key>" of config bindings, to shadow defaults
+declare -a UNBOUND=()
+PREFIX="C-b"
+declare -a PLUGINS=()
+
+add() { # group table key desc src cmd
+  G_GROUP+=("$1")
+  G_TABLE+=("$2")
+  G_KEY+=("$3")
+  G_DESC+=("$4")
+  G_SRC+=("$5")
+  G_CMD+=("${6-}")
+}
+
+# Human phrase for a tmux command. Falls back to the raw command so an
+# unrecognised binding is still listed rather than silently dropped.
+describe() {
+  local cmd="$1" head rest
+  head="${cmd%% *}"
+  rest="${cmd#"$head"}"
+  case "$head" in
+  split-window)
+    case "$rest" in
+    *-h*) printf 'Split pane left/right' ;;
+    *-v*) printf 'Split pane top/bottom' ;;
+    *) printf 'Split pane' ;;
+    esac
+    case "$rest" in *pane_current_path*) printf ' (keeps current directory)' ;; esac
+    ;;
+  new-window)
+    printf 'New window'
+    case "$rest" in *pane_current_path*) printf ' (keeps current directory)' ;; esac
+    ;;
+  select-pane)
+    case "$rest" in
+    *-L*) printf 'Focus pane to the left' ;;
+    *-R*) printf 'Focus pane to the right' ;;
+    *-U*) printf 'Focus pane above' ;;
+    *-D*) printf 'Focus pane below' ;;
+    *-l*) printf 'Focus last active pane' ;;
+    *) printf 'Select pane' ;;
+    esac
+    ;;
+  resize-pane)
+    case "$rest" in
+    *-L*) printf 'Shrink pane from the right edge' ;;
+    *-R*) printf 'Grow pane to the right' ;;
+    *-U*) printf 'Shrink pane from the bottom' ;;
+    *-D*) printf 'Grow pane downward' ;;
+    *-Z*) printf 'Zoom pane fullscreen (toggle)' ;;
+    *) printf 'Resize pane' ;;
+    esac
+    ;;
+  previous-window) printf 'Previous window' ;;
+  next-window) printf 'Next window' ;;
+  last-window) printf 'Last active window' ;;
+  select-window) printf 'Go to window %s' "${rest##* }" ;;
+  rename-window) printf 'Rename window' ;;
+  kill-window) printf 'Close window' ;;
+  kill-pane) printf 'Close pane' ;;
+  detach-client) printf 'Detach (session keeps running)' ;;
+  new-session) printf 'New session' ;;
+  rename-session) printf 'Rename session' ;;
+  kill-session) printf 'Kill session' ;;
+  switch-client)
+    case "$rest" in
+    *-p*) printf 'Previous session' ;;
+    *-n*) printf 'Next session' ;;
+    *-l*) printf 'Last session' ;;
+    *) printf 'Switch session' ;;
+    esac
+    ;;
+  choose-tree) printf 'Browse sessions and windows' ;;
+  choose-window) printf 'Browse windows' ;;
+  find-window) printf 'Search windows by name' ;;
+  send-prefix) printf 'Send a literal prefix to the inner program' ;;
+  copy-mode) printf 'Enter copy/scrollback mode' ;;
+  paste-buffer) printf 'Paste most recent buffer' ;;
+  choose-buffer) printf 'Browse paste buffers' ;;
+  send-keys)
+    case "$rest" in
+    *begin-selection*) printf 'Start selection' ;;
+    *copy-selection-and-cancel*) printf 'Copy selection and leave copy mode' ;;
+    *copy-selection*) printf 'Copy selection' ;;
+    *rectangle*) printf 'Toggle block selection' ;;
+    *) printf 'Send %s' "${rest# }" ;;
+    esac
+    ;;
+  source-file) printf 'Reload tmux config' ;;
+  display-popup) printf 'Open popup overlay' ;;
+  list-keys) printf 'Raw tmux key table' ;;
+  command-prompt) printf 'tmux command prompt' ;;
+  display-panes) printf 'Show pane numbers' ;;
+  swap-pane)
+    case "$rest" in
+    *-U*) printf 'Swap with previous pane' ;;
+    *-D*) printf 'Swap with next pane' ;;
+    *) printf 'Swap panes' ;;
+    esac
+    ;;
+  break-pane) printf 'Move pane to its own window' ;;
+  join-pane) printf 'Pull a pane in from another window' ;;
+  next-layout) printf 'Cycle pane layouts' ;;
+  rotate-window) printf 'Rotate panes in place' ;;
+  clock-mode) printf 'Clock' ;;
+  customize-mode) printf 'Browse and edit tmux options' ;;
+  *) printf '%s' "$cmd" ;;
+  esac
+}
+
+# Canonical grouping by command family, so config and stock bindings land in
+# the same sections regardless of how the config file is organised.
+group_of() {
+  case "$1" in
+  new-session | detach-client | switch-client | choose-tree | kill-session | rename-session) printf 'Sessions' ;;
+  new-window | next-window | previous-window | last-window | select-window | rename-window | kill-window | find-window | choose-window) printf 'Windows' ;;
+  split-window) printf 'Panes — split' ;;
+  select-pane | display-panes | last-pane | swap-pane | rotate-window) printf 'Panes — move' ;;
+  resize-pane | next-layout | select-layout | break-pane | join-pane | kill-pane) printf 'Panes — size' ;;
+  copy-mode | paste-buffer | choose-buffer | send-keys | clock-mode) printf 'Copy & scrollback' ;;
+  source-file | list-keys | command-prompt | display-popup | customize-mode | run-shell | send-prefix) printf 'Config & help' ;;
+  *) printf 'Other' ;;
+  esac
+}
+
+parse_conf() {
+  local line key cmd table repeat head
+  while IFS= read -r line; do
+    line="${line#"${line%%[![:space:]]*}"}" # ltrim
+
+    case "$line" in
+    'set -g prefix '*) PREFIX="${line##* }" ;;
+    *"@plugin "*)
+      key="${line#*@plugin }"
+      key="${key//\'/}"
+      key="${key//\"/}"
+      PLUGINS+=("${key##*/}")
+      ;;
+    'unbind '*)
+      key="${line#unbind }"
+      UNBOUND+=("${key//\'/}")
+      ;;
+    esac
+
+    case "$line" in
+    'bind '* | 'bind-key '*) ;;
+    *) continue ;;
+    esac
+
+    # Strip a trailing "# comment"; the space guard keeps tmux format
+    # strings such as #{pane_current_path} and #[bg=...] intact.
+    line="$(printf '%s' "$line" | sed -E 's/[[:space:]]+#[[:space:]].*$//')"
+
+    line="${line#bind-key }"
+    line="${line#bind }"
+
+    table=prefix
+    repeat=""
+    # Only known flags are consumed. A blanket "-*" rule would swallow the
+    # `bind - split-window` binding, whose key is itself a dash.
+    while :; do
+      case "$line" in
+      -n\ *)
+        table=root
+        line="${line#-n }"
+        ;;
+      -r\ *)
+        repeat=" [repeatable]"
+        line="${line#-r }"
+        ;;
+      -T\ *)
+        line="${line#-T }"
+        table="${line%% *}"
+        line="${line#* }"
+        ;;
+      -N\ * | -a\ * | -q\ *) line="${line#* }" ;;
+      *) break ;;
+      esac
+      line="${line#"${line%%[![:space:]]*}"}"
+    done
+
+    key="${line%% *}"
+    cmd="${line#"$key"}"
+    cmd="${cmd#"${cmd%%[![:space:]]*}"}"
+    key="${key//\'/}"
+    [ -n "$cmd" ] || continue
+
+    head="${cmd%% *}"
+    SEEN["$table $key"]=1
+    add "$(group_of "$head")" "$table" "$key" "$(describe "$cmd")$repeat" config "$cmd"
+  done <"$CONF"
+}
+
+# Stock bindings worth remembering. Anything the config rebinds in the same
+# table is dropped below, so this list never contradicts reality.
+load_defaults() {
+  local rows=(
+    "prefix|d|detach-client"
+    "prefix|s|choose-tree -Zs"
+    "prefix|\$|rename-session"
+    "prefix|(|switch-client -p"
+    "prefix|)|switch-client -n"
+    "prefix|c|new-window"
+    "prefix|,|rename-window"
+    "prefix|&|kill-window"
+    "prefix|n|next-window"
+    "prefix|p|previous-window"
+    "prefix|l|last-window"
+    "prefix|0-9|select-window -t N"
+    "prefix|w|choose-window"
+    "prefix|f|find-window"
+    "prefix|o|select-pane -t :.+"
+    "prefix|;|select-pane -l"
+    "prefix|q|display-panes"
+    "prefix|x|kill-pane"
+    "prefix|z|resize-pane -Z"
+    "prefix|space|next-layout"
+    "prefix|{|swap-pane -U"
+    "prefix|}|swap-pane -D"
+    "prefix|C-o|rotate-window"
+    "prefix|!|break-pane"
+    "prefix|[|copy-mode"
+    "prefix|]|paste-buffer"
+    "prefix|=|choose-buffer"
+    "prefix|t|clock-mode"
+    "prefix|:|command-prompt"
+    "prefix|C|customize-mode -Z"
+  )
+  local r table key cmd
+  for r in "${rows[@]}"; do
+    IFS='|' read -r table key cmd <<<"$r"
+    [ -z "${SEEN["$table $key"]-}" ] || continue
+    case " ${UNBOUND[*]-} " in *" $key "*) continue ;; esac
+    add "$(group_of "${cmd%% *}")" "$table" "$key" "$(describe "$cmd")" default "$cmd"
+  done
+
+  # copy-mode-vi essentials, only when vi keys are actually in use.
+  if grep -qE '^[[:space:]]*setw?.*mode-keys[[:space:]]+vi' "$CONF"; then
+    local vi=("q|Leave copy mode" "/|Search forward" "?|Search backward" "n|Next match" "g|Jump to top" "G|Jump to bottom" "C-v|Toggle block selection")
+    local e k d
+    for e in "${vi[@]}"; do
+      k="${e%%|*}"
+      d="${e#*|}"
+      [ -z "${SEEN["copy-mode-vi $k"]-}" ] || continue
+      add 'Copy & scrollback' copy-mode-vi "$k" "$d" default ""
+    done
+  fi
+
+  local p
+  for p in "${PLUGINS[@]-}"; do
+    case "$p" in
+    tmux-resurrect)
+      add 'Persistence' prefix 'C-s' 'Save session layout to disk' plugin
+      add 'Persistence' prefix 'C-r' 'Restore saved session layout' plugin
+      ;;
+    tmux-continuum)
+      add 'Persistence' prefix 'auto' 'Autosave every 15 min; auto-restore on server start' plugin
+      ;;
+    tpm)
+      add 'Persistence' prefix 'I' 'Install plugins (TPM)' plugin
+      add 'Persistence' prefix 'U' 'Update plugins (TPM)' plugin
+      ;;
+    esac
+  done
+}
+
+parse_conf
+[ "$SCOPE" = custom ] || load_defaults
+
+pretty_key() {
+  local k="$1"
+  k="${k//C-S-/Ctrl+Shift+}"
+  k="${k//C-/Ctrl+}"
+  k="${k//M-/Alt+}"
+  k="${k//S-/Shift+}"
+  printf '%s' "$k"
+}
+
+PRETTY_PREFIX="$(pretty_key "$PREFIX")"
+
+# Key as the user must actually type it, including the table it lives in.
+render_key() {
+  case "${G_TABLE[$1]}" in
+  prefix) printf '%s %s' "$PRETTY_PREFIX" "$(pretty_key "${G_KEY[$1]}")" ;;
+  root) printf '%s' "$(pretty_key "${G_KEY[$1]}")" ;;
+  copy-mode-vi) printf 'copy-mode %s' "$(pretty_key "${G_KEY[$1]}")" ;;
+  *) printf '%s %s' "${G_TABLE[$1]}" "$(pretty_key "${G_KEY[$1]}")" ;;
+  esac
+}
+
+GROUP_ORDER=(Sessions Windows 'Panes — split' 'Panes — move' 'Panes — size' 'Copy & scrollback' Persistence 'Config & help' Other)
+
+# Indices surviving scope + search, in group order. Search covers the rendered
+# key too, so "Ctrl+a c" finds a binding the config wrote as `bind c`.
+declare -a ORDER=()
+select_rows() {
+  local want g i hay
+  for want in "${GROUP_ORDER[@]}"; do
+    for i in "${!G_KEY[@]}"; do
+      g="${G_GROUP[$i]}"
+      [ "$g" = "$want" ] || continue
+      case "$SCOPE" in
+      custom) [ "${G_SRC[$i]}" = config ] || continue ;;
+      defaults) [ "${G_SRC[$i]}" = config ] && continue ;;
+      esac
+      if [ -n "$FILTER" ]; then
+        hay="$g $(render_key "$i") ${G_DESC[$i]} ${G_TABLE[$i]} ${G_CMD[$i]}"
+        printf '%s' "$hay" | grep -qiF -- "$FILTER" || continue
+      fi
+      ORDER+=("$i")
+    done
+  done
+}
+select_rows
+
+if [ "${#ORDER[@]}" -eq 0 ]; then
+  if [ -n "$FILTER" ]; then
+    printf 'bindings: 0 matches for "%s" in %s\n' "$FILTER" "$CONF"
+    printf 'help: run tmux-cheat with no search term to see every binding\n'
+  else
+    printf 'bindings: 0 found in %s\n' "$CONF"
+    printf 'help: check the path with: tmux-cheat --conf PATH\n'
+  fi
+  exit 0
+fi
+
+# --- output -----------------------------------------------------------------
+toon_field() {
+  case "$1" in
+  *,* | *\"* | ' '* | *' ') printf '"%s"' "${1//\"/\"\"}" ;;
+  *) printf '%s' "$1" ;;
+  esac
+}
+
+json_field() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '%s' "$s"
+}
+
+emit_toon() {
+  printf 'prefix: %s\n' "$PRETTY_PREFIX"
+  printf 'config: %s\n' "$CONF"
+  printf 'bindings[%d]{key,action,group,source}:\n' "${#ORDER[@]}"
+  local i
+  for i in "${ORDER[@]}"; do
+    printf '  %s,%s,%s,%s\n' \
+      "$(toon_field "$(render_key "$i")")" \
+      "$(toon_field "${G_DESC[$i]}")" \
+      "$(toon_field "${G_GROUP[$i]}")" \
+      "${G_SRC[$i]}"
+  done
+  printf 'help[2]:\n'
+  printf '  Run: tmux-cheat <term>   # filter by key, action, or group\n'
+  printf '  Run: tmux-cheat --custom   # only the bindings this config defines\n'
+}
+
+emit_json() {
+  printf '{"prefix":"%s","config":"%s","count":%d,"bindings":[' \
+    "$(json_field "$PRETTY_PREFIX")" "$(json_field "$CONF")" "${#ORDER[@]}"
+  local i sep=""
+  for i in "${ORDER[@]}"; do
+    printf '%s{"key":"%s","action":"%s","group":"%s","source":"%s","command":"%s"}' \
+      "$sep" \
+      "$(json_field "$(render_key "$i")")" \
+      "$(json_field "${G_DESC[$i]}")" \
+      "$(json_field "${G_GROUP[$i]}")" \
+      "${G_SRC[$i]}" \
+      "$(json_field "${G_CMD[$i]}")"
+    sep=","
+  done
+  printf ']}\n'
+}
+
+emit_text() { # $1 = 1 when colour is wanted
+  local colour="$1" b="" d="" k="" t="" r=""
+  if [ "$colour" = 1 ]; then
+    b=$'\033[1;38;5;111m'
+    d=$'\033[38;5;245m'
+    k=$'\033[38;5;117m'
+    t=$'\033[1m'
+    r=$'\033[0m'
+  fi
+  local width=0 i kd
+  for i in "${ORDER[@]}"; do
+    kd="$(render_key "$i")"
+    [ "${#kd}" -gt "$width" ] || continue
+    width="${#kd}"
+  done
+
+  printf '%s tmux keys %s %sprefix %s%s\n\n' "$t" "$r" "$d" "$PRETTY_PREFIX" "$r"
+  local last=""
+  for i in "${ORDER[@]}"; do
+    if [ "${G_GROUP[$i]}" != "$last" ]; then
+      [ -z "$last" ] || printf '\n'
+      printf '%s%s%s\n' "$b" "${G_GROUP[$i]}" "$r"
+      last="${G_GROUP[$i]}"
+    fi
+    kd="$(render_key "$i")"
+    printf '  %s%-*s%s  %s\n' "$k" "$width" "$kd" "$r" "${G_DESC[$i]}"
+  done
+  local mine=0
+  for i in "${ORDER[@]}"; do
+    [ "${G_SRC[$i]}" = config ] && mine=$((mine + 1))
+  done
+  printf '\n%s%d bindings · %d from %s · rest are tmux/plugin defaults%s\n' \
+    "$d" "${#ORDER[@]}" "$mine" "$CONF" "$r"
+}
+
+emit_html() {
+  # Palette is lifted from the Catppuccin colours the status bar already uses,
+  # so the page and the terminal it documents read as the same surface.
+  cat <<'EOF'
+<title>tmux Keys</title>
+<style>
+:root{
+  --bg:#eff1f5;--panel:#fff;--fg:#4c4f69;--muted:#7c7f93;--accent:#1e66f5;
+  --line:#dce0e8;--keybg:#e6e9ef;--keyline:#ccd0da;--chip:#8c8fa1;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){
+  --bg:#181825;--panel:#1e1e2e;--fg:#cdd6f4;--muted:#9399b2;--accent:#89b4fa;
+  --line:#313244;--keybg:#313244;--keyline:#45475a;--chip:#7f849c;
+}}
+:root[data-theme=dark]{
+  --bg:#181825;--panel:#1e1e2e;--fg:#cdd6f4;--muted:#9399b2;--accent:#89b4fa;
+  --line:#313244;--keybg:#313244;--keyline:#45475a;--chip:#7f849c;
+}
+*{box-sizing:border-box}
+body{margin:0;padding:clamp(1.5rem,4vw,3.5rem) 1.25rem;background:var(--bg);color:var(--fg);
+  font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  -webkit-font-smoothing:antialiased}
+main{max-width:68rem;margin:0 auto;display:flex;flex-direction:column;gap:2rem}
+header{display:flex;flex-direction:column;gap:.5rem;padding-bottom:1.5rem;border-bottom:1px solid var(--line)}
+h1{margin:0;font-size:clamp(1.6rem,3.5vw,2.1rem);font-weight:640;letter-spacing:-.02em;text-wrap:balance}
+.lede{margin:0;color:var(--muted);max-width:58ch}
+.meta{display:flex;flex-wrap:wrap;gap:.4rem 1.25rem;color:var(--muted);
+  font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;font-variant-numeric:tabular-nums}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(23rem,1fr));gap:1rem;align-items:start}
+section{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:1.15rem 1.25rem 1.35rem;
+  display:flex;flex-direction:column;gap:.9rem}
+h2{margin:0;font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.11em;color:var(--accent)}
+ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column}
+li{display:grid;grid-template-columns:minmax(9.5rem,auto) 1fr;gap:.35rem 1rem;align-items:baseline;
+  padding:.45rem 0;border-top:1px solid var(--line)}
+li:first-child{border-top:0;padding-top:0}
+.keys{display:flex;flex-wrap:wrap;gap:.25rem;align-items:baseline}
+kbd{font:12.5px/1.35 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--keybg);
+  border:1px solid var(--keyline);border-bottom-width:2px;border-radius:5px;padding:.15rem .42rem;white-space:nowrap}
+kbd.pre{background:transparent;border-color:transparent;color:var(--muted);padding-inline:0}
+.ctx{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+.act{margin:0}
+.act .src{color:var(--chip);font-size:11.5px}
+footer{color:var(--muted);font-size:12.5px;border-top:1px solid var(--line);padding-top:1.25rem}
+@media(max-width:30rem){li{grid-template-columns:1fr}}
+</style>
+<main>
+EOF
+  printf '<header>\n<h1>tmux Keys</h1>\n'
+  printf '<p class="lede">Every binding this machine actually responds to — read from the live tmux config, with the stock tmux bindings it leaves alone merged in.</p>\n'
+  printf '<div class="meta"><span>prefix %s</span><span>%d bindings</span><span>%s</span></div>\n</header>\n' \
+    "$PRETTY_PREFIX" "${#ORDER[@]}" "$CONF"
+  printf '<div class="grid">\n'
+  local last="" i esc
+  for i in "${ORDER[@]}"; do
+    if [ "${G_GROUP[$i]}" != "$last" ]; then
+      [ -z "$last" ] || printf '</ul></section>\n'
+      printf '<section><h2>%s</h2><ul>\n' "${G_GROUP[$i]}"
+      last="${G_GROUP[$i]}"
+    fi
+    esc="${G_DESC[$i]//&/&amp;}"
+    esc="${esc//</&lt;}"
+    printf '<li><span class="keys">'
+    case "${G_TABLE[$i]}" in
+    prefix) printf '<kbd class="pre">%s</kbd><kbd>%s</kbd>' "$PRETTY_PREFIX" "$(pretty_key "${G_KEY[$i]}")" ;;
+    root) printf '<kbd>%s</kbd>' "$(pretty_key "${G_KEY[$i]}")" ;;
+    copy-mode-vi) printf '<span class="ctx">in copy mode</span><kbd>%s</kbd>' "$(pretty_key "${G_KEY[$i]}")" ;;
+    *) printf '<span class="ctx">%s</span><kbd>%s</kbd>' "${G_TABLE[$i]}" "$(pretty_key "${G_KEY[$i]}")" ;;
+    esac
+    printf '</span><p class="act">%s' "$esc"
+    [ "${G_SRC[$i]}" = config ] || printf ' <span class="src">· %s</span>' "${G_SRC[$i]}"
+    printf '</p></li>\n'
+  done
+  printf '</ul></section>\n</div>\n'
+  printf '<footer>Generated by <code>tmux-cheat --html</code>. Press <kbd class="pre">%s</kbd><kbd>?</kbd> inside tmux for the same list as a scrollable overlay.</footer>\n</main>\n' \
+    "$PRETTY_PREFIX"
+}
+
+run_popup() {
+  [ -n "${TMUX-}" ] || {
+    printf 'error: --popup needs to run inside a tmux session\n'
+    printf 'help: run tmux-cheat without --popup, or attach with: tmux attach\n'
+    exit 1
+  }
+  local args=(--color)
+  [ "$SCOPE" = all ] || args+=("--$SCOPE")
+  [ -z "$FILTER" ] || args+=("$FILTER")
+  # The list is taller than the popup, so it goes through a pager; without
+  # one the top of the cheatsheet would scroll off unreachably.
+  local inner
+  if command -v less >/dev/null 2>&1; then
+    inner="$(printf '%q ' "$SELF" "${args[@]}") | less -R"
+  else
+    inner="$(printf '%q ' "$SELF" "${args[@]}"); read -rsn1 -p 'press any key to close '"
+  fi
+  tmux display-popup -E -w 80% -h 80% -T ' tmux keys — q to close ' "$inner"
+}
+
+render() {
+  case "$FORMAT" in
+  toon) emit_toon ;;
+  json) emit_json ;;
+  html) emit_html ;;
+  plain) emit_text 0 ;;
+  popup) run_popup ;;
+  pretty) if [ "$FORCE_COLOR" = 1 ] || [ -t 1 ]; then emit_text 1; else emit_text 0; fi ;;
+  esac
+}
+
+if [ -n "$OUT" ]; then
+  render >"$OUT" || {
+    printf 'error: cannot write to %s\n' "$OUT"
+    exit 1
+  }
+  printf 'wrote: %s (%d bindings)\n' "$OUT" "${#ORDER[@]}"
+else
+  render
+fi

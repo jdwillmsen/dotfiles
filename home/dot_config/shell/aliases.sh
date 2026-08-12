@@ -70,6 +70,10 @@ alias aipick='bash ~/.claude-code-router/aipick.sh'
 alias orfree='bash ~/.claude-code-router/refresh-openrouter-free.sh'
 alias orcheck='bash ~/.claude-code-router/check-openrouter-freshness.sh'
 
+# tmux
+alias tk='tmux-cheat'
+alias tkc='tmux-cheat --custom'
+
 # Misc
 alias reload='source ~/.zshrc 2>/dev/null || source ~/.bashrc'
 alias dotfiles='cd "$(chezmoi source-path)"'

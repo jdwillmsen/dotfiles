@@ -7,3 +7,8 @@ scripts/claude-status/claude-status
 scripts/claude-status/claude-status.exe
 .aider*
 .claude/settings.local.json
+
+# Agent-created git worktrees live inside the checkout.
+.claude/worktrees/
+worktrees/
+.worktrees/

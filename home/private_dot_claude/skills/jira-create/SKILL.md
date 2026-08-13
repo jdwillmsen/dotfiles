@@ -56,7 +56,7 @@ Call `getJiraProjectIssueTypesMetadata` to discover available issue types + any 
 **Linking child to parent:**
 - For Stories/Tasks under an Epic: use `parent` field with Epic key
 - For sub-tasks under a Story: use `parent` field with Story key
-- Always also call `createIssueLink` with "is part of" after creation for extra traceability
+- Always also call `createIssueLink` after creation for extra traceability. This instance has no "is part of" type — call `getIssueLinkTypes` once per session and cache the result if unsure; on this instance the only types are `Blocks`, `Cloners`, `Duplicate`, `Problem/Incident`, `Relates` — use `Relates` for parent/child traceability (the `parent` field already carries the real hierarchy, this link is belt-and-suspenders)
 
 ---
 
@@ -318,13 +318,14 @@ Execute in this exact order:
    Capture the returned issue key (e.g., `JDWLABS-42`).
 
 2. **Add issue link to parent**
+   Params are flat strings, not nested objects — `type` is a link-type *name* string (`Blocks`/`Cloners`/`Duplicate`/`Problem/Incident`/`Relates` on this instance), `inwardIssue`/`outwardIssue` are bare issue keys:
    ```
-   createIssueLink(cloudId, {
-     type: { name: "is part of" },
-     inwardIssue: { key: "<new key>" },
-     outwardIssue: { key: "<parent epic key>" }
-   })
+   createIssueLink(cloudId,
+     inwardIssue="<new key>",
+     outwardIssue="<parent epic key>",
+     type="Relates")
    ```
+   A `{"name": "..."}`-shaped `type` or `{"key": "..."}`-shaped issue fields will 404 with "No issue link type found" — the API wants plain strings.
 
 3. **Add evidence comment**
    If there are code blocks, kubectl output, or long artifacts that didn't fit cleanly in the description, add them as a comment — same ADF rule applies, `contentFormat: "adf"`, no raw Markdown checklists:
@@ -492,7 +493,8 @@ Minimal skeleton for a Task-style description (trim/extend per section):
 | `searchJiraIssuesUsingJql` | Phase 2 — precise Epic search |
 | `lookupJiraAccountId` | Phase 4 — resolve assignee email → accountId |
 | `createJiraIssue` | Phase 6 — create the issue |
-| `createIssueLink` | Phase 6 — link child to parent |
+| `getIssueLinkTypes` | Phase 6 — confirm valid link type names before linking (cache per session) |
+| `createIssueLink` | Phase 6 — link child to parent; flat string params, see Phase 6 note |
 | `addCommentToJiraIssue` | Phase 6 — attach overflow evidence |
 | `getJiraIssue` | Any — verify created issue or look up parent details |
 

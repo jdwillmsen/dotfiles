@@ -112,6 +112,8 @@ Build the complete issue draft. Use the typed template for the issue type. Fill 
 
 **Compose the draft's `Definition of Done` from `## Reference: Definition of Done` below** (universal core + type block + work-surface block — delete only lines that genuinely cannot apply). **Then self-check the draft against `## Reference: Definition of Ready`** — a draft that fails DoR is not ready to present at CONFIRM; fix it first.
 
+**Draft in Markdown, ship in ADF.** The templates below are Markdown for readability while drafting and for the CONFIRM preview. The MCP's `contentFormat: "markdown"` path does not reliably convert GFM task-list syntax (`- [ ]`) — it round-trips as literal escaped text (`\[ \]`) instead of Jira's native checkbox node, which is exactly the "placeholder-looking" broken rendering this note exists to prevent. Before Phase 6, convert the finished Markdown draft to a real ADF document (see `## Reference: ADF Conversion` below) and create/comment with `contentFormat: "adf"`, passing the ADF `doc` object directly as `description` — never pass raw Markdown checklist syntax to `createJiraIssue` or `addCommentToJiraIssue`.
+
 #### Bug Template
 ```markdown
 ## Problem
@@ -296,6 +298,7 @@ On "cancel": stop, do not create.
 - [ ] ≥1 evidence artifact (screenshot, log, code, error string)
 - [ ] **Full DoR pass** (`## Reference: Definition of Ready`) — every universal + type-specific item
 - [ ] DoD composed from `## Reference: Definition of Done`, every line verifiable
+- [ ] Draft converted to ADF (`## Reference: ADF Conversion`) — Deliverables/DoD are `taskList`, not Markdown `- [ ]`
 
 If any gate fails, fix it before creating — do not ask user to overlook it.
 
@@ -307,7 +310,10 @@ Execute in this exact order:
 
 1. **Create the issue**
    ```
-   createJiraIssue(cloudId, fields={...all populated fields...})
+   createJiraIssue(cloudId, projectKey, issueTypeName, summary,
+     description=<ADF doc object, per ## Reference: ADF Conversion>,
+     contentFormat="adf",
+     ...other fields)
    ```
    Capture the returned issue key (e.g., `JDWLABS-42`).
 
@@ -321,14 +327,11 @@ Execute in this exact order:
    ```
 
 3. **Add evidence comment**
-   If there are code blocks, kubectl output, or long artifacts that didn't fit cleanly in the description, add them as a comment:
+   If there are code blocks, kubectl output, or long artifacts that didn't fit cleanly in the description, add them as a comment — same ADF rule applies, `contentFormat: "adf"`, no raw Markdown checklists:
    ```
-   addCommentToJiraIssue(cloudId, issueKey, {
-     body: {
-       type: "doc", version: 1,
-       content: [{ type: "paragraph", content: [{ type: "text", text: "..." }] }]
-     }
-   })
+   addCommentToJiraIssue(cloudId, issueIdOrKey,
+     commentBody=<ADF doc object, per ## Reference: ADF Conversion>,
+     contentFormat="adf")
    ```
 
 4. **Report result**
@@ -436,6 +439,46 @@ Org standards source of truth: `jdwlabs/.github` → `docs/code-standards.md` (l
 | Boilerplate DoD lines left unverifiable ("docs updated if applicable") | Either verify and check it, or delete the line at draft time |
 | Live cluster patched to green but git not merged | Not done — ArgoCD will revert it; merge the PR |
 | Epic closed with open children | Reparent or finish them first |
+
+---
+
+## Reference: ADF Conversion
+
+Convert the Markdown draft to Atlassian Document Format before Phase 6. Every `createJiraIssue`/`addCommentToJiraIssue` call passes `contentFormat: "adf"` and a `description`/`commentBody` that is a real ADF `doc` object — never a Markdown string with `- [ ]` in it.
+
+Node mapping:
+
+| Markdown | ADF node |
+|---|---|
+| `## Heading` | `heading` (`attrs.level: 2`) |
+| `- item` | `bulletList` > `listItem` > `paragraph` |
+| `1. item` | `orderedList` > `listItem` > `paragraph` |
+| `- [ ] item` | `taskList` > `taskItem` (`attrs.state: "TODO"`, `attrs.localId`: any unique string) — **never** render checklists as bullet text; this is the one substitution that must not be skipped |
+| `` `code` `` | `text` mark `{ type: "code" }` |
+| ` ```lang\n...\n``` ` | `codeBlock` (`attrs.language`) |
+| plain paragraph | `paragraph` |
+| `**bold**` | `text` mark `{ type: "strong" }` |
+
+Minimal skeleton for a Task-style description (trim/extend per section):
+
+```json
+{
+  "type": "doc",
+  "version": 1,
+  "content": [
+    { "type": "heading", "attrs": { "level": 2 }, "content": [{ "type": "text", "text": "Objective" }] },
+    { "type": "paragraph", "content": [{ "type": "text", "text": "..." }] },
+    { "type": "heading", "attrs": { "level": 2 }, "content": [{ "type": "text", "text": "Deliverables" }] },
+    { "type": "taskList", "attrs": { "localId": "deliverables" }, "content": [
+      { "type": "taskItem", "attrs": { "localId": "d1", "state": "TODO" }, "content": [{ "type": "text", "text": "First deliverable" }] },
+      { "type": "taskItem", "attrs": { "localId": "d2", "state": "TODO" }, "content": [{ "type": "text", "text": "Second deliverable" }] }
+    ]},
+    { "type": "codeBlock", "attrs": { "language": "bash" }, "content": [{ "type": "text", "text": "$ command\noutput" }] }
+  ]
+}
+```
+
+`localId` values only need to be unique within the document — a short per-section prefix + index is fine. Every `## Deliverables` and `## Definition of Done` section in the typed templates uses `taskList`/`taskItem`; every other bulleted section (`Dependencies`, `Scope`, etc.) uses plain `bulletList` since those aren't meant to be checked off.
 
 ---
 

@@ -31,7 +31,7 @@ grep -qE 'sudo[^-]*apt-get' "$cli" && ! grep -q 'sudo -n apt-get' "$cli" &&
 # package's maintainer scripts run as root. Pin the set so a changed or added
 # package has to be an explicit, reviewed edit here rather than a one-word diff
 # in the table that reads like every other manager id.
-APT_ALLOWED='git-delta fd-find eza zoxide fzf direnv neovim unzip'
+APT_ALLOWED='git-delta fd-find eza zoxide fzf direnv neovim unzip sox'
 # Whole-token comparison, not `grep -w`: a hyphen is a word boundary to grep,
 # so `fd` and `find` would both pass against the allowed `fd-find`, and a
 # security boundary that accepts substrings of its own entries is not one.

@@ -66,7 +66,7 @@ These run as part of `chezmoi apply` and need no root:
 | Script | Installs |
 |---|---|
 | `run_once_41-install-rg.sh` | ripgrep (hard dependency of rtk) |
-| `run_once_42-install-cli-tools.sh` | delta, fd, eza, zoxide, starship, fzf, direnv, nvim |
+| `run_once_42-install-cli-tools.sh` | delta, fd, eza, zoxide, starship, fzf, direnv, nvim, sox (Claude Code voice mode's audio recorder) |
 | `run_once_45-install-python-tools.sh` | uv, pipx |
 | `run_once_46-install-cloud-clis.sh` | terraform, aws, gcloud, az |
 | `run_once_47-install-go.sh` | Go toolchain |

@@ -14,6 +14,7 @@ starship|starship|Starship.Starship|starship||starship
 fzf|fzf|junegunn.fzf|fzf|fzf|
 direnv|direnv|direnv.direnv|direnv|direnv|
 nvim|neovim|Neovim.Neovim|neovim|neovim|
+sox|sox||sox|sox|
 '
 
 # apt is the only manager here that needs root. `chezmoi apply` runs unattended

@@ -34,3 +34,11 @@ export KUBECONFIG="$HOME/.kube/config"
 
 # Docker BuildKit for better build output
 export DOCKER_BUILDKIT=1
+
+# Claude Code voice mode over SSH: point ALSA/SoX at a PulseAudio server
+# reverse-tunnelled from the client (see docs/voice-mode-ssh.md). Scoped to
+# SSH sessions only — an unreachable PULSE_SERVER on a local session is a
+# needless failure mode for anything that queries it.
+if [ -n "$SSH_CONNECTION" ]; then
+    export PULSE_SERVER="tcp:127.0.0.1:4713"
+fi

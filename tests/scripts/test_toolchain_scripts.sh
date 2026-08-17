@@ -6,7 +6,8 @@ cli="$here/home/run_once_42-install-cli-tools.sh"
 py="$here/home/run_once_45-install-python-tools.sh"
 cloud="$here/home/run_once_46-install-cloud-clis.sh"
 go="$here/home/run_once_47-install-go.sh"
-shellcheck -s bash "$cli" "$py" "$cloud" "$go"
+voice="$here/home/run_once_48-install-voice-audio-forward.sh"
+shellcheck -s bash "$cli" "$py" "$cloud" "$go" "$voice"
 
 fail() { echo "FAIL: $1"; exit 1; }
 
@@ -31,7 +32,7 @@ grep -qE 'sudo[^-]*apt-get' "$cli" && ! grep -q 'sudo -n apt-get' "$cli" &&
 # package's maintainer scripts run as root. Pin the set so a changed or added
 # package has to be an explicit, reviewed edit here rather than a one-word diff
 # in the table that reads like every other manager id.
-APT_ALLOWED='git-delta fd-find eza zoxide fzf direnv neovim unzip sox'
+APT_ALLOWED='git-delta fd-find eza zoxide fzf direnv neovim unzip sox pulseaudio-utils libasound2-plugins alsa-utils'
 # Whole-token comparison, not `grep -w`: a hyphen is a word boundary to grep,
 # so `fd` and `find` would both pass against the allowed `fd-find`, and a
 # security boundary that accepts substrings of its own entries is not one.
@@ -57,6 +58,13 @@ while IFS= read -r pkg; do
     apt_allowed "$pkg" ||
         fail "cloud CLI script installs unreviewed apt package '$pkg'"
 done < <(grep -oE 'sudo -n apt-get install[^|]*' "$cloud" | awk '{print $NF}')
+# Same boundary again: voice-audio-forward's apt package list.
+voice_pkgs="$(grep "^APT_PKGS=" "$voice" | sed "s/^APT_PKGS='//;s/'$//")"
+[ -n "$voice_pkgs" ] || fail "voice-audio-forward APT_PKGS not found"
+for pkg in $voice_pkgs; do
+    apt_allowed "$pkg" ||
+        fail "voice-audio-forward script installs unreviewed apt package '$pkg'"
+done
 
 # Debian ships fd as fdfind; without the shim `command -v fd` keeps failing and
 # every apply reinstalls it.

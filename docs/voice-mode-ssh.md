@@ -35,13 +35,13 @@ install or configure `pipewire-pulse` for this path, it isn't there.
    Want a normal info dump (check `Default Source:`), not "Connection
    refused" or a hang.
 
-2. Persist across WSL restarts — module loads don't survive a reboot. Add to
-   `~/.bashrc`:
-   ```bash
-   if pactl info &>/dev/null && ! PULSE_SERVER=tcp:127.0.0.1:4713 pactl info &>/dev/null 2>&1; then
-       pactl load-module module-native-protocol-tcp listen=127.0.0.1 port=4713 auth-ip-acl=127.0.0.1 auth-anonymous=1 &>/dev/null
-   fi
-   ```
+2. Persist across WSL restarts — module loads don't survive a reboot.
+   `dot_bashrc` in this repo already carries a guarded loader for this
+   (search `WSL_DISTRO_NAME` there); it polls for `/mnt/wslg/PulseServer`
+   for up to 5s before giving up, since a one-shot check can run before
+   WSLg's Pulse socket exists yet and would otherwise skip loading for the
+   rest of that shell's life. `chezmoi apply` deploys it — no manual edit
+   needed.
 
 3. Add to `~/.ssh/config`:
    ```

@@ -5,7 +5,11 @@ set -euo pipefail
 # Fields: command|brew|winget|scoop|apt|cargo — empty field means that manager is skipped.
 # An apt id may be written pkg>binary when the Debian package installs the tool
 # under a different binary name than upstream (fd ships as fdfind).
+# rg leads the table: rtk shells out to it for every search and prints a
+# fallback warning per call when it is absent, so it is a hard dependency of the
+# rtk install rather than another convenience CLI.
 TOOLS='
+rg|ripgrep|BurntSushi.ripgrep.MSVC|ripgrep|ripgrep|ripgrep
 delta|git-delta|dandavison.delta|delta|git-delta|git-delta
 fd|fd|sharkdp.fd|fd|fd-find>fdfind|fd-find
 eza|eza|eza-community.eza|eza|eza|eza
@@ -66,7 +70,12 @@ install_one() {
     elif [ -n "$apt_id" ] && command -v apt-get &>/dev/null && sudo -n true 2>/dev/null; then
         apt_install "$cmd" "$apt_id"
     elif [ -n "$cargo_id" ] && command -v cargo &>/dev/null; then
-        cargo install "$cargo_id" || echo "$cmd cargo install failed"
+        # --locked, always: an unlocked install re-resolves every transitive
+        # dependency to the newest semver-compatible release, so a crate the
+        # tool never pinned can break the build on a toolchain the tool builds
+        # fine on. eza is the live example — unlocked it fails compiling
+        # `palette`, locked it builds.
+        cargo install --locked "$cargo_id" || echo "$cmd cargo install failed"
     else
         echo "$cmd requires brew, winget, scoop, passwordless-sudo apt, or cargo — install one first"
     fi

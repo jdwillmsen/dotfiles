@@ -33,6 +33,31 @@ for s in run_once_46-install-cloud-clis.sh run_once_47-install-go.sh; do
     grep -qx -- "$s" <<<"$out" && fail "$s must still run on a real machine"
 done
 
+# The dev tooling catalog installs a Docker daemon and a cluster CLI, so it is
+# opt-in per machine: off unless the prompt was answered true.
+for s in run_once_49-install-dev-tools.sh; do
+    grep -qx -- "$s" <<<"$out" || fail "$s must be off unless opted in"
+done
+on="$(
+    unset CI
+    chez_render "$(chez_init personal true)" "$here/home/.chezmoiignore"
+)"
+grep -qx -- 'run_once_49-install-dev-tools.sh' <<<"$on" &&
+    fail "opting in must actually enable the dev tooling catalog"
+
+# A machine initialised before this prompt existed has no such key in its
+# persisted config. The rule reads it with `get` for exactly that reason: a
+# bare reference is a hard template error there, which would break every apply
+# on every older machine rather than leaving the catalog off.
+legacy="$(mktemp -d)/chezmoi.toml"
+grep -v installDevTooling "$cfg" > "$legacy"
+out="$(
+    unset CI
+    chez_render "$legacy" "$here/home/.chezmoiignore"
+)" || fail "ignore rules must render on a config predating the prompt"
+grep -qx -- 'run_once_49-install-dev-tools.sh' <<<"$out" ||
+    fail "a config without the key must leave the catalog off"
+
 # The ephemeral rules are independent of CI and must not have been folded in.
 eph="$(chez_init ephemeral)"
 out="$(

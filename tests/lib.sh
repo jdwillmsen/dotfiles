@@ -30,14 +30,17 @@ chez_require_key() {
     exit 0
 }
 
-# chez_init [role] — prints path to a config rendered for that role.
-# CI-detection env vars are stripped so results are deterministic everywhere.
+# chez_init [role] [installDevTooling] — prints path to a config rendered for
+# that role. CI-detection env vars are stripped so results are deterministic
+# everywhere. Every prompt the config template declares must be answered here:
+# an unanswered one under --no-tty aborts init rather than taking its default.
 chez_init() {
     local tmp; tmp="$(mktemp -d)"
     env -u CI -u REMOTE_CONTAINERS -u CODESPACES chezmoi init \
         --source "$CHEZ_SRC" --destination "$tmp/dest" \
         --config "$tmp/chezmoi.toml" \
-        --promptString "machineRole=${1:-personal}" --no-tty >/dev/null
+        --promptString "machineRole=${1:-personal}" \
+        --promptBool "installDevTooling=${2:-false}" --no-tty >/dev/null
     echo "$tmp/chezmoi.toml"
 }
 

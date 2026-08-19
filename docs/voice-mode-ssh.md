@@ -10,10 +10,63 @@ Client and server need matching PulseAudio-over-TCP setup. `sox`,
 ALSA's default device to PulseAudio) are provisioned by this repo — see
 [`provisioning.md`](provisioning.md).
 
-## Linux/WSL2 client → Linux server
+## WSL2 (WSLg) client → Linux server
 
-**Client** (wherever the mic lives — a native Linux box, or Windows 11's
-WSL2, which bridges the Windows mic in via WSLg automatically):
+WSLg ships its own PulseAudio server at `unix:/mnt/wslg/PulseServer` — that's
+what bridges the Windows mic into WSL. There's no PipeWire involved; don't
+install or configure `pipewire-pulse` for this path, it isn't there.
+
+**Client (inside WSL):**
+
+1. Load a TCP listener onto WSLg's existing Pulse server, loopback-only:
+   ```
+   pactl load-module module-native-protocol-tcp listen=127.0.0.1 port=4713 auth-ip-acl=127.0.0.1 auth-anonymous=1
+   ```
+   `auth-anonymous=1` is required — cookie-based auth over this path doesn't
+   cleanly reject on mismatch, it **hangs** (`pactl info` times out instead of
+   refusing). Copying `~/.config/pulse/cookie` to the server is not a
+   reliable fix (WSLg regenerates the cookie on module reload); anonymous
+   auth is safe here because the listener is already restricted to loopback
+   + `auth-ip-acl=127.0.0.1`, and nothing reaches that port except through
+   the SSH tunnel below. Verify:
+   ```
+   PULSE_SERVER=tcp:127.0.0.1:4713 pactl info
+   ```
+   Want a normal info dump (check `Default Source:`), not "Connection
+   refused" or a hang.
+
+2. Persist across WSL restarts — module loads don't survive a reboot. Add to
+   `~/.bashrc`:
+   ```bash
+   if pactl info &>/dev/null && ! PULSE_SERVER=tcp:127.0.0.1:4713 pactl info &>/dev/null 2>&1; then
+       pactl load-module module-native-protocol-tcp listen=127.0.0.1 port=4713 auth-ip-acl=127.0.0.1 auth-anonymous=1 &>/dev/null
+   fi
+   ```
+
+3. Add to `~/.ssh/config`:
+   ```
+   Host <remote-host>
+       RemoteForward 4713 127.0.0.1:4713
+   ```
+   The forward only comes up for the lifetime of that SSH connection — reconnect
+   after adding it.
+
+4. `ssh <remote-host>` as usual.
+
+**Server (this repo already provisions the packages and `~/.asoundrc`):**
+
+- `PULSE_SERVER` is exported automatically inside SSH sessions (see
+  `dot_config/shell/exports.sh`), pointing at the forwarded port.
+- Verify: `pactl info` should report the client's Pulse server (`Host Name:`
+  will be the Windows/WSL box), not "Connection refused" or a hang. A hang
+  here almost always means step 1's `auth-anonymous=1` is missing on the
+  client.
+- `arecord -d 2 -f cd /tmp/mictest.wav` should produce a non-trivial file if
+  the whole chain works.
+
+## Native Linux client → Linux server
+
+Client runs PipeWire-Pulse rather than WSLg's bundled server:
 
 1. Enable PipeWire-Pulse's TCP listener:
    ```
@@ -21,18 +74,7 @@ WSL2, which bridges the Windows mic in via WSLg automatically):
    ```
    Edit the copy's `server.address` to add `"tcp:127.0.0.1:4713"` alongside
    `"unix:native"`, then `systemctl --user restart pipewire pipewire-pulse`.
-2. Add to `~/.ssh/config`:
-   ```
-   Host <remote-host>
-       RemoteForward 4713 127.0.0.1:4713
-   ```
-3. `ssh <remote-host>` as usual — the forward comes up with the connection.
-
-**Server** (this repo already provisions the packages and `~/.asoundrc`):
-
-- `PULSE_SERVER` is exported automatically inside SSH sessions (see
-  `dot_config/shell/exports.sh`), pointing at the forwarded port.
-- Verify: `pactl info` should report the client's Pulse server, not "Connection refused".
+2. Same `~/.ssh/config` `RemoteForward` and server-side verification as above.
 
 ## Caveat
 

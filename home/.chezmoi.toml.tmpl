@@ -1,5 +1,9 @@
 {{- /* prompt text intentionally equals the data path so --promptString machineRole=... keys correctly */ -}}
 {{- $role := promptStringOnce . "machineRole" "machineRole" "personal" -}}
+{{- /* Off by default: this catalog installs a Docker daemon, a kubectl and a
+       cluster CLI, which a personal laptop has no business growing just
+       because it applied dotfiles. Opt in per machine at init time. */ -}}
+{{- $devTooling := promptBoolOnce . "installDevTooling" "installDevTooling" false -}}
 {{- $ephemeral := or (env "CI" | not | not) (env "REMOTE_CONTAINERS" | not | not) (env "CODESPACES" | not | not) -}}
 {{- if eq $role "ephemeral" }}{{ $ephemeral = true }}{{ end -}}
 {{- $osrelease := lower (output "sh" "-c" "cat /proc/sys/kernel/osrelease 2>/dev/null || true") -}}
@@ -31,6 +35,7 @@ encryption = "age"
     machineRole = {{ $role | quote }}
     isEphemeral = {{ $ephemeral }}
     isWSL = {{ $isWSL }}
+    installDevTooling = {{ $devTooling }}
 
 {{- /* Applied on every OS, not just Windows: chezmoi resolves a modify_
        script's *destination* name by stripping whatever extension matches

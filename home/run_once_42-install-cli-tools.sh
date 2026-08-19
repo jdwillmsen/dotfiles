@@ -15,6 +15,7 @@ fzf|fzf|junegunn.fzf|fzf|fzf|
 direnv|direnv|direnv.direnv|direnv|direnv|
 nvim|neovim|Neovim.Neovim|neovim|neovim|
 sox|sox||sox|sox|
+cmake|cmake|Kitware.CMake|cmake|cmake|
 '
 
 # apt is the only manager here that needs root. `chezmoi apply` runs unattended

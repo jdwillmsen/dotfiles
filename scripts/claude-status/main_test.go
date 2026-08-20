@@ -194,7 +194,7 @@ func testGit() *gitState {
 }
 
 func TestRenderNarrowDropsRepoCostAndExtras(t *testing.T) {
-	lines := renderLines(fullPayload(), testGit(), 60, false, fallback{})
+	lines := renderLines(fullPayload(), testGit(), 60, false)
 	if len(lines) > 2 {
 		t.Fatalf("narrow: got %d lines, want ≤2", len(lines))
 	}
@@ -211,7 +211,7 @@ func TestRenderNarrowDropsRepoCostAndExtras(t *testing.T) {
 }
 
 func TestRenderNormalTwoLinesNoCacheStats(t *testing.T) {
-	lines := renderLines(fullPayload(), testGit(), 110, false, fallback{})
+	lines := renderLines(fullPayload(), testGit(), 110, false)
 	if len(lines) != 2 {
 		t.Fatalf("normal: got %d lines, want 2", len(lines))
 	}
@@ -228,7 +228,7 @@ func TestRenderNormalTwoLinesNoCacheStats(t *testing.T) {
 }
 
 func TestRenderVerboseForcesThirdLine(t *testing.T) {
-	lines := renderLines(fullPayload(), testGit(), 110, true, fallback{})
+	lines := renderLines(fullPayload(), testGit(), 110, true)
 	if len(lines) != 3 {
 		t.Fatalf("verbose: got %d lines, want 3", len(lines))
 	}
@@ -238,7 +238,7 @@ func TestRenderVerboseForcesThirdLine(t *testing.T) {
 }
 
 func TestRenderWideThreeLinesGiantBar(t *testing.T) {
-	lines := renderLines(fullPayload(), testGit(), 180, false, fallback{})
+	lines := renderLines(fullPayload(), testGit(), 180, false)
 	if len(lines) != 3 {
 		t.Fatalf("wide: got %d lines, want 3", len(lines))
 	}
@@ -250,14 +250,14 @@ func TestRenderWideThreeLinesGiantBar(t *testing.T) {
 }
 
 func TestRenderUnknownColumnsBehavesAsNormal(t *testing.T) {
-	lines := renderLines(fullPayload(), testGit(), 0, false, fallback{})
+	lines := renderLines(fullPayload(), testGit(), 0, false)
 	if len(lines) != 2 {
 		t.Fatalf("cols=0: got %d lines, want 2 (normal tier)", len(lines))
 	}
 }
 
 func TestRenderGitAheadBehindUntracked(t *testing.T) {
-	joined := stripANSI(strings.Join(renderLines(fullPayload(), testGit(), 110, false, fallback{}), "\n"))
+	joined := stripANSI(strings.Join(renderLines(fullPayload(), testGit(), 110, false), "\n"))
 	for _, want := range []string{"⇡2", "⇣1", "+1", "~3", "?4"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing %q in %q", want, joined)
@@ -272,7 +272,7 @@ func TestRenderPRIsHyperlinked(t *testing.T) {
 		URL         string `json:"url"`
 		ReviewState string `json:"review_state"`
 	}{Number: 9, URL: "https://github.com/jdwillmsen/dotfiles/pull/9", ReviewState: "approved"}
-	joined := strings.Join(renderLines(p, testGit(), 110, false, fallback{}), "\n")
+	joined := strings.Join(renderLines(p, testGit(), 110, false), "\n")
 	if !strings.Contains(joined, "\033]8;;https://github.com/jdwillmsen/dotfiles/pull/9") {
 		t.Error("PR number not OSC 8 linked")
 	}
@@ -281,7 +281,7 @@ func TestRenderPRIsHyperlinked(t *testing.T) {
 func TestRenderExceeds200kWarning(t *testing.T) {
 	p := fullPayload()
 	p.ExceedsTokens = true
-	joined := stripANSI(strings.Join(renderLines(p, testGit(), 110, false, fallback{}), "\n"))
+	joined := stripANSI(strings.Join(renderLines(p, testGit(), 110, false), "\n"))
 	if !strings.Contains(joined, ">200k") {
 		t.Error("exceeds_200k_tokens warning missing")
 	}
@@ -291,7 +291,7 @@ func TestRenderExceeds200kSuppressedOnLargeWindow(t *testing.T) {
 	p := fullPayload()
 	p.ExceedsTokens = true
 	p.ContextWindow.ContextWindowSize = 1_000_000
-	joined := stripANSI(strings.Join(renderLines(p, testGit(), 110, false, fallback{}), "\n"))
+	joined := stripANSI(strings.Join(renderLines(p, testGit(), 110, false), "\n"))
 	if strings.Contains(joined, ">200k") {
 		t.Error("200k warning must not fire on a 1M window")
 	}
@@ -321,7 +321,7 @@ func TestRenderVariantMarkerIsDimmedNotInline(t *testing.T) {
 	p := fullPayload()
 	p.Model.ID = "claude-opus-5[1m]"
 	p.Model.DisplayName = "Opus 5 (1M context)"
-	lines := renderLines(p, testGit(), 110, false, fallback{})
+	lines := renderLines(p, testGit(), 110, false)
 	if !strings.Contains(lines[0], Dim+"1M"+Reset) {
 		t.Error("variant marker not rendered dim")
 	}
@@ -401,7 +401,7 @@ func TestRenderMillionWindowDenominatorNotThousandK(t *testing.T) {
 	p.ContextWindow.UsedPercentage = &pct
 	p.ContextWindow.TotalInputTokens = 260_000
 	p.ContextWindow.ContextWindowSize = 1_000_000
-	joined := stripANSI(strings.Join(renderLines(p, testGit(), 110, false, fallback{}), "\n"))
+	joined := stripANSI(strings.Join(renderLines(p, testGit(), 110, false), "\n"))
 	if strings.Contains(joined, "1000k") {
 		t.Error("1M window still rendering as 1000k")
 	}
@@ -415,13 +415,13 @@ func TestRenderOutputStyleShownExceptDefault(t *testing.T) {
 	p.OutputStyle = &struct {
 		Name string `json:"name"`
 	}{Name: "caveman"}
-	joined := stripANSI(strings.Join(renderLines(p, testGit(), 110, false, fallback{}), "\n"))
+	joined := stripANSI(strings.Join(renderLines(p, testGit(), 110, false), "\n"))
 	if !strings.Contains(joined, "caveman") {
 		t.Error("output style missing")
 	}
 
 	p.OutputStyle.Name = "default"
-	joined = stripANSI(strings.Join(renderLines(p, testGit(), 110, false, fallback{}), "\n"))
+	joined = stripANSI(strings.Join(renderLines(p, testGit(), 110, false), "\n"))
 	if strings.Contains(joined, "default") {
 		t.Error("default output style should be hidden")
 	}
@@ -432,14 +432,14 @@ func TestRenderVimMode(t *testing.T) {
 	p.Vim = &struct {
 		Mode string `json:"mode"`
 	}{Mode: "insert"}
-	joined := stripANSI(strings.Join(renderLines(p, testGit(), 110, false, fallback{}), "\n"))
+	joined := stripANSI(strings.Join(renderLines(p, testGit(), 110, false), "\n"))
 	if !strings.Contains(joined, "[i]") {
 		t.Error("vim mode indicator missing")
 	}
 }
 
 func TestRenderNoEmoji(t *testing.T) {
-	joined := strings.Join(renderLines(fullPayload(), testGit(), 180, true, fallback{}), "\n")
+	joined := strings.Join(renderLines(fullPayload(), testGit(), 180, true), "\n")
 	for _, emoji := range []string{"📁", "💾", "📝", "⏱"} {
 		if strings.Contains(joined, emoji) {
 			t.Errorf("emoji %q still present — single-width glyphs only", emoji)
@@ -549,144 +549,11 @@ func TestParsePorcelainV2CleanRepoNoUpstream(t *testing.T) {
 	}
 }
 
-func TestParseFallbackNativeWhenNoEnv(t *testing.T) {
-	t.Setenv("CCR_ACTIVE_ROUTE", "")
-	if fb := parseFallback(); fb.Route != "" {
-		t.Errorf("native: want zero fallback, got %+v", fb)
-	}
-}
-
-func TestParseFallbackSplitsRouteAndFlags(t *testing.T) {
-	t.Setenv("CCR_ACTIVE_ROUTE", "nvidia,deepseek-ai/deepseek-v4-pro")
-	t.Setenv("CCR_CTX_WINDOW", "128000")
-	t.Setenv("CCR_REASONING", "off")
-	fb := parseFallback()
-	if fb.Provider != "nvidia" {
-		t.Errorf("Provider = %q, want nvidia", fb.Provider)
-	}
-	if fb.Model != "deepseek-v4-pro" {
-		t.Errorf("Model = %q, want deepseek-v4-pro (vendor prefix stripped)", fb.Model)
-	}
-	if fb.CtxWindow != 128000 {
-		t.Errorf("CtxWindow = %d, want 128000", fb.CtxWindow)
-	}
-	if fb.Reasoning {
-		t.Error("Reasoning should be false when CCR_REASONING=off")
-	}
-}
-
-func TestParseFallbackKeepsModelWithoutSlash(t *testing.T) {
-	t.Setenv("CCR_ACTIVE_ROUTE", "ollama,gpt-oss:20b")
-	t.Setenv("CCR_CTX_WINDOW", "")
-	t.Setenv("CCR_REASONING", "on")
-	fb := parseFallback()
-	if fb.Model != "gpt-oss:20b" {
-		t.Errorf("Model = %q, want gpt-oss:20b", fb.Model)
-	}
-	if fb.CtxWindow != 0 {
-		t.Errorf("CtxWindow = %d, want 0 when unset", fb.CtxWindow)
-	}
-	if !fb.Reasoning {
-		t.Error("Reasoning should be true when CCR_REASONING=on")
-	}
-}
-
 // ── Fallback model rendering ──────────────────────────────────────────────────
-
-func fbNvidia() fallback {
-	return fallback{Route: "nvidia,deepseek-ai/deepseek-v4-pro", Provider: "nvidia", Model: "deepseek-v4-pro", CtxWindow: 0, Reasoning: false}
-}
-
-func TestRenderFallbackModelReplacesLabel(t *testing.T) {
-	p := fullPayload()
-	p.Effort = &struct {
-		Level string `json:"level"`
-	}{Level: "high"}
-	joined := stripANSI(strings.Join(renderLines(p, testGit(), 110, false, fbNvidia()), "\n"))
-	if !strings.Contains(joined, "⚡ deepseek-v4-pro") {
-		t.Errorf("fallback model label missing ⚡/model in %q", joined)
-	}
-	if !strings.Contains(joined, "nvidia") {
-		t.Error("fallback provider missing")
-	}
-	if strings.Contains(joined, "Fable") || strings.Contains(joined, "⬡") {
-		t.Error("native label must not appear in fallback")
-	}
-	if strings.Contains(joined, "high") {
-		t.Error("reasoning hidden when Reasoning=false (stripped route)")
-	}
-}
-
-func TestRenderFallbackShowsReasoningWhenOn(t *testing.T) {
-	p := fullPayload()
-	p.Effort = &struct {
-		Level string `json:"level"`
-	}{Level: "high"}
-	fb := fbNvidia()
-	fb.Reasoning = true
-	joined := stripANSI(strings.Join(renderLines(p, testGit(), 110, false, fb), "\n"))
-	if !strings.Contains(joined, "high") {
-		t.Error("reasoning shown when Reasoning=true (e.g. gpt-oss)")
-	}
-}
 
 // ── Fallback context window rendering ──────────────────────────────────────
 
-func TestRenderFallbackKnownWindowUsesRealDenominator(t *testing.T) {
-	p := fullPayload()
-	p.ContextWindow.TotalInputTokens = 15000
-	fb := fbNvidia()
-	fb.CtxWindow = 128000 // e.g. an OpenRouter/vLLM route that reported a window
-	joined := stripANSI(strings.Join(renderLines(p, testGit(), 110, false, fb), "\n"))
-	if !strings.Contains(joined, "15k/128k") {
-		t.Errorf("want real denominator 15k/128k in %q", joined)
-	}
-	if strings.Contains(joined, "/200k") {
-		t.Error("must not use Opus's 200k window in fallback")
-	}
-}
-
-func TestRenderFallbackUnknownWindowShowsTokensOnly(t *testing.T) {
-	p := fullPayload()
-	p.ContextWindow.TotalInputTokens = 15000
-	fb := fbNvidia() // CtxWindow 0 = unknown (NVIDIA)
-	joined := stripANSI(strings.Join(renderLines(p, testGit(), 110, false, fb), "\n"))
-	if !strings.Contains(joined, "15k in") {
-		t.Errorf("want tokens-only 'ctx 15k in' in %q", joined)
-	}
-	if strings.Contains(joined, "/200k") || strings.Contains(joined, "/128k") {
-		t.Error("no denominator when window unknown")
-	}
-}
-
 // ── Fallback cost and rate rendering ──────────────────────────────────────
-
-func TestRenderFallbackCostIsFree(t *testing.T) {
-	joined := stripANSI(strings.Join(renderLines(fullPayload(), testGit(), 110, false, fbNvidia()), "\n"))
-	if !strings.Contains(joined, "FREE") {
-		t.Errorf("fallback cost should show FREE in %q", joined)
-	}
-	if strings.Contains(joined, "$0.42") {
-		t.Error("no dollar cost in fallback")
-	}
-}
-
-func TestRenderFallbackRateLimitsMinimized(t *testing.T) {
-	joined := stripANSI(strings.Join(renderLines(fullPayload(), testGit(), 110, false, fbNvidia()), "\n"))
-	if !strings.Contains(joined, "5h") || !strings.Contains(joined, "↺") {
-		t.Errorf("fallback should keep 5h reset info in %q", joined)
-	}
-	// minimized = no progress-bar cells in the rate section
-	rateLine := ""
-	for _, l := range strings.Split(joined, "\n") {
-		if strings.Contains(l, "5h") {
-			rateLine = l
-		}
-	}
-	if strings.ContainsAny(rateLine, "█░") {
-		t.Errorf("minimized rate limits must have no bar cells: %q", rateLine)
-	}
-}
 
 // ── jira ticket segment ───────────────────────────────────────────────────────
 
@@ -700,7 +567,7 @@ func jiraPayload(t *testing.T) Payload {
 func TestRenderTicketSegmentIsHyperlinked(t *testing.T) {
 	cfg := &jiraConfig{SiteBase: "https://example.atlassian.net", Projects: []string{"ABC"}}
 	git := &gitState{Branch: "feat/ABC-123-fix-login"}
-	lines := renderLinesWithJira(jiraPayload(t), git, 200, false, fallback{}, cfg)
+	lines := renderLinesWithJira(jiraPayload(t), git, 200, false, cfg)
 	joined := strings.Join(lines, "\n")
 
 	if !strings.Contains(joined, "https://example.atlassian.net/browse/ABC-123") {
@@ -723,7 +590,7 @@ func TestRenderTicketDroppedAtNarrow(t *testing.T) {
 	cfg := &jiraConfig{SiteBase: "https://example.atlassian.net", Projects: []string{"ABC"}}
 	git := &gitState{Branch: "feat/ABC-123-fix-login"}
 	plain := stripANSI(strings.Join(
-		renderLinesWithJira(jiraPayload(t), git, 60, false, fallback{}, cfg), "\n"))
+		renderLinesWithJira(jiraPayload(t), git, 60, false, cfg), "\n"))
 
 	// Narrow drops the segment, so the branch must keep the key — otherwise it
 	// vanishes from the statusline entirely.
@@ -735,7 +602,7 @@ func TestRenderTicketDroppedAtNarrow(t *testing.T) {
 func TestRenderNoTicketWithoutConfig(t *testing.T) {
 	git := &gitState{Branch: "feat/ABC-123-fix-login"}
 	plain := stripANSI(strings.Join(
-		renderLinesWithJira(jiraPayload(t), git, 200, false, fallback{}, nil), "\n"))
+		renderLinesWithJira(jiraPayload(t), git, 200, false, nil), "\n"))
 	if !strings.Contains(plain, "feat/ABC-123-fix-login") {
 		t.Errorf("nil cfg must leave the branch untouched:\n%s", plain)
 	}
@@ -756,7 +623,7 @@ func hasControlRune(s string) bool {
 func TestRenderSanitizesSessionName(t *testing.T) {
 	p := fullPayload()
 	p.SessionName = "ok\033]52;c;cm0gLXJm\007 forged"
-	line := strings.Join(renderLines(p, testGit(), 200, true, fallback{}), "\n")
+	line := strings.Join(renderLines(p, testGit(), 200, true), "\n")
 	// The line legitimately carries OSC 8 hyperlinks, so assert on the injected
 	// sequence rather than on control runes anywhere in the output.
 	if strings.Contains(line, "\033]52;") || strings.Contains(line, "\007") {

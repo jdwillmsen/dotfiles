@@ -3,7 +3,8 @@ set -euo pipefail
 # Dev/infra tooling for a full development machine — the layer above the
 # editor-adjacent CLIs in 42. Opt-in: a personal laptop should not sprout a
 # Docker daemon and a kubectl because it applied dotfiles, so the whole script
-# is gated on the installDevTooling prompt via home/.chezmoiignore.
+# is gated on the installDevTooling prompt by a template guard below (see its
+# comment for why that guard, not home/.chezmoiignore, is the real gate).
 #
 # Data-driven the same way 42 is: adding a tool is a table row, not new logic.
 # Rows carry an install kind because these tools do not share one distribution
@@ -49,9 +50,26 @@ java|apt||openjdk-21-jdk|||
 
 BIN="$HOME/.local/bin"
 
+{{- /* chezmoi does not skip a run_once_ script's execution for an entry
+       matched only by .chezmoiignore — the ignore rule still keeps this
+       script out of `chezmoi status`/`ignored` bookkeeping (so opting in
+       later installs instead of staying marked "already run"), but it is
+       not what stops the install itself. This template guard is that: a
+       personal laptop answering the installDevTooling prompt `false` must
+       not grow a Docker daemon and a kubectl, and only a guard baked into
+       the rendered script, not the ignore rule, actually prevents that.
+       `get`, not a bare .installDevTooling, for the same reason .chezmoiignore
+       reads it that way: a machine initialised before this prompt existed has
+       no such key, and a direct reference is a hard template error there. */ -}}
+{{- if not (get . "installDevTooling") }}
+echo "installDevTooling is off — skipping dev tooling install"
+exit 0
+{{- end }}
+
 # Vendor archives and a Docker daemon are dead weight in a CI container, and the
 # smoke test applies with a real machine role into a throwaway HOME. The ignore
-# rule in .chezmoiignore is the real gate; this guard covers a direct run.
+# rule keeps this script out of run-once bookkeeping; this guard is what
+# actually stops it, same as the installDevTooling guard above.
 [ -z "${CI:-}" ] || { echo "CI detected — skipping dev tooling install"; exit 0; }
 
 # Linux/apt only for v1. The vendor installers below assume a Debian userland,

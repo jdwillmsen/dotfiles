@@ -1,13 +1,5 @@
 {
-  "LOG": true,
-  "HOST": "127.0.0.1",
-  "PORT": 3456,
-  "transformers": [
-    {
-      "path": "{{ .chezmoi.homeDir | replace "\\" "/" }}/.claude-code-router/strip-reasoning.js"
-    }
-  ],
-  "Providers": [
+  "providers": [
     {
       "name": "nvidia",
       "api_base_url": "https://integrate.api.nvidia.com/v1/chat/completions",
@@ -22,12 +14,7 @@
         "moonshotai/kimi-k2.6",
         "nvidia/nemotron-3-ultra-550b-a55b",
         "mistralai/mistral-nemotron"
-      ],
-      "transformer": {
-        "use": [
-          "strip-reasoning"
-        ]
-      }
+      ]
     },
     {
       "name": "openrouter",
@@ -36,12 +23,7 @@
       "models": [
         "poolside/laguna-s-2.1:free",
         "cohere/north-mini-code:free"
-      ],
-      "transformer": {
-        "use": [
-          "openrouter"
-        ]
-      }
+      ]
     },
     {
       "name": "gpu-stack",
@@ -59,12 +41,5 @@
         "gpt-oss:20b"
       ]
     }
-  ],
-  "Router": {
-    "default": "ollama,gpt-oss:20b",
-    "think": "nvidia,moonshotai/kimi-k2.6",
-    "background": "gpu-stack,qwen/qwen3-coder-30b-a3b",
-    "longContext": "nvidia,minimaxai/minimax-m3",
-    "longContextThreshold": 60000
-  }
+  ]
 }

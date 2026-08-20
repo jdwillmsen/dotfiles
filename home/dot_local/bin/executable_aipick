@@ -1,37 +1,38 @@
 #!/usr/bin/env bash
-# aipick — pick a tool (Claude Code / Aider / Qwen Code) and a model from the
-# same CCR fallback-tier config.json, then launch that tool correctly wired.
-# Claude Code goes through pick.sh/CCR (Anthropic-format shim). Aider and
-# Qwen Code speak OpenAI format natively, so they connect straight to the
-# provider — no CCR hop.
-# Usage: bash ~/.claude-code-router/aipick.sh   (or alias aipick)
+# aipick — pick a provider/model and launch Aider or Qwen Code wired to it.
+#
+# Both tools speak OpenAI format natively, so they connect straight to the
+# provider. This used to read CCR's config.json and offer a "Claude Code via
+# CCR" option; CCR is gone, and the provider list it was borrowing now lives
+# in its own registry that nothing else owns.
+# Usage: aipick
 set -euo pipefail
 
-ccrdir="$HOME/.claude-code-router"
-[ -f "$ccrdir/config.json" ] || { echo "no CCR config at $ccrdir/config.json" >&2; exit 1; }
+registry="${AIPICK_PROVIDERS:-$HOME/.config/aipick/providers.json}"
+[ -f "$registry" ] || { echo "no provider registry at $registry" >&2; exit 1; }
+
+command -v node >/dev/null 2>&1 ||
+    { echo "  ✖ node not found — aipick needs it to read $registry" >&2; exit 1; }
+
+mapfile -t routes < <(node -e '
+  const c = require(process.argv[1]);
+  for (const p of (c.providers || [])) for (const m of (p.models || [])) console.log(p.name + "," + m);
+' "$registry")
+[ "${#routes[@]}" -gt 0 ] || { echo "no models in $registry" >&2; exit 1; }
 
 echo ""
 echo "  aipick — choose a tool:"
 echo "  ────────────────────────"
-echo "   1) Claude Code   (via CCR)"
-echo "   2) Aider"
-echo "   3) Qwen Code"
+echo "   1) Aider"
+echo "   2) Qwen Code"
 echo "   q) cancel"
 echo ""
 read -rp "  tool # > " tool
 case "$tool" in
   q) echo "  cancelled"; exit 0 ;;
-  1) exec bash "$ccrdir/pick.sh" ;;
-  2|3) ;;
+  1|2) ;;
   *) echo "  not a valid choice" >&2; exit 1 ;;
 esac
-
-# ── Model picker (Aider / Qwen Code) — same provider/model list pick.sh uses ──
-mapfile -t routes < <(cd "$ccrdir" && node -e '
-  const c = require("./config.json");
-  for (const p of c.Providers) for (const m of p.models) console.log(p.name + "," + m);
-')
-[ "${#routes[@]}" -gt 0 ] || { echo "no models in config" >&2; exit 1; }
 
 echo ""
 echo "  pick a model:"
@@ -50,24 +51,27 @@ sel="${routes[$((n-1))]:-}"
 provider="${sel%%,*}"
 model="${sel#*,}"
 
-# key<TAB>base — same resolution pick.sh's reachability probe already uses:
-# api_key is a literal string, or "$ENV_VAR" naming an env var to look up.
-resolved="$(cd "$ccrdir" && node -e '
-  const c = require("./config.json");
-  const p = (c.Providers || []).find(p => p.name === process.argv[1]);
+# key<TAB>base — api_key is a literal string, or "$ENV_VAR" naming an env var.
+# shellcheck disable=SC2016  # the node script is a literal; $-refs are its own
+resolved="$(node -e '
+  const c = require(process.argv[1]);
+  const p = (c.providers || []).find(p => p.name === process.argv[2]);
   if (!p) process.exit(1);
-  const keyRef = (p.api_key || "").replace(/^\$/, "");
-  const key = (keyRef && process.env[keyRef]) ? process.env[keyRef] : (p.api_key || "");
+  // "$VAR" names an env var; anything else is a literal key. An unset $VAR
+  // resolves to empty so the caller warns, rather than shipping the literal
+  // string "$VAR" upstream as if it were a credential.
+  const raw = p.api_key || "";
+  const key = raw.startsWith("$") ? (process.env[raw.slice(1)] || "") : raw;
   const base = p.api_base_url.replace(/\/chat\/completions$/, "").replace(/\/+$/, "");
   process.stdout.write(key + "\t" + base);
-' "$provider")"
+' "$registry" "$provider")"
 key="${resolved%%$'\t'*}"
 base="${resolved#*$'\t'}"
 
 [ -n "$key" ] || echo "  ⚠ no api key resolved for $provider — launching anyway (dummy-key tolerant providers only)" >&2
 
 case "$tool" in
-  2)
+  1)
     if [ "${AIPICK_DRY_RUN:-}" = "1" ]; then
       echo "  DRY-RUN OPENAI_API_KEY=*** OPENAI_API_BASE=\"$base\" aider --model \"openai/$model\""
       exit 0
@@ -90,7 +94,7 @@ case "$tool" in
     echo "  → launching aider on: $sel"
     exec aider --model "openai/$model"
     ;;
-  3)
+  2)
     if [ "${AIPICK_DRY_RUN:-}" = "1" ]; then
       echo "  DRY-RUN OPENAI_API_KEY=*** OPENAI_BASE_URL=\"$base\" OPENAI_MODEL=\"$model\" qwen"
       exit 0

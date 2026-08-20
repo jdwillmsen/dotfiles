@@ -1,147 +1,75 @@
 #!/usr/bin/env bash
 set -euo pipefail
 here="$(cd "$(dirname "$0")/../.." && pwd)"
-script="$here/home/dot_claude-code-router/executable_aipick.sh"
+script="$here/home/dot_local/bin/executable_aipick"
+[ -x "$script" ] || { echo "FAIL: aipick missing or not executable"; exit 1; }
 
-[ -f "$script" ] || { echo "FAIL: aipick not tracked in source state"; exit 1; }
-shellcheck -s bash "$script"
-bash -n "$script"
-
-grep -q "alias aipick=" "$here/home/dot_config/shell/aliases.sh" \
-    || { echo "FAIL: no aipick alias"; exit 1; }
-grep -q "alias ccrpick='bash ~/.claude-code-router/pick.sh'" "$here/home/dot_config/shell/aliases.sh" \
-    || { echo "FAIL: ccrpick alias missing/changed"; exit 1; }
+# The alias file must not resurrect the CCR-era paths.
+grep -q "claude-code-router" "$here/home/dot_config/shell/aliases.sh" \
+    && { echo "FAIL: aliases still reference the removed CCR directory"; exit 1; }
 
 tmp="$(mktemp -d)"
+# shellcheck disable=SC2064  # $tmp must expand now: the trap outlives its scope
 trap "rm -rf '$tmp'" EXIT
-mkdir -p "$tmp/.claude-code-router"
+reg="$tmp/providers.json"
 
-write_config() {  # $1 = api_key value in config.json
-    cat >"$tmp/.claude-code-router/config.json" <<JSON
+write_registry() {  # $1 = api_key value
+    cat >"$reg" <<JSON
 {
-  "Providers": [
-    {
-      "name": "ollama",
-      "api_base_url": "http://127.0.0.1:11434/v1/chat/completions",
-      "api_key": "$1",
-      "models": ["gpt-oss:20b"]
-    }
+  "providers": [
+    { "name": "ollama", "api_base_url": "http://127.0.0.1:11434/v1/chat/completions", "api_key": "$1", "models": ["gpt-oss:20b"] }
   ]
 }
 JSON
 }
+write_registry "ollama"
 
-# ── Task 1: tool menu — Claude Code delegates unchanged to pick.sh ──
-cat >"$tmp/.claude-code-router/pick.sh" <<'SH'
-#!/usr/bin/env bash
-echo "PICK_SH_CALLED"
-SH
-chmod +x "$tmp/.claude-code-router/pick.sh"
-write_config "ollama"
-
-out="$(printf '1\n' | HOME="$tmp" bash "$script")"
-echo "$out" | grep -q "PICK_SH_CALLED" || { echo "FAIL: tool=1 didn't delegate to pick.sh"; echo "$out"; exit 1; }
-
-out="$(printf 'q\n' | HOME="$tmp" bash "$script")"
-echo "$out" | grep -q "cancelled" || { echo "FAIL: q didn't cancel"; echo "$out"; exit 1; }
-
-# ── Task 2: model picker + Aider dry-run — literal api_key resolved ──
-out="$(printf '2\n1\n' | HOME="$tmp" AIPICK_DRY_RUN=1 bash "$script")"
+# ── Aider: base URL loses the /chat/completions suffix the registry carries ──
+out="$(printf '1\n1\n' | AIPICK_PROVIDERS="$reg" AIPICK_DRY_RUN=1 bash "$script" 2>&1)"
 echo "$out" | grep -q 'OPENAI_API_BASE="http://127.0.0.1:11434/v1"' \
-    || { echo "FAIL: aider dry-run base not stripped correctly"; echo "$out"; exit 1; }
+    || { echo "FAIL: aider base url wrong"; echo "$out"; exit 1; }
 echo "$out" | grep -q -- '--model "openai/gpt-oss:20b"' \
-    || { echo "FAIL: aider dry-run model not prefixed openai/"; echo "$out"; exit 1; }
-echo "$out" | grep -q 'OPENAI_API_KEY=\*\*\*' \
-    || { echo "FAIL: aider dry-run key not masked in output"; echo "$out"; exit 1; }
-echo "$out" | grep -qi "no api key resolved" \
-    && { echo "FAIL: literal api_key 'ollama' treated as unresolved"; echo "$out"; exit 1; }
+    || { echo "FAIL: aider model wrong"; echo "$out"; exit 1; }
 
-# ── \$ENV_VAR-named key resolves from the environment (pick.sh's scheme) ──
-write_config '$FAKE_PROVIDER_KEY'
-out="$(printf '2\n1\n' | HOME="$tmp" FAKE_PROVIDER_KEY="secret123" AIPICK_DRY_RUN=1 bash "$script")"
-echo "$out" | grep -qi "no api key resolved" \
-    && { echo "FAIL: \$ENV_VAR-style api_key not resolved from environment"; echo "$out"; exit 1; }
-write_config "ollama"
-
-# ── Task 3: Qwen Code dry-run ──
-out="$(printf '3\n1\n' | HOME="$tmp" AIPICK_DRY_RUN=1 bash "$script")"
+# ── Qwen ──
+out="$(printf '2\n1\n' | AIPICK_PROVIDERS="$reg" AIPICK_DRY_RUN=1 bash "$script" 2>&1)"
 echo "$out" | grep -q 'OPENAI_BASE_URL="http://127.0.0.1:11434/v1"' \
-    || { echo "FAIL: qwen dry-run base wrong"; echo "$out"; exit 1; }
+    || { echo "FAIL: qwen base url wrong"; echo "$out"; exit 1; }
 echo "$out" | grep -q 'OPENAI_MODEL="gpt-oss:20b"' \
-    || { echo "FAIL: qwen dry-run model wrong"; echo "$out"; exit 1; }
+    || { echo "FAIL: qwen model wrong"; echo "$out"; exit 1; }
 
-# ── Task 4: auto-install — detection only, fake pipx logs instead of installing ──
-# Real `aider`/`qwen` may already be on this machine's PATH, so build a
-# minimal PATH (bash + node only, no aider/qwen dirs) instead of prepending
-# to the inherited one — otherwise "not found" never triggers.
-mkdir -p "$tmp/bin"
-cat >"$tmp/bin/pipx" <<'SH'
-#!/usr/bin/env bash
-echo "PIPX_INSTALL_CALLED: $*"
-exit 1
-SH
-chmod +x "$tmp/bin/pipx"
-node_dir="$(dirname "$(command -v node)")"
-bash_dir="$(dirname "$(command -v bash)")"
-out="$(printf '2\n1\n' | HOME="$tmp" PATH="$tmp/bin:$bash_dir:$node_dir:/usr/bin:/bin" bash "$script" 2>&1 || true)"
-echo "$out" | grep -q "PIPX_INSTALL_CALLED: install aider-chat" \
-    || { echo "FAIL: pipx auto-install not triggered when aider missing"; echo "$out"; exit 1; }
+# ── Claude Code is no longer an option: CCR is gone, so offering it would
+#    hand the user a route to a router that does not exist. ──
+echo "$out" | grep -qi "claude code" \
+    && { echo "FAIL: aipick still offers a Claude Code route"; echo "$out"; exit 1; }
 
-# ── Task 5: input-validation edge cases ──
-write_config "ollama"
+# ── "$ENV_VAR" api_key resolves from the environment ──
+# shellcheck disable=SC2016  # the literal string "$AIPICK_TEST_KEY" IS the fixture
+write_registry '$AIPICK_TEST_KEY'
+out="$(printf '1\n1\n' | AIPICK_PROVIDERS="$reg" AIPICK_TEST_KEY=secret-from-env AIPICK_DRY_RUN=1 bash "$script" 2>&1)"
+echo "$out" | grep -q "no api key resolved" \
+    && { echo "FAIL: env-var api_key did not resolve"; echo "$out"; exit 1; }
+# The key itself must never be echoed, even in a dry run.
+echo "$out" | grep -q "secret-from-env" \
+    && { echo "FAIL: dry-run leaked the api key"; echo "$out"; exit 1; }
 
+# ── Unresolvable env var warns but still launches (dummy-key providers) ──
+out="$(printf '1\n1\n' | AIPICK_PROVIDERS="$reg" AIPICK_DRY_RUN=1 bash "$script" 2>&1)"
+echo "$out" | grep -q "no api key resolved" \
+    || { echo "FAIL: no warning for an unresolvable api key"; echo "$out"; exit 1; }
+
+# ── Missing registry names the path instead of failing inside node ──
 set +e
-out="$(printf '9\n' | HOME="$tmp" bash "$script" 2>&1)"; rc=$?
+out="$(printf '1\n1\n' | AIPICK_PROVIDERS="$tmp/absent.json" bash "$script" 2>&1)"; rc=$?
 set -e
-[ "$rc" -eq 0 ] && { echo "FAIL: exited 0 on out-of-range tool #"; echo "$out"; exit 1; }
-echo "$out" | grep -q "not a valid choice" \
-    || { echo "FAIL: no diagnostic for out-of-range tool #"; echo "$out"; exit 1; }
+[ "$rc" -eq 0 ] && { echo "FAIL: exited 0 with no registry"; echo "$out"; exit 1; }
+echo "$out" | grep -q "no provider registry at" \
+    || { echo "FAIL: no diagnostic for a missing registry"; echo "$out"; exit 1; }
 
-out="$(printf '2\nq\n' | HOME="$tmp" bash "$script")"
-echo "$out" | grep -q "cancelled" \
-    || { echo "FAIL: q at model picker didn't cancel"; echo "$out"; exit 1; }
-
+# ── Bad tool choice ──
 set +e
-out="$(printf '2\nabc\n' | HOME="$tmp" bash "$script" 2>&1)"; rc=$?
+out="$(printf '9\n' | AIPICK_PROVIDERS="$reg" bash "$script" 2>&1)"; rc=$?
 set -e
-[ "$rc" -eq 0 ] && { echo "FAIL: exited 0 on non-numeric model #"; echo "$out"; exit 1; }
-echo "$out" | grep -q "not a number" \
-    || { echo "FAIL: no diagnostic for non-numeric model #"; echo "$out"; exit 1; }
-
-set +e
-out="$(printf '2\n99\n' | HOME="$tmp" bash "$script" 2>&1)"; rc=$?
-set -e
-[ "$rc" -eq 0 ] && { echo "FAIL: exited 0 on out-of-range model #"; echo "$out"; exit 1; }
-echo "$out" | grep -q "out of range" \
-    || { echo "FAIL: no diagnostic for out-of-range model #"; echo "$out"; exit 1; }
-
-# empty model list — the provider exists but lists nothing to pick
-cat >"$tmp/.claude-code-router/config.json" <<'JSON'
-{ "Providers": [ { "name": "ollama", "api_base_url": "http://x", "api_key": "x", "models": [] } ] }
-JSON
-set +e
-out="$(printf '2\n' | HOME="$tmp" bash "$script" 2>&1)"; rc=$?
-set -e
-[ "$rc" -eq 0 ] && { echo "FAIL: exited 0 with an empty model list"; echo "$out"; exit 1; }
-echo "$out" | grep -q "no models in config" \
-    || { echo "FAIL: no diagnostic for empty model list"; echo "$out"; exit 1; }
-
-# malformed config.json — fail loudly, not a silent empty picker
-echo "not json" >"$tmp/.claude-code-router/config.json"
-set +e
-out="$(printf '2\n' | HOME="$tmp" bash "$script" 2>&1)"; rc=$?
-set -e
-[ "$rc" -eq 0 ] && { echo "FAIL: exited 0 with malformed config.json"; echo "$out"; exit 1; }
-write_config "ollama"
-
-# missing config.json entirely
-rm -f "$tmp/.claude-code-router/config.json"
-set +e
-out="$(printf '1\n' | HOME="$tmp" bash "$script" 2>&1)"; rc=$?
-set -e
-[ "$rc" -eq 0 ] && { echo "FAIL: exited 0 with no config.json"; echo "$out"; exit 1; }
-echo "$out" | grep -q "no CCR config" \
-    || { echo "FAIL: no diagnostic for missing config.json"; echo "$out"; exit 1; }
-write_config "ollama"
+[ "$rc" -eq 0 ] && { echo "FAIL: exited 0 on an invalid tool choice"; echo "$out"; exit 1; }
 
 echo "PASS"

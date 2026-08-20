@@ -1,0 +1,14 @@
+[Unit]
+Description=Claude Code Router health check — restart the router if it stops answering
+Documentation=https://github.com/musistudio/claude-code-router
+
+[Service]
+Type=oneshot
+Environment=CCR_HOST=127.0.0.1
+Environment=CCR_PORT=3456
+ExecStart=%h/.local/bin/ccr-health
+# The router this probe starts is a grandchild in the probe's cgroup, and a
+# finished oneshot has its whole cgroup torn down by default — which killed the
+# router one second after each successful repair, leaving a watchdog that
+# restarted the service every minute and never fixed it. Kill only the probe.
+KillMode=process

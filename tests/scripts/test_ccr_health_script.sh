@@ -76,6 +76,10 @@ HOME="$tmp/home" PATH="$stub_path" CCR_CALL_LOG="$log" CCR_PORT="$(cat "$tmp/por
     || { echo "FAIL: probe reported failure against a healthy router"; exit 1; }
 [ -s "$log" ] && { echo "FAIL: probe restarted a router that was answering"; cat "$log"; exit 1; }
 
+# A repair kills in-flight sessions, so one timed-out probe must not cause one.
+# Asserted structurally: a timing-based test of the retry would be flaky in CI.
+[ "$(grep -c "^probe && exit 0$" "$probe")" -eq 2 ]     || { echo "FAIL: probe repairs on a single failure instead of confirming"; exit 1; }
+
 # ── Router dead: stale state cleared, then started ──
 # Port 9 (discard) is closed everywhere.
 : >"$log"

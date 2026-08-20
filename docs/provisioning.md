@@ -63,7 +63,9 @@ insufficient.
 
 The CCR router is kept alive by a systemd user timer, `ccr-health.timer`,
 which probes `http://127.0.0.1:3456/` every minute and restarts the router
-when nothing answers.
+when two consecutive probes go unanswered. It confirms before repairing
+because `ccr stop` drops in-flight requests: one slow reply from a healthy
+router must not cost live sessions.
 
 It exists because `~/.claude/settings.json` pins `ANTHROPIC_BASE_URL` at that
 port and Claude Code has no direct-to-Anthropic fallback: a stopped router is

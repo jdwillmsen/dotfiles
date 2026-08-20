@@ -6,9 +6,9 @@ Description=Probe the Claude Code Router every minute and restart it if dead
 # a headless box nobody has logged into yet.
 OnBootSec=30s
 OnUnitActiveSec=1min
-# A missed window (box asleep or off) should repair on the next wake, not be
-# silently skipped until the following interval.
-Persistent=true
+# No Persistent=: systemd only honours it for OnCalendar= timers, so on a
+# monotonic timer it buys nothing. OnBootSec covers the machine-was-off case
+# this would otherwise be reached for.
 AccuracySec=5s
 
 [Install]

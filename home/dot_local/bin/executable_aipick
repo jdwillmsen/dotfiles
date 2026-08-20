@@ -70,12 +70,37 @@ base="${resolved#*$'\t'}"
 
 [ -n "$key" ] || echo "  ⚠ no api key resolved for $provider — launching anyway (dummy-key tolerant providers only)" >&2
 
+# ── Reachability gate ────────────────────────────────────────────────────────
+# A provider listed in the registry is not a provider that is running. A
+# stopped ollama or a powered-off LAN box surfaces inside aider as a retry
+# ladder of "InternalServerError - Connection error", naming neither the host
+# nor the cause, and inside qwen as a bare hang. Nine retries later you still
+# do not know which of the two it was.
+#
+# Any HTTP answer counts as reachable — 401/404 are normal, since providers
+# gate or omit /models — so only a transport failure is conclusive. Called
+# after each dry run exits, so printing a command never needs the network.
+require_reachable() {
+    [ "${AIPICK_SKIP_PROBE:-}" = "1" ] && return 0
+    curl -s -o /dev/null --max-time "${AIPICK_PROBE_TIMEOUT:-4}" "$base/models" && return 0
+    echo "  ✖ provider unreachable: $base" >&2
+    case "$provider" in
+        ollama)    echo "    ollama is not answering — is it installed and running?" >&2 ;;
+        gpu-stack) echo "    the LAN GPU box is not answering — is 192.168.1.50 powered on?" >&2 ;;
+    esac
+    # Not a tty (tests, scripts): fail rather than hang on a prompt nobody sees.
+    [ -t 0 ] || exit 1
+    read -rp "  launch anyway? [y/N] " yn
+    case "$yn" in [yY]*) return 0 ;; *) echo "  cancelled"; exit 1 ;; esac
+}
+
 case "$tool" in
   1)
     if [ "${AIPICK_DRY_RUN:-}" = "1" ]; then
       echo "  DRY-RUN OPENAI_API_KEY=*** OPENAI_API_BASE=\"$base\" aider --model \"openai/$model\""
       exit 0
     fi
+    require_reachable
     if ! command -v aider >/dev/null 2>&1; then
       echo "  aider not found — installing..." >&2
       if command -v pipx >/dev/null 2>&1; then
@@ -99,6 +124,7 @@ case "$tool" in
       echo "  DRY-RUN OPENAI_API_KEY=*** OPENAI_BASE_URL=\"$base\" OPENAI_MODEL=\"$model\" qwen"
       exit 0
     fi
+    require_reachable
     if ! command -v qwen >/dev/null 2>&1; then
       echo "  qwen not found — installing..." >&2
       if command -v npm >/dev/null 2>&1; then

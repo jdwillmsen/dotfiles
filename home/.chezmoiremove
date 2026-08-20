@@ -1,0 +1,7 @@
+# CCR (claude-code-router) was removed: it sat in Claude Code's hot path with
+# no routing rules, so a dead router meant every session failed. These are the
+# targets it left behind on machines that applied the old dotfiles.
+.claude-code-router
+.config/systemd/user/ccr-health.service
+.config/systemd/user/ccr-health.timer
+.local/bin/ccr-health

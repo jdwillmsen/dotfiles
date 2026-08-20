@@ -64,11 +64,9 @@ alias diskusage='du -sh * | sort -h'
 alias meminfo='free -h'
 alias cpuinfo='lscpu'
 
-# CCR — free/local fallback tier for Claude Code (use when Max caps out)
-alias ccrpick='bash ~/.claude-code-router/pick.sh'
-alias aipick='bash ~/.claude-code-router/aipick.sh'
-alias orfree='bash ~/.claude-code-router/refresh-openrouter-free.sh'
-alias orcheck='bash ~/.claude-code-router/check-openrouter-freshness.sh'
+# OpenRouter free-tier helpers for aipick's provider registry
+alias orfree='refresh-openrouter-free'
+alias orcheck='check-openrouter-freshness'
 
 # tmux
 alias tk='tmux-cheat'

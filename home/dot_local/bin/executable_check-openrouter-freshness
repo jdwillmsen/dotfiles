@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# check-openrouter-freshness — flag configured openrouter models OpenRouter no
+# longer serves free. The free tier churns without notice (see
+# refresh-openrouter-free) — a delisted slug fails at launch time as an opaque
+# 404 deep inside whichever tool aipick handed it to. This catches it ahead of
+# time instead.
+# Usage: check-openrouter-freshness [fixture.json]
+#   fixture.json — optional, forwarded to refresh-openrouter-free for testing
+#   instead of hitting the live endpoint.
+set -euo pipefail
+
+registry="${AIPICK_PROVIDERS:-$HOME/.config/aipick/providers.json}"
+[ -f "$registry" ] || { echo "no provider registry at $registry" >&2; exit 1; }
+
+configured="$(node -e '
+  const c = require(process.argv[1]);
+  const p = (c.providers || []).find(p => p.name === "openrouter");
+  for (const m of (p ? p.models : [])) console.log(m);
+' "$registry")"
+[ -n "$configured" ] || { echo "no openrouter models configured"; exit 0; }
+
+# Sibling command, resolved next to this one so a non-PATH invocation still
+# works (the tests run these straight out of the source tree).
+here="$(cd "$(dirname "$0")" && pwd)"
+if [ -x "$here/refresh-openrouter-free" ]; then
+  free="$("$here/refresh-openrouter-free" "${1:-}")"
+else
+  free="$(refresh-openrouter-free "${1:-}")"
+fi
+
+stale=()
+while IFS= read -r m; do
+  [ -n "$m" ] || continue
+  grep -qxF "$m" <<<"$free" || stale+=("$m")
+done <<<"$configured"
+
+if [ "${#stale[@]}" -gt 0 ]; then
+  echo "✖ configured openrouter model(s) no longer free:" >&2
+  printf '  %s\n' "${stale[@]}" >&2
+  exit 1
+fi
+echo "all configured openrouter models are currently free"

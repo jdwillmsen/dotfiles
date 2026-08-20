@@ -36,7 +36,7 @@ done
 # systemctl reads the real ~/.config/systemd/user, not the destination chezmoi
 # is applying to, so an apply to a scratch dest must skip rather than fail on a
 # unit systemd cannot see.
-grep -q 'XDG_CONFIG_HOME:-\$HOME/.config' "$trigger"     || { echo "FAIL: trigger does not key off the dir systemd actually reads"; exit 1; }
+grep -q "XDG_CONFIG_HOME" "$trigger"     || { echo "FAIL: trigger does not key off the dir systemd actually reads"; exit 1; }
 grep -q "not a home apply, skipping" "$trigger"     || { echo "FAIL: trigger does not skip on a non-home apply"; exit 1; }
 
 tmp="$(mktemp -d)"

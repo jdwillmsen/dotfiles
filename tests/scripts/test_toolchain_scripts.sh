@@ -2,13 +2,19 @@
 # shellcheck disable=SC2016  # patterns here match literal shell text in the scripts under test
 set -euo pipefail
 here="$(cd "$(dirname "$0")/../.." && pwd)"
+# shellcheck disable=SC1091  # dynamic path resolved at runtime; harness lives at tests/lib.sh
+. "$here/tests/lib.sh"
 cli="$here/home/run_once_42-install-cli-tools.sh"
 py="$here/home/run_once_45-install-python-tools.sh"
 cloud="$here/home/run_once_46-install-cloud-clis.sh"
 go="$here/home/run_once_47-install-go.sh"
 voice="$here/home/run_once_48-install-voice-audio-forward.sh"
-dev="$here/home/run_once_49-install-dev-tools.sh"
-shellcheck -s bash "$cli" "$py" "$cloud" "$go" "$voice" "$dev"
+dev="$here/home/run_once_49-install-dev-tools.sh.tmpl"
+shellcheck -s bash "$cli" "$py" "$cloud" "$go" "$voice"
+# $dev is a template: the installDevTooling guard makes everything below it
+# unreachable when rendered off, which is real to that render but not a
+# defect to flag, so shellcheck the on render — the one that actually runs.
+chez_render "$(chez_init personal true)" "$dev" | shellcheck -s bash -
 
 fail() { echo "FAIL: $1"; exit 1; }
 
@@ -213,6 +219,19 @@ grep -q 'checksums unavailable' "$dev" || fail "dev tooling must refuse an unver
 # 47 owns Go, from the upstream tarball, because go.mod pins a toolchain distro
 # packages trail — a catalog row would quietly reintroduce the older one.
 grep -qE '^go\|' <<< "$dev_rows" && fail "go must stay with 47, not the catalog"
+
+# chezmoi does not stop a run_once_ script from executing for an entry matched
+# only by .chezmoiignore (verified against a minimal reproduction) — the ignore
+# rule alone would leave installDevTooling's default `false` installing a
+# Docker daemon and a kubectl anyway. This is what actually has to hold.
+off_render="$(chez_render "$(chez_init personal)" "$dev")"
+echo "$off_render" | grep -q 'installDevTooling is off — skipping' ||
+    fail "dev tooling template does not guard on installDevTooling when off"
+on_render="$(chez_render "$(chez_init personal true)" "$dev")"
+echo "$on_render" | grep -q 'installDevTooling is off — skipping' &&
+    fail "dev tooling template still guards when installDevTooling is on"
+echo "$on_render" | grep -q 'Dev tooling provisioning complete' ||
+    fail "dev tooling template body missing from the opted-in render"
 
 # --- shared: set -e hazards --------------------------------------------------
 for s in "$cli" "$py" "$cloud" "$go" "$dev"; do

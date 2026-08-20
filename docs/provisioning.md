@@ -69,7 +69,7 @@ These run as part of `chezmoi apply` and need no root:
 | `run_once_45-install-python-tools.sh` | uv, pipx |
 | `run_once_46-install-cloud-clis.sh` | terraform, aws, gcloud, az |
 | `run_once_47-install-go.sh` | Go toolchain |
-| `run_once_49-install-dev-tools.sh` | docker, node/pnpm, rust, helm, gh, kubectl, talosctl, sops, age, Java — opt-in only |
+| `run_once_49-install-dev-tools.sh.tmpl` | docker, node/pnpm, rust, helm, gh, kubectl, talosctl, sops, age, Java — opt-in only |
 
 `42` is table-driven across brew, winget, scoop, apt, and cargo, in that order —
 prebuilt-binary managers first, cargo last because it compiles from source. The
@@ -118,18 +118,26 @@ gh, kubectl, talosctl, sops, age and a JDK. It exists because provisioning a dev
 VM otherwise meant installing eleven tools by hand over SSH, one at a time.
 
 It is **opt-in**, gated on an `installDevTooling` prompt answered at `chezmoi
-init` time and enforced as an ignore rule. A personal laptop has no business
-growing a Docker daemon and a kubectl because it applied dotfiles. The gate is
-an ignore rule rather than only a runtime check for the same reason the `CI`
-skips are: a `run_once_` script that exits 0 to say "skipping" is recorded as
-having run, so opting in later would never install anything.
+init` time. A personal laptop has no business growing a Docker daemon and a
+kubectl because it applied dotfiles. The script is a template
+(`run_once_49-install-dev-tools.sh.tmpl`) whose first lines are
+`{{ if not .installDevTooling }}exit 0{{ end }}`: chezmoi does not skip a
+`run_once_` script's *execution* for an entry matched only by
+`.chezmoiignore` (confirmed against a minimal reproduction — the CI skips on
+`42`/`46`/`47` are only saved by their own `[ -z "${CI:-}" ]` runtime guard,
+the ignore rule never actually kept them from running), so a template guard
+baked into the rendered script is what actually stops the install here. `49`
+also lists itself in `.chezmoiignore`, same as `42`/`46`/`47` do for `CI` —
+that keeps it out of `chezmoi status`/`ignored` run-once bookkeeping so
+opting in later still installs, since a `run_once_` script that exited 0 to
+say "skipping" is otherwise recorded as having run.
 
-That rule reads the value with `get` rather than a bare `.installDevTooling`,
-because a machine initialised before the prompt existed has no such key in its
-persisted config — a direct reference is a hard template error there, which
-would break every apply on every older machine instead of leaving the catalog
-off. Answering the prompt on an existing machine means re-running `chezmoi
-init`.
+That template guard reads the value with `get` rather than a bare
+`.installDevTooling`, because a machine initialised before the prompt existed
+has no such key in its persisted config — a direct reference is a hard
+template error there, which would break every apply on every older machine
+instead of leaving the catalog off. Answering the prompt on an existing
+machine means re-running `chezmoi init`.
 
 Like `42` it is a table, but each row also carries an install *kind*, because
 these tools do not share one distribution channel:

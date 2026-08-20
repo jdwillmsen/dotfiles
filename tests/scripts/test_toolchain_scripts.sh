@@ -2,12 +2,19 @@
 # shellcheck disable=SC2016  # patterns here match literal shell text in the scripts under test
 set -euo pipefail
 here="$(cd "$(dirname "$0")/../.." && pwd)"
+# shellcheck disable=SC1091  # dynamic path resolved at runtime; harness lives at tests/lib.sh
+. "$here/tests/lib.sh"
 cli="$here/home/run_once_42-install-cli-tools.sh"
 py="$here/home/run_once_45-install-python-tools.sh"
 cloud="$here/home/run_once_46-install-cloud-clis.sh"
 go="$here/home/run_once_47-install-go.sh"
 voice="$here/home/run_once_48-install-voice-audio-forward.sh"
+dev="$here/home/run_once_49-install-dev-tools.sh.tmpl"
 shellcheck -s bash "$cli" "$py" "$cloud" "$go" "$voice"
+# $dev is a template: the installDevTooling guard makes everything below it
+# unreachable when rendered off, which is real to that render but not a
+# defect to flag, so shellcheck the on render — the one that actually runs.
+chez_render "$(chez_init personal true)" "$dev" | shellcheck -s bash -
 
 fail() { echo "FAIL: $1"; exit 1; }
 
@@ -32,7 +39,7 @@ grep -qE 'sudo[^-]*apt-get' "$cli" && ! grep -q 'sudo -n apt-get' "$cli" &&
 # package's maintainer scripts run as root. Pin the set so a changed or added
 # package has to be an explicit, reviewed edit here rather than a one-word diff
 # in the table that reads like every other manager id.
-APT_ALLOWED='git-delta fd-find eza zoxide fzf direnv neovim unzip sox pulseaudio-utils libasound2-plugins alsa-utils cmake'
+APT_ALLOWED='git-delta fd-find eza zoxide fzf direnv neovim unzip sox pulseaudio-utils libasound2-plugins alsa-utils cmake ripgrep gh kubectl age openjdk-21-jdk'
 # Whole-token comparison, not `grep -w`: a hyphen is a word boundary to grep,
 # so `fd` and `find` would both pass against the allowed `fd-find`, and a
 # security boundary that accepts substrings of its own entries is not one.
@@ -65,6 +72,14 @@ for pkg in $voice_pkgs; do
     apt_allowed "$pkg" ||
         fail "voice-audio-forward script installs unreviewed apt package '$pkg'"
 done
+
+# rtk shells out to rg on every search, so ripgrep is a hard dependency of the
+# rtk install rather than an optional CLI — it must stay in the table.
+grep -qE '^rg\|' <<<"$rows" || fail "ripgrep row missing from the tool table"
+# An unlocked `cargo install` re-resolves transitive dependencies to their
+# newest semver-compatible releases, which is how eza's build broke on palette
+# while the same version built fine from its own lockfile.
+grep -q 'cargo install --locked' "$cli" || fail "cargo installs must be --locked"
 
 # Debian ships fd as fdfind; without the shim `command -v fd` keeps failing and
 # every apply reinstalls it.
@@ -136,8 +151,90 @@ build="$here/home/run_onchange_after_20-build-claude-status.sh.tmpl"
 grep -qF 'export PATH="$HOME/.local/bin:$PATH"' "$build" ||
     fail "claude-status build must put ~/.local/bin on PATH before probing for go"
 
+# --- 49: the dev tooling catalog ---------------------------------------------
+dev_rows="$(sed -n "/^TOOLS='$/,/^'$/p" "$dev" | grep '|')"
+[ -n "$dev_rows" ] || fail "dev tooling TOOLS table not found"
+while IFS= read -r row; do
+    n="$(awk -F'|' '{print NF}' <<< "$row")"
+    [ "$n" = 7 ] || fail "dev row '$row' has $n fields, expected 7"
+done <<< "$dev_rows"
+
+# This script is the second place repo content reaches root, and it reaches
+# further than 42 does: an apt-repo row installs a signing key and a source
+# list, after which that vendor can hand root anything it publishes. Pin the
+# hosts as well as the packages, so adding a trust root is a reviewed edit here
+# rather than a URL in a table where every other field is harmless.
+VENDOR_ALLOWED='get.docker.com sh.rustup.rs raw.githubusercontent.com cli.github.com pkgs.k8s.io github.com'
+vendor_allowed() {
+    local want="$1" h
+    [ -n "$want" ] || return 1
+    for h in $VENDOR_ALLOWED; do
+        [ "$h" = "$want" ] && return 0
+    done
+    return 1
+}
+url_host() { sed -E 's@^https://([^/]+)/.*@\1@; s@^https://([^/]+)$@\1@' <<< "$1"; }
+
+while IFS='|' read -r cmd kind _guard package url extra version; do
+    [ -n "$cmd" ] || continue
+    case "${kind%%+*}" in
+        apt)
+            apt_allowed "${package%%>*}" ||
+                fail "dev tooling apt package '$package' is not in the reviewed allowlist"
+            ;;
+        apt-repo)
+            apt_allowed "$package" ||
+                fail "dev tooling apt package '$package' is not in the reviewed allowlist"
+            vendor_allowed "$(url_host "$url")" ||
+                fail "$cmd signing key host is not in the reviewed allowlist"
+            vendor_allowed "$(url_host "${extra%% *}")" ||
+                fail "$cmd apt source host is not in the reviewed allowlist"
+            ;;
+        script)
+            vendor_allowed "$(url_host "$url")" ||
+                fail "$cmd installer host is not in the reviewed allowlist"
+            ;;
+        binary)
+            vendor_allowed "$(url_host "$url")" ||
+                fail "$cmd release host is not in the reviewed allowlist"
+            # A release asset has no signed repository behind it, so the pinned
+            # version and the vendor digest are the only things standing between
+            # a retagged release and a binary that talks to the cluster.
+            [ -n "$version" ] || fail "$cmd binary row has no pinned version"
+            [ -n "$extra" ] || fail "$cmd binary row has no checksum source"
+            grep -q '%v' <<< "$url" || fail "$cmd asset url does not use the pinned version"
+            ;;
+        *) fail "$cmd has unknown install kind '$kind'" ;;
+    esac
+done <<< "$dev_rows"
+
+grep -q 'sudo -n' "$dev" || fail "dev tooling must require non-interactive sudo"
+grep -qE 'sudo[^-]*apt-get' "$dev" && ! grep -q 'sudo -n apt-get' "$dev" &&
+    fail "dev tooling invokes apt-get without sudo -n"
+# An unsigned or globally-signed source lets any key on the machine sign for it.
+grep -q 'signed-by=' "$dev" || fail "dev tooling apt sources must be signed-by pinned"
+grep -qF '${CI:-}' "$dev" || fail "dev tooling install not skipped under CI"
+grep -q 'checksum mismatch' "$dev" || fail "dev tooling binary mismatch not rejected"
+grep -q 'checksums unavailable' "$dev" || fail "dev tooling must refuse an unverifiable download"
+# 47 owns Go, from the upstream tarball, because go.mod pins a toolchain distro
+# packages trail — a catalog row would quietly reintroduce the older one.
+grep -qE '^go\|' <<< "$dev_rows" && fail "go must stay with 47, not the catalog"
+
+# chezmoi does not stop a run_once_ script from executing for an entry matched
+# only by .chezmoiignore (verified against a minimal reproduction) — the ignore
+# rule alone would leave installDevTooling's default `false` installing a
+# Docker daemon and a kubectl anyway. This is what actually has to hold.
+off_render="$(chez_render "$(chez_init personal)" "$dev")"
+echo "$off_render" | grep -q 'installDevTooling is off — skipping' ||
+    fail "dev tooling template does not guard on installDevTooling when off"
+on_render="$(chez_render "$(chez_init personal true)" "$dev")"
+echo "$on_render" | grep -q 'installDevTooling is off — skipping' &&
+    fail "dev tooling template still guards when installDevTooling is on"
+echo "$on_render" | grep -q 'Dev tooling provisioning complete' ||
+    fail "dev tooling template body missing from the opted-in render"
+
 # --- shared: set -e hazards --------------------------------------------------
-for s in "$cli" "$py" "$cloud" "$go"; do
+for s in "$cli" "$py" "$cloud" "$go" "$dev"; do
     grep -qE '^[[:space:]]*(command -v|\[ -n).*&&$' "$s" &&
         fail "$(basename "$s"): trailing '&&' continuation aborts under set -e"
 done

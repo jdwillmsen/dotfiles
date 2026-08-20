@@ -9,6 +9,14 @@ run_once_46-install-cloud-clis.sh
 {{ if env "CI" }}
 run_once_46-install-cloud-clis.sh
 run_once_47-install-go.sh
+run_once_49-install-dev-tools.sh.tmpl
+{{ end }}
+{{/* `get`, not a bare .installDevTooling: a machine initialised before this
+     prompt existed has no such key in its persisted config, and a direct
+     reference is a hard template error there rather than a missing opt-in.
+     Absent reads as false, which is also the default this prompt ships. */}}
+{{ if not (get . "installDevTooling") }}
+run_once_49-install-dev-tools.sh.tmpl
 {{ end }}
 {{ if ne .chezmoi.os "windows" }}
 AppData/**

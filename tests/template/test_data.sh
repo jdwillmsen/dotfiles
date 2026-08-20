@@ -14,6 +14,12 @@ out="$(chez_tmpl "$cfg" '{{ .machineRole }}:{{ .isEphemeral }}')"
 want="$(cygpath -m "$CHEZ_SRC" 2>/dev/null || echo "$CHEZ_SRC")/home"
 out="$(chezmoi source-path --config "$cfg")"
 [ "$out" = "$want" ] || { echo "FAIL: source-path got '$out' want '$want'"; exit 1; }
+# The catalog gate is a data value, not only an ignore rule — it defaults off
+# and must survive round-tripping through the persisted config.
+out="$(chez_tmpl "$cfg" '{{ .installDevTooling }}')"
+[ "$out" = false ] || { echo "FAIL: installDevTooling default got '$out'"; exit 1; }
+out="$(chez_tmpl "$(chez_init personal true)" '{{ .installDevTooling }}')"
+[ "$out" = true ] || { echo "FAIL: installDevTooling opt-in got '$out'"; exit 1; }
 # isWSL must match an independent read of the same kernel marker the template checks.
 if grep -qiE 'microsoft|wsl' /proc/sys/kernel/osrelease 2>/dev/null; then want=true; else want=false; fi
 out="$(chez_tmpl "$cfg" '{{ .isWSL }}')"

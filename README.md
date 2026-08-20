@@ -47,6 +47,8 @@ sudo scripts/provision-swap.sh          # zram + swapfile tiers, sysctl tuning, 
 sudo scripts/provision-persistence.sh   # loginctl enable-linger, so a detached tmux server survives zero logins
 ```
 
+A dev/infra tooling catalog — Docker, Node/pnpm, Rust, helm, gh, kubectl, talosctl, sops, age, Java — sits on top of that, opt-in per machine via an `installDevTooling` prompt so a personal laptop does not grow a Docker daemon by accident.
+
 See [`docs/provisioning.md`](docs/provisioning.md) for what each layer does and why, including the kernel-package trap that silently disables zram after an upgrade, and [`docs/persistence.md`](docs/persistence.md) for the full session-persistence model (tmux, linger, resurrect/continuum).
 
 ## Secrets
@@ -62,6 +64,8 @@ The source tree templates itself per machine, selected by a `machineRole` prompt
 | `personal` | Default identity, no extra work-only git config. |
 | `work` | Work git identity + credential config layered in (`home/dot_gitconfig.tmpl`). |
 | `ephemeral` | Auto-detected in CI/devcontainers/Codespaces (`CI`, `REMOTE_CONTAINERS`, `CODESPACES` env vars); also selectable explicitly. |
+
+One further prompt at `init` time: `installDevTooling` (default `false`) gates the dev/infra tooling catalog described in [`docs/provisioning.md`](docs/provisioning.md#dev-tooling-catalog). Answering it on an existing machine means re-running `chezmoi init`.
 
 Other data derived automatically at init: `isWSL` (Windows Subsystem for Linux detection) gates WSL-specific templating.
 

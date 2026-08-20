@@ -65,11 +65,11 @@ These run as part of `chezmoi apply` and need no root:
 
 | Script | Installs |
 |---|---|
-| `run_once_41-install-rg.sh` | ripgrep (hard dependency of rtk) |
-| `run_once_42-install-cli-tools.sh` | delta, fd, eza, zoxide, starship, fzf, direnv, nvim, sox (Claude Code voice mode's audio recorder) |
+| `run_once_42-install-cli-tools.sh` | ripgrep, delta, fd, eza, zoxide, starship, fzf, direnv, nvim, sox (Claude Code voice mode's audio recorder), cmake |
 | `run_once_45-install-python-tools.sh` | uv, pipx |
 | `run_once_46-install-cloud-clis.sh` | terraform, aws, gcloud, az |
 | `run_once_47-install-go.sh` | Go toolchain |
+| `run_once_49-install-dev-tools.sh.tmpl` | docker, node/pnpm, rust, helm, gh, kubectl, talosctl, sops, age, Java — opt-in only |
 
 `42` is table-driven across brew, winget, scoop, apt, and cargo, in that order —
 prebuilt-binary managers first, cargo last because it compiles from source. The
@@ -80,6 +80,16 @@ different binary name than upstream (`fd-find` ships `fdfind`), the table
 carries a `pkg>binary` override and the script symlinks the expected name into
 `~/.local/bin`; without that, every apply would see the tool as missing and
 reinstall it.
+
+ripgrep sits in that table rather than in a script of its own because it is a
+hard dependency of rtk, which shells out to it on every search. As its own
+script it knew only brew/winget/scoop/cargo, so an apt-only machine got
+`ripgrep requires brew, winget, scoop, or cargo` and rtk then warned on every
+call. The cargo branch installs `--locked`: without it cargo re-resolves every
+transitive dependency to its newest semver-compatible release, so a crate the
+tool never pinned can break a build that succeeds from the tool's own lockfile.
+That is exactly how eza failed to compile `palette` on a toolchain where
+`--locked` built the same version fine.
 
 `45` and `46` follow the same no-root rule. uv installs to `~/.local/bin` with
 `INSTALLER_NO_MODIFY_PATH=1`, since the shell rc files are chezmoi-managed and
@@ -100,6 +110,58 @@ build script runs in its own process, so it prepends `~/.local/bin` to `PATH`
 before probing for `go`; without that it cannot see a toolchain the same apply
 just installed.
 
+## Dev tooling catalog
+
+`49` is the layer above `42`: the tooling a machine needs to build and operate
+things — Docker, Node via nvm with pnpm through corepack, Rust via rustup, helm,
+gh, kubectl, talosctl, sops, age and a JDK. It exists because provisioning a dev
+VM otherwise meant installing eleven tools by hand over SSH, one at a time.
+
+It is **opt-in**, gated on an `installDevTooling` prompt answered at `chezmoi
+init` time. A personal laptop has no business growing a Docker daemon and a
+kubectl because it applied dotfiles. The script is a template
+(`run_once_49-install-dev-tools.sh.tmpl`) whose first lines are
+`{{ if not .installDevTooling }}exit 0{{ end }}`: chezmoi does not skip a
+`run_once_` script's *execution* for an entry matched only by
+`.chezmoiignore` (confirmed against a minimal reproduction — the CI skips on
+`42`/`46`/`47` are only saved by their own `[ -z "${CI:-}" ]` runtime guard,
+the ignore rule never actually kept them from running), so a template guard
+baked into the rendered script is what actually stops the install here. `49`
+also lists itself in `.chezmoiignore`, same as `42`/`46`/`47` do for `CI` —
+that keeps it out of `chezmoi status`/`ignored` run-once bookkeeping so
+opting in later still installs, since a `run_once_` script that exited 0 to
+say "skipping" is otherwise recorded as having run.
+
+That template guard reads the value with `get` rather than a bare
+`.installDevTooling`, because a machine initialised before the prompt existed
+has no such key in its persisted config — a direct reference is a hard
+template error there, which would break every apply on every older machine
+instead of leaving the catalog off. Answering the prompt on an existing
+machine means re-running `chezmoi init`.
+
+Like `42` it is a table, but each row also carries an install *kind*, because
+these tools do not share one distribution channel:
+
+| Kind | Used by | Why |
+|---|---|---|
+| `apt` | age, Java | The distro package is current enough and needs no new trust root. |
+| `apt-repo` | gh, kubectl | Vendor ships a signed apt repo and the distro package trails it by releases. The key lands in `/etc/apt/keyrings` and the source is pinned to it with `signed-by=`, so no other key on the machine can sign for that repo. |
+| `script` | docker, node (nvm), rust (rustup), helm | Vendor publishes only a curl-pipe installer. |
+| `binary` | talosctl, sops | A bare release asset, with no packaged repo at all. |
+
+A kind may carry a `+root` suffix (docker, helm) for an installer that elevates
+internally, so that fact lives in the row rather than as a tool name hardcoded
+in the dispatcher. Everything needing root still goes through `sudo -n` and
+skips rather than prompting, so an apply on a machine without passwordless sudo
+degrades to a list of skips instead of hanging.
+
+`binary` rows are pinned to a version and verified against the vendor's own
+checksum file, refusing anything unverifiable — a release asset has no signed
+repository behind it, and talosctl in particular has to match the cluster it
+talks to rather than track latest. Go is deliberately *not* in this table: `47`
+already owns it from the upstream tarball, and an `apt` row would quietly
+reintroduce the older distro toolchain that `go.mod` outruns.
+
 `46` is skipped on ephemeral machines (see `home/.chezmoiignore`), and both `46`
 and `47` are skipped whenever `CI` is set. The ephemeral rule covers machines
 initialised with that role; the `CI` rule catches the smoke test, which
@@ -112,7 +174,9 @@ The `CI` skip is an ignore rule rather than only the runtime `[ -z "${CI:-}" ]`
 guard the scripts still carry, because chezmoi records a `run_once_` script as
 executed whenever it exits 0 — including the exit that reports "skipping". A
 machine that ever applied with `CI` set would then never install those tools
-again. An ignored script leaves no such state behind. The runtime guards remain
+again. An ignored script leaves no such state behind. `49` is ignored under `CI`
+on the same grounds — a Docker daemon and a cluster CLI are dead weight in a CI
+container. The runtime guards remain
 for anyone running a script directly.
 
 ## Download integrity
@@ -125,6 +189,7 @@ check, rather than installing it anyway:
 |---|---|
 | Go tarball (`47`) | the `sha256` field of the object naming that file in the version index — not the first `sha256` in the document, which belongs to the source archive |
 | terraform zip (`46`) | `terraform_<version>_SHA256SUMS` alongside the release |
+| talosctl and sops binaries (`49`) | the checksum file published alongside each pinned release |
 
 Go's pinned fallback version carries a pinned digest with it, so a machine that
 cannot reach the version index still installs a verified archive. Go earns the
@@ -155,6 +220,8 @@ version-pinned module package, six fields per row in the tool table, `sudo -n`
 on every privileged call, no `cond && action` line continuations (which abort
 the whole script under `set -e` whenever the condition is false), the
 persistence script's root check running before it enables linger with a
-`$SUDO_USER` fallback, and the tmux plugin installer being keyed to
+`$SUDO_USER` fallback, seven fields per row in the dev tooling table with every
+apt package *and* every vendor host on a reviewed allowlist and every `binary`
+row pinned and checksum-backed, and the tmux plugin installer being keyed to
 `dot_tmux.conf` changes with resurrect/continuum actually declared and
 auto-restore on.

@@ -1,0 +1,15 @@
+[Unit]
+Description=Probe the Claude Code Router every minute and restart it if dead
+
+[Timer]
+# Covers the cold-boot case: with linger on, this is what starts the router on
+# a headless box nobody has logged into yet.
+OnBootSec=30s
+OnUnitActiveSec=1min
+# A missed window (box asleep or off) should repair on the next wake, not be
+# silently skipped until the following interval.
+Persistent=true
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

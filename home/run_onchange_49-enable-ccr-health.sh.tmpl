@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Reload trigger — systemd caches unit files, so a chezmoi-applied edit is
+# inert until daemon-reload runs. Re-run whenever a unit or the probe changes.
+# {{ include "dot_config/systemd/user/ccr-health.service" | sha256sum }}
+# {{ include "dot_config/systemd/user/ccr-health.timer" | sha256sum }}
+# {{ include "dot_local/bin/executable_ccr-health" | sha256sum }}
+if [ "$(uname -s)" != "Linux" ]; then
+    echo "ccr-health: not Linux — skipping"; exit 0
+fi
+if ! command -v systemctl >/dev/null 2>&1 || ! systemctl --user show-environment >/dev/null 2>&1; then
+    echo "ccr-health: no systemd user manager — start the router with 'ccr start' manually"; exit 0
+fi
+
+systemctl --user daemon-reload
+systemctl --user enable --now ccr-health.timer
+# Repair immediately rather than waiting out the first interval, so a broken
+# router is fixed by the same `chezmoi apply` that installed the timer.
+systemctl --user start ccr-health.service || true
+
+# Linger is provisioned separately (scripts/provision-persistence.sh) because
+# it needs root. Warn rather than duplicate that logic: without it the user
+# manager dies at logout, so the timer never runs on a headless box and the
+# router stays dead exactly when nobody is watching.
+if [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" != "yes" ]; then
+    echo "ccr-health: linger is off — repair stops at logout; run: sudo scripts/provision-persistence.sh"
+fi
+echo "ccr-health: timer enabled"

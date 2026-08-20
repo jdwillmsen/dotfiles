@@ -59,6 +59,47 @@ detached tmux server has no active login session to hide behind. See
 tmux-resurrect/continuum into the full model, and why each layer alone is
 insufficient.
 
+## Router supervision
+
+The CCR router is kept alive by a systemd user timer, `ccr-health.timer`,
+which probes `http://127.0.0.1:3456/` every minute and restarts the router
+when nothing answers.
+
+It exists because `~/.claude/settings.json` pins `ANTHROPIC_BASE_URL` at that
+port and Claude Code has no direct-to-Anthropic fallback: a stopped router is
+not a degraded mode, it is every session on the box failing with
+`ConnectionRefused` until a human restarts it. That happened twice before this
+timer existed.
+
+```bash
+systemctl --user status ccr-health.timer     # is the watchdog armed
+journalctl --user -u ccr-health.service -f   # watch repairs as they happen
+~/.local/bin/ccr-health                      # probe and repair right now
+```
+
+Two properties of `ccr` shape the design and are easy to undo by accident:
+
+- It always double-forks, so the process a unit would supervise exits
+  immediately. `Type=simple` restart-loops and `Type=forking` has no pid file
+  to track — v3 keeps liveness in its own state, not
+  `~/.claude-code-router/*.pid`. Probing the port sidesteps the process model
+  and also catches an alive-but-not-listening router.
+- `ccr start` refuses to start while its own state claims an instance is live,
+  and after an unclean kill that claim outlives the process. The probe clears
+  it with `ccr stop` first; without that, every restart exits 0 without binding
+  a port.
+
+`KillMode=process` on the oneshot is load-bearing: the router it starts is a
+grandchild in the probe's cgroup, and a finished oneshot has its cgroup torn
+down by default, which killed the router one second after each repair.
+
+Repair depends on linger (see [Session persistence](#session-persistence)) —
+without it the user manager, and the timer with it, dies at logout.
+
+Note: `ccrpick`/`aipick` still target the ccr v1 API and are broken against
+v3, which made SQLite authoritative and reduced `config.json` to a one-time
+migration input. Migrating them is separate work.
+
 ## User-level toolchain
 
 These run as part of `chezmoi apply` and need no root:

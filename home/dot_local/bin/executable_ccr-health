@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+# Restart the CCR router if it is not answering on its port.
+#
+# ~/.claude/settings.json pins ANTHROPIC_BASE_URL at this port and Claude Code
+# has no direct-to-Anthropic fallback, so a stopped router is a total outage —
+# every session answers ConnectionRefused until someone restarts it by hand.
+# Twice now that someone was a human, hours later.
+#
+# This is a probe-and-repair timer rather than a supervised process because
+# `ccr start` always double-forks: the process systemd would supervise exits
+# immediately, so Type=simple restart-loops and Type=forking has no pid file to
+# track (v3 keeps liveness in its own state, not ~/.claude-code-router/*.pid).
+# Probing the port sidesteps the process model entirely, and catches the
+# alive-but-not-listening case a pid check would call healthy.
+set -uo pipefail
+
+host="${CCR_HOST:-127.0.0.1}"
+port="${CCR_PORT:-3456}"
+url="http://$host:$port/"
+
+# Any HTTP answer means the router is serving; 401/404 are normal on some
+# paths. Only a transport failure (curl exit 7) is conclusive.
+probe() { curl -s -o /dev/null --max-time 3 "$url"; }
+
+probe && exit 0
+
+# nvm publishes ccr onto PATH from .bashrc, which only interactive shells read.
+# A systemd unit gets none of it — that missing PATH is why nothing on this box
+# could restart the router automatically in the first place.
+if ! command -v ccr >/dev/null 2>&1; then
+    if [ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]; then
+        # shellcheck disable=SC1091  # nvm.sh is installed at runtime, not in-repo
+        . "${NVM_DIR:-$HOME/.nvm}/nvm.sh" >/dev/null 2>&1 || true
+    fi
+fi
+if ! command -v ccr >/dev/null 2>&1; then
+    # shellcheck disable=SC2012  # nvm version dirs are vN.N.N; no spaces to mishandle
+    newest="$(ls -1d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -n 1)"
+    [ -n "$newest" ] && export PATH="$newest:$PATH"
+fi
+command -v ccr >/dev/null 2>&1 || {
+    echo "ccr-health: ccr not found — npm i -g @musistudio/claude-code-router" >&2
+    exit 1
+}
+
+echo "ccr-health: no answer on $url — restarting router" >&2
+
+# `ccr start` refuses to start while its own state claims an instance is live.
+# After an unclean kill that claim outlives the process, so every later start
+# exits 0 without binding a port. Clearing it first is what makes this repair
+# actually repair.
+ccr stop >/dev/null 2>&1 || true
+ccr start >/dev/null 2>&1 || true
+
+for _ in $(seq 1 "${CCR_HEALTH_WAIT_TRIES:-20}"); do
+    probe && { echo "ccr-health: router back up" >&2; exit 0; }
+    sleep 1
+done
+
+echo "ccr-health: router still not answering on $url after restart" >&2
+exit 1

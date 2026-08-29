@@ -58,6 +58,12 @@ flowchart TB
 Any client attaches to the same session; none of them owns it. Close one,
 open another later, `tmux attach` picks up exactly where it was.
 
+The phone in that diagram reaches tmux through a terminal emulator, which is
+serviceable for checking on a run and awkward for anything else. For driving
+agent work from a phone directly — starting threads, reading diffs, approving
+steps — see [`t3code.md`](t3code.md), which runs a harness server beside this
+stack rather than inside it.
+
 ## Setting it up
 
 1. **Always work inside tmux**, not a bare login shell:

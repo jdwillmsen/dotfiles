@@ -262,7 +262,11 @@ auto-restore on.
 `tests/scripts/test_shell_script_coverage.sh` keeps that list honest: it
 shellchecks every shell file in the repo and fails if a new `scripts/` or
 `home/run_*` script has no test referencing it, so a provisioner cannot ship
-untested and unlinted the way one silently could before.
+untested and unlinted the way one silently could before. The two halves are
+deliberately asymmetric about templates: a `.sh.tmpl` is skipped by the lint
+sweep, because Go template source is not valid shell until chezmoi renders it,
+but it is still required to have a test — one that renders it via `chez_render`
+and asserts behaviour, which is where its shellcheck coverage comes from.
 
 The Tailscale test is the pattern to copy for anything new. Rather than reading
 the script's source, it puts stub `id`, `curl`, `apt-get`, `systemctl` and

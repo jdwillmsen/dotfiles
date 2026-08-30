@@ -64,3 +64,4 @@ printed credential cannot be un-printed, and revocation is a race.
 - **Not Claude Code's `! <command>`.** Bash mode appends its output to the
   session context, so the credential lands in the transcript anyway. Use it
   only when nothing else is to hand, and revoke the credential afterwards.
+- Worked example: `docs/t3code.md` in the dotfiles repo.

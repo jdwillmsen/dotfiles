@@ -16,7 +16,8 @@ into the same box.
 | Layer | Purpose |
 |---|---|
 | `tailscaled` (system service) | Reachable identity for the box from any network |
-| `t3code.service` (systemd **user** unit) | The agent harness server, port 3773 |
+| Tailscale Serve | TLS termination and tailnet identity check at the edge, proxying to the loopback server |
+| `t3code.service` (systemd **user** unit) | The agent harness server, bound to `127.0.0.1:3773` |
 | tmux + linger | Interactive SSH sessions, unchanged |
 
 The T3 Code server is a daemon nobody attaches to, so it belongs in systemd
@@ -32,7 +33,9 @@ sudo scripts/provision-tailscale.sh
 ```
 
 Installs the package, enables `tailscaled`, and joins the tailnet as
-`devbox` with Tailscale SSH on. Prints an auth URL to visit once.
+`devbox` with Tailscale SSH on; prints an auth URL to visit once. See
+[`provisioning.md`](provisioning.md#tailnet-access) for the script's
+environment overrides and re-run behaviour.
 
 Then, in the Tailscale admin console under DNS, enable **MagicDNS** and
 **HTTPS Certificates**. Both are required: T3 Code serves over the MagicDNS

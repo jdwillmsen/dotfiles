@@ -45,11 +45,12 @@ You'll be prompted for a machine role (see Targets below). Re-running `chezmoi a
 ```bash
 sudo scripts/provision-swap.sh          # zram + swapfile tiers, sysctl tuning, systemd-oomd
 sudo scripts/provision-persistence.sh   # loginctl enable-linger, so a detached tmux server survives zero logins
+sudo scripts/provision-tailscale.sh     # Tailscale + tailnet join, so the box is reachable by stable identity from any network
 ```
 
 A dev/infra tooling catalog — Docker, Node/pnpm, Rust, helm, gh, kubectl, talosctl, sops, age, Java — sits on top of that, opt-in per machine via an `installDevTooling` prompt so a personal laptop does not grow a Docker daemon by accident.
 
-See [`docs/provisioning.md`](docs/provisioning.md) for what each layer does and why, including the kernel-package trap that silently disables zram after an upgrade, and [`docs/persistence.md`](docs/persistence.md) for the full session-persistence model (tmux, linger, resurrect/continuum).
+See [`docs/provisioning.md`](docs/provisioning.md) for what each layer does and why, including the kernel-package trap that silently disables zram after an upgrade, [`docs/persistence.md`](docs/persistence.md) for the full session-persistence model (tmux, linger, resurrect/continuum), and [`docs/t3code.md`](docs/t3code.md) for the agent harness that sits on top of the tailnet so agent work can be driven from a phone.
 
 ## Secrets
 

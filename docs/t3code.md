@@ -83,7 +83,15 @@ npx t3@latest pair --tailscale --label iphone --ttl 15m
 origin, which is the difference between a link the phone can use and one it
 cannot. Prints a one-time token, a pairing URL, and a QR code; the token
 defaults to a 5 minute TTL. Scan it on the phone with Tailscale connected.
-After pairing, access is session-based for 30 days.
+
+After pairing, access is session-based for 30 days. That TTL is hard — nothing
+in T3 Code's environment-auth path renews, refreshes, or extends a live
+session, so it does not slide forward with use and day 31 is a re-pair rather
+than a prompt. Re-pairing means running `t3 pair` again, which needs a shell on
+the devbox. If the phone that just expired is the only device to hand, the
+terminal-free way back in is Tailscale's browser SSH console from the admin
+console — which is the reason the provisioner enables `--ssh` at all. It keeps
+"T3 Code is wedged" and "I cannot reach the box" from being the same failure.
 
 Run this in your own terminal rather than through an agent — the token is a
 credential and there is no reason to widen where it has been.

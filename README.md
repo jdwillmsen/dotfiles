@@ -52,6 +52,8 @@ A dev/infra tooling catalog — Docker, Node/pnpm, Rust, helm, gh, kubectl, talo
 
 See [`docs/provisioning.md`](docs/provisioning.md) for what each layer does and why, including the kernel-package trap that silently disables zram after an upgrade, [`docs/persistence.md`](docs/persistence.md) for the full session-persistence model (tmux, linger, resurrect/continuum), and [`docs/t3code.md`](docs/t3code.md) for the agent harness that sits on top of the tailnet so agent work can be driven from a phone.
 
+[`docs/services.md`](docs/services.md) inventories the long-lived daemons that result — which of them `chezmoi apply` recreates, which need one of the root scripts above, and which no repo can rebuild at all.
+
 ## Secrets
 
 Encrypted values (git work identity, etc.) are handled via age + pass. See [`docs/secrets.md`](docs/secrets.md) for key generation, storage, and CI setup.

@@ -93,7 +93,7 @@ dotfiles/
 bash tests/smoke.sh                                    # chezmoi apply into a temp HOME, assert key files
 for t in tests/template/*.sh; do bash "$t"; done       # template rendering unit tests
 for t in tests/scripts/*.sh; do bash "$t"; done        # run_* script unit tests
-find home scripts -name '*.sh' -exec shellcheck -s bash {} +
+bash tests/scripts/test_shell_script_coverage.sh       # shellcheck every shell file; assert each provisioner has a test
 ```
 
 ## Shell prompt

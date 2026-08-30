@@ -35,6 +35,7 @@ done
 
 # The dev tooling catalog installs a Docker daemon and a cluster CLI, so it is
 # opt-in per machine: off unless the prompt was answered true.
+# shellcheck disable=SC2043  # one opt-in script today; the loop is the list's shape
 for s in run_once_49-install-dev-tools.sh.tmpl; do
     grep -qx -- "$s" <<<"$out" || fail "$s must be off unless opted in"
 done

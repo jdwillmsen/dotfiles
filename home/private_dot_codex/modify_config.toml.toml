@@ -8,6 +8,7 @@ EXISTING="$(cat)"
 # Windows ships a python3 Store-stub that fails on exec; probe for a real one.
 PY=python3
 "$PY" -c "" >/dev/null 2>&1 || PY=python
+# shellcheck disable=SC2016  # the python program is literal source, not a shell expansion
 "$PY" -c '
 import re, sys
 sys.stdout.reconfigure(newline="\n")  # stop Windows text-mode \n->\r\n translation; script must be byte-stable across applies

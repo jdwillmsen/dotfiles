@@ -72,6 +72,11 @@ alias orcheck='check-openrouter-freshness'
 alias tk='tmux-cheat'
 alias tkc='tmux-cheat --custom'
 
+# Claude Code usage/cost tracking (ccusage — reads ~/.claude/projects locally)
+alias ccu='npx ccusage@latest daily'
+alias ccus='npx ccusage@latest session'
+alias ccub='npx ccusage@latest blocks --live'
+
 # Misc
 alias reload='source ~/.zshrc 2>/dev/null || source ~/.bashrc'
 alias dotfiles='cd "$(chezmoi source-path)"'

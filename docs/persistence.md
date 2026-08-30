@@ -32,6 +32,9 @@ SSH login with nothing protecting it, disconnecting kills it.
 | **`loginctl enable-linger`** | The *last* SSH session closing (zero logins at all) | The machine rebooting |
 | **tmux-resurrect + tmux-continuum** | tmux server death, VM reboot | Recovering a program's actual in-memory state — it restarts the pane in the same directory, it does not resume the process |
 
+Which daemons those layers are keeping alive — who owns each, and how to check
+one — is inventoried in [`services.md`](services.md).
+
 They stack. None of them alone covers "close the laptop, reboot the devbox a
 day later, come back to the same panes":
 

@@ -59,6 +59,39 @@ detached tmux server has no active login session to hide behind. See
 tmux-resurrect/continuum into the full model, and why each layer alone is
 insufficient.
 
+## Tailnet access
+
+```bash
+sudo scripts/provision-tailscale.sh
+```
+
+Idempotent; re-run it any time. Environment overrides: `TS_HOSTNAME` (defaults
+to `devbox`), plus `OS_RELEASE`, `KEYRING`, `SOURCES` and `BASE_URL`, which
+exist so the script's real behaviour can be exercised against stubs without
+root.
+
+Installs Tailscale from the vendor apt repo, enables `tailscaled`, and joins
+the tailnet as `devbox` with Tailscale SSH on. This is the reach layer for
+[`t3code.md`](t3code.md) — an agent harness server that a phone drives over the
+tailnet — and it deliberately opens no router port and adds no LAN-facing
+bind.
+
+Two things here are less obvious than they look. The re-run check is
+capability-based rather than liveness-based: `tailscale status` succeeding only
+proves the node is authenticated, not that it carries the pinned hostname and
+has SSH enabled, so the script compares the reported MagicDNS name and the
+`RunSSH` pref against what it wants and re-runs `tailscale up` with the full
+flag set whenever either has drifted. Skipping on liveness alone would leave a
+node joined under an inferred hostname — which moves the HTTPS URL out from
+under every paired device — and without the SSH break-glass that re-pairing
+depends on once a T3 Code session hits its hard 30-day TTL.
+
+The keyring and sources list are also published by atomic rename rather than
+streamed into place. `curl >dest` truncates the destination before the body
+arrives, so an interrupted transfer would leave partial bytes that still
+satisfy the "already present" guard, and apt would then fail GPG verification
+on every later run until someone deleted the file by hand.
+
 ## User-level toolchain
 
 These run as part of `chezmoi apply` and need no root:
@@ -211,6 +244,7 @@ All layers are covered by the script unit tests, which run in CI:
 bash tests/scripts/test_provision_swap_script.sh
 bash tests/scripts/test_toolchain_scripts.sh
 bash tests/scripts/test_provision_persistence_script.sh
+bash tests/scripts/test_provision_tailscale_script.sh
 bash tests/scripts/test_tmux_plugins_script.sh
 ```
 
@@ -225,3 +259,14 @@ apt package *and* every vendor host on a reviewed allowlist and every `binary`
 row pinned and checksum-backed, and the tmux plugin installer being keyed to
 `dot_tmux.conf` changes with resurrect/continuum actually declared and
 auto-restore on.
+
+The Tailscale test is the pattern to copy for anything new. Rather than reading
+the script's source, it puts stub `id`, `curl`, `apt-get`, `systemctl` and
+`tailscale` binaries on a sealed `PATH` and runs the real script against them,
+asserting on what the run does: that the root and Ubuntu guards fire before
+anything is mutated, that a converged node touches neither apt nor `tailscale
+up`, that an authenticated node with SSH off or an inferred hostname is still
+converged, and that a truncated keyring download leaves no file behind to
+poison the next run. Sealing the `PATH` matters — inheriting the caller's would
+let a real `tailscale` on the test machine answer for the stub, and the cases
+that matter would silently assert nothing.

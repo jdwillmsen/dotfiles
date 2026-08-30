@@ -49,3 +49,18 @@ and launch with `-n <KEY>`, so `/resume` and the tab title are scannable.
 Deliberately not named `claude` — shadowing the real binary breaks
 `claude agents --json`. Prefer `cj` over bare `claude` when inside a
 ticket-named worktree.
+
+## Credential-minting commands — human's terminal, not an agent's
+
+Commands that mint, print, or exchange a credential (pairing tokens, auth
+codes, QR codes, API keys, recovery codes, session tokens) never run through
+an agent's shell tool — that output is persisted in transcripts and logs, a
+printed credential cannot be un-printed, and revocation is a race.
+
+- **Prepare, then hand over.** Do the install and config up to that point,
+  then give the human the exact command to run in a terminal *outside* the
+  agent session — a separate SSH login, a tmux pane, a local shell — so the
+  secret reaches no transcript at all.
+- **Not Claude Code's `! <command>`.** Bash mode appends its output to the
+  session context, so the credential lands in the transcript anyway. Use it
+  only when nothing else is to hand, and revoke the credential afterwards.

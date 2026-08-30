@@ -259,6 +259,10 @@ apt package *and* every vendor host on a reviewed allowlist and every `binary`
 row pinned and checksum-backed, and the tmux plugin installer being keyed to
 `dot_tmux.conf` changes with resurrect/continuum actually declared and
 auto-restore on.
+`tests/scripts/test_shell_script_coverage.sh` keeps that list honest: it
+shellchecks every shell file in the repo and fails if a new `scripts/` or
+`home/run_*` script has no test referencing it, so a provisioner cannot ship
+untested and unlinted the way one silently could before.
 
 The Tailscale test is the pattern to copy for anything new. Rather than reading
 the script's source, it puts stub `id`, `curl`, `apt-get`, `systemctl` and

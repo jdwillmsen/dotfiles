@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016  # patterns here match literal shell text in the script under test
 set -euo pipefail
 here="$(cd "$(dirname "$0")/../.." && pwd)"
 script="$here/scripts/provision-persistence.sh"

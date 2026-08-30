@@ -16,6 +16,7 @@ timeout="$(awk '
 # Must stay above starship's 30ms default, which is tight enough that ordinary
 # large repos time out and lose their detection-gated modules. No value covers
 # a cold C:\Windows\System32 (~16s); the .bashrc cwd guard handles that.
+# shellcheck disable=SC2015  # unset and too-low are the same failure; the || is the else
 [ -n "$timeout" ] && [ "$timeout" -gt 30 ] \
     || { echo "FAIL: top-level scan_timeout is '${timeout:-unset}', not above the 30ms default"; exit 1; }
 

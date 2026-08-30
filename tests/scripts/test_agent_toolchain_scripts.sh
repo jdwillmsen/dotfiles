@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016  # patterns here match literal shell text in the scripts under test
 set -euo pipefail
 here="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091  # dynamic path resolved at runtime; harness lives at tests/lib.sh

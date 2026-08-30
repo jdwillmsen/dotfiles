@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016  # patterns here match literal shell text in the script under test
 set -euo pipefail
 here="$(cd "$(dirname "$0")/../.." && pwd)"
 script="$here/scripts/provision-swap.sh"
@@ -19,6 +20,7 @@ grep -q 'linux-modules-extra-\$(uname -r)' "$script" || fail "running-kernel mod
 # the compressed tier never gets used.
 zram_pri="$(sed -n 's/^ZRAM_PRIORITY=${ZRAM_PRIORITY:-\([0-9]*\)}$/\1/p' "$script")"
 file_pri="$(sed -n 's/^SWAPFILE_PRIORITY=${SWAPFILE_PRIORITY:-\([0-9]*\)}$/\1/p' "$script")"
+# shellcheck disable=SC2015  # either value being empty is the same failure; the || is the else
 [ -n "$zram_pri" ] && [ -n "$file_pri" ] || fail "swap priorities not parseable"
 [ "$zram_pri" -gt "$file_pri" ] || fail "zram priority ($zram_pri) must exceed swapfile ($file_pri)"
 

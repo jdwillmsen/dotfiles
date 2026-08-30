@@ -61,6 +61,11 @@ insufficient.
 
 ## Tailnet access
 
+A first run on an unauthenticated node prints a one-time login URL — an
+authorization credential, since whoever opens it attaches this node to a
+tailnet. Run it in your own terminal, not an agent's shell tool, which would
+persist that URL in a transcript and its logs.
+
 ```bash
 sudo scripts/provision-tailscale.sh
 ```

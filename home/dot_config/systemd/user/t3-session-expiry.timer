@@ -1,0 +1,15 @@
+[Unit]
+Description=Daily check for T3 Code sessions nearing expiry
+
+[Timer]
+# Daily, not monotonic: the threshold is measured in days, so anything finer
+# only repeats the same answer, and a calendar timer is also the only kind
+# systemd honours Persistent= for.
+OnCalendar=daily
+# A box that was suspended or off through the scheduled run must still get
+# its warning — silently skipping days eats a 7-day window fast.
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target

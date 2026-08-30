@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# t3-session-expiry — warn before a paired T3 Code device loses its session.
+#
+# T3 Code issues bearer sessions with a hard 30-day TTL and no sliding
+# renewal, so a device that works every day still lapses on schedule.
+# Re-pairing needs a shell on this box, which is the whole problem: when the
+# lapsing session belongs to the phone and the phone is the only device to
+# hand, the failure and the fix are locked behind each other. The warning has
+# to arrive days ahead of that, not at it.
+#
+# Usage: t3-session-expiry [DAYS]
+#   DAYS — warn about sessions expiring within this many days (default 7);
+#          also settable as T3_SESSION_EXPIRY_DAYS.
+# Exit: 0 nothing due, 1 action needed, 2 could not check.
+set -euo pipefail
+
+EXIT_ACTION=1
+EXIT_UNKNOWN=2
+
+days="${1:-${T3_SESSION_EXPIRY_DAYS:-7}}"
+case "$days" in
+    '' | *[!0-9]*)
+        echo "t3-session-expiry: threshold must be a whole number of days, got '$days'" >&2
+        exit "$EXIT_UNKNOWN"
+        ;;
+esac
+
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}"
+marker="$state_dir/t3-session-expiry.warn"
+
+# nvm publishes node onto PATH from the interactive shell rc, which a systemd
+# user unit never reads. Without this recovery the timer would report a
+# missing t3 every day instead of ever checking a session.
+if ! command -v t3 >/dev/null 2>&1 && ! command -v npx >/dev/null 2>&1; then
+    # shellcheck disable=SC2012  # nvm version dirs are vN.N.N; no spaces to mishandle
+    newest="$(ls -1d "$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort -V | tail -n 1 || true)"
+    if [ -n "$newest" ]; then
+        PATH="$newest:$PATH"
+        export PATH
+    fi
+fi
+
+if command -v t3 >/dev/null 2>&1; then
+    t3_cmd=(t3)
+elif command -v npx >/dev/null 2>&1; then
+    # T3 Code ships over npm and is not installed as a binary here, so the
+    # npx form is the normal path rather than the fallback.
+    t3_cmd=(npx t3@latest)
+else
+    echo "t3-session-expiry: neither t3 nor npx is available — cannot check session expiry" >&2
+    exit "$EXIT_UNKNOWN"
+fi
+
+if ! raw="$("${t3_cmd[@]}" auth session list 2>&1)"; then
+    echo "t3-session-expiry: '${t3_cmd[*]} auth session list' failed:" >&2
+    printf '%s\n' "$raw" >&2
+    exit "$EXIT_UNKNOWN"
+fi
+
+now="$(date +%s)"
+threshold=$((days * 86400))
+
+sessions=0
+due_lines=()
+unknown_lines=()
+
+id=""
+client=""
+expires=""
+fields=0
+
+flush_record() {
+    # A top-level line with no indented fields under it is CLI chrome, not a
+    # session; counting it would turn "no sessions" into a bogus warning.
+    if [ -z "$id" ] || [ "$fields" -eq 0 ]; then
+        return 0
+    fi
+    sessions=$((sessions + 1))
+
+    local label="$id"
+    if [ -n "$client" ]; then
+        label="$id [$client]"
+    fi
+
+    # `date -d ""` resolves to midnight today and exits 0, so an absent
+    # expiry would read as "expiring right now" rather than as unparseable.
+    local epoch
+    if [ -z "$expires" ] || ! epoch="$(date -d "$expires" +%s 2>/dev/null)"; then
+        unknown_lines+=("$label — expiry missing or unreadable: '${expires:-<absent>}'")
+        return 0
+    fi
+
+    local remaining=$((epoch - now))
+    if [ "$remaining" -le 0 ]; then
+        due_lines+=("EXPIRED $((-remaining / 86400))d ago — $label")
+    elif [ "$remaining" -le "$threshold" ]; then
+        due_lines+=("expires in $((remaining / 86400))d ($expires) — $label")
+    fi
+}
+
+while IFS= read -r line; do
+    case "$line" in
+        '') continue ;;
+        [[:space:]]*)
+            trimmed="${line#"${line%%[![:space:]]*}"}"
+            fields=$((fields + 1))
+            case "$trimmed" in
+                'expires: '*) expires="${trimmed#expires: }" ;;
+                'client: '*) client="${trimmed#client: }" ;;
+            esac
+            ;;
+        *)
+            flush_record
+            id="$line"
+            client=""
+            expires=""
+            fields=0
+            ;;
+    esac
+done <<<"$raw"
+flush_record
+
+if [ "$sessions" -eq 0 ] && [ "${#unknown_lines[@]}" -eq 0 ]; then
+    echo "t3-session-expiry: no sessions reported — nothing is paired with this box"
+    exit 0
+fi
+
+if [ "${#unknown_lines[@]}" -gt 0 ]; then
+    echo "t3-session-expiry: could not read an expiry for:" >&2
+    printf '  %s\n' "${unknown_lines[@]}" >&2
+fi
+
+if [ "${#due_lines[@]}" -gt 0 ]; then
+    echo "✖ T3 Code session(s) expiring within ${days}d — re-pair before they lapse:" >&2
+    printf '  %s\n' "${due_lines[@]}" >&2
+    mkdir -p "$state_dir"
+    {
+        echo "T3 Code session(s) expiring within ${days}d:"
+        printf '  %s\n' "${due_lines[@]}"
+    } >"$marker"
+    exit "$EXIT_ACTION"
+fi
+
+# The marker is cleared only on a conclusive all-clear. A run that could not
+# read every session knows nothing about the ones it missed, so it must not
+# retract a warning an earlier run earned.
+if [ "${#unknown_lines[@]}" -gt 0 ]; then
+    exit "$EXIT_UNKNOWN"
+fi
+
+rm -f "$marker"
+echo "$sessions T3 Code session(s), none expiring within ${days}d"

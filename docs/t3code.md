@@ -101,6 +101,37 @@ credential and there is no reason to widen where it has been.
 
 `npx t3@latest auth` lists and revokes credentials and sessions.
 
+### 4. Expiry warning
+
+Day 31 arrives silently, so a timer watches for it. `~/.local/bin/t3-session-expiry`
+reports any session inside a threshold — 7 days by default, overridable
+per-run or through `T3_SESSION_EXPIRY_DAYS` in the service unit:
+
+```bash
+t3-session-expiry        # default 7-day window
+t3-session-expiry 14     # widen it for a one-off look
+```
+
+Exit codes are the contract: `0` nothing due, `1` a session is inside the
+window or has already lapsed, `2` the check could not run. That last split
+matters — a check that could not reach T3 Code must never read as an
+all-clear. A non-zero exit is deliberately left to surface as a *failed* unit
+rather than masked, so the verdict shows up without reading the journal:
+
+```bash
+systemctl --user list-timers t3-session-expiry.timer
+systemctl --user status t3-session-expiry.service
+```
+
+A due run also drops `~/.local/state/t3-session-expiry.warn` naming the
+affected sessions; only a conclusive all-clear clears it, so an inconclusive
+run leaves a standing warning alone. The check re-derives nvm's node path for
+the same reason the generated `t3code.service` hardcodes one (see Operating
+notes): a systemd user unit inherits no interactive `PATH`.
+
+`chezmoi apply` reloads and enables the timer; by hand, `systemctl --user
+daemon-reload && systemctl --user enable --now t3-session-expiry.timer`.
+
 ## Operating notes
 
 **Pairing tokens are passwords.** The token rides in the URL fragment, so it

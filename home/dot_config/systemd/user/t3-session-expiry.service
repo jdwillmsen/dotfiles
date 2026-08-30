@@ -1,0 +1,16 @@
+[Unit]
+Description=Warn about T3 Code sessions nearing their hard 30-day expiry
+
+[Service]
+Type=oneshot
+Environment=T3_SESSION_EXPIRY_DAYS=7
+ExecStart=%h/.local/bin/t3-session-expiry
+# No SuccessExitStatus: a session inside the warning window exits non-zero on
+# purpose, and letting systemd record that as a failed unit is the feature —
+# `systemctl --user is-failed` becomes the one-line answer to "am I about to
+# lose the phone?" without reading the journal.
+#
+# The check resolves T3 Code through npx, which may fetch the package before
+# it can answer; bound that so a stalled fetch cannot pin the unit activating
+# until the next boot.
+TimeoutStartSec=180

@@ -141,7 +141,14 @@ chmod +x "$trig_tmp/bin/loginctl"
 run_trigger() {  # $1 = HOME to run the trigger under; sets $trig_out and $trig_rc
     : >"$call_log"
     set +e
+    # BASH_ENV is re-sourced by bash on every non-interactive script launch,
+    # including this one. If the ambient CI shell sets it (common for tool
+    # shims that prepend real system dirs onto PATH), that re-source would
+    # silently widen PATH="$trig_sealed" back open, letting the real
+    # systemctl/loginctl leak into a supposedly hermetic run. Pin it to
+    # /dev/null so sourcing it is a no-op regardless of what the caller has.
     trig_out="$(PATH="$trig_sealed" HOME="$1" USER="tester" CALL_LOG="$call_log" \
+        BASH_ENV=/dev/null \
         STUB_MANAGER_HOME="${STUB_MANAGER_HOME:-}" STUB_NO_MANAGER="${STUB_NO_MANAGER:-0}" \
         STUB_LINGER="${STUB_LINGER:-no}" "$trig_bash" "$trigger" 2>&1)"
     trig_rc=$?
@@ -205,7 +212,10 @@ stub_t3() {  # heredoc on stdin becomes the stub's stdout; $1 = exit code
 
 run_check() {  # $@ = args to the check; sets $out and $rc
     set +e
-    out="$(PATH="$sealed" HOME="$tmp/home" XDG_STATE_HOME="$tmp/state" \
+    # See run_trigger's BASH_ENV comment above: bash re-sources it on every
+    # non-interactive launch, which could reopen this sealed PATH and let the
+    # check reach a real npx instead of the stub.
+    out="$(PATH="$sealed" HOME="$tmp/home" XDG_STATE_HOME="$tmp/state" BASH_ENV=/dev/null \
         "$bash_bin" "$check" "$@" 2>&1)"
     rc=$?
     set -e

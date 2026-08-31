@@ -108,6 +108,7 @@ These run as part of `chezmoi apply` and need no root:
 | `run_once_46-install-cloud-clis.sh` | terraform, aws, gcloud, az |
 | `run_once_47-install-go.sh` | Go toolchain |
 | `run_once_49-install-dev-tools.sh.tmpl` | docker, node/pnpm, rust, helm, gh, kubectl, talosctl, sops, age, Java — opt-in only |
+| `run_onchange_43-install-agent-clis.sh.tmpl` | the CLIs the agent skills drive — version-pinned, see below |
 
 `42` is table-driven across brew, winget, scoop, apt, and cargo, in that order —
 prebuilt-binary managers first, cargo last because it compiles from source. The
@@ -217,6 +218,50 @@ on the same grounds — a Docker daemon and a cluster CLI are dead weight in a C
 container. The runtime guards remain
 for anyone running a script directly.
 
+## Agent CLI versions
+
+`43` installs the CLIs the agent skills drive, from the `agentClis` table in
+`home/.chezmoidata.yaml`. Each row declares a `version`, and that declaration
+does two jobs: it is the version the script converges the machine to, and —
+because it is rendered into the script — it is also what makes the script run
+again. Upgrading is a one-line edit to the table, reviewed in a diff like any
+other change, rather than a machine-local act nobody else can see.
+
+It guards on *version*, not on presence. The guard used to be `command -v`, so
+any installed build read as done and no apply ever advanced a tool again: a
+machine sat months behind while the CLI itself printed an upgrade banner on
+every invocation. Every row now prints its installed-versus-declared pair
+before deciding anything, so a machine that is behind says so even in the cases
+where nothing can be done about it automatically.
+
+`run_onchange_` rather than `run_once_`, because of rollbacks. `run_once_` keys
+its state on every content hash it has *ever* run, so bumping a pin re-runs but
+putting it back does not — the one case where a pin must not be a no-op.
+`run_onchange_` keys on the script name and re-runs whenever the contents
+differ from the last run, in either direction.
+
+The declared version is then enforced as far as each channel allows, and no
+further:
+
+| Kind | Pin | Why |
+|---|---|---|
+| `npm` | exact, `npm install -g <pkg>@<version>` | the registry addresses versions directly |
+| `script` | checked afterwards, not passed in | the vendor ships a curl-pipe installer that resolves its own "latest" and accepts no version input |
+
+That asymmetry is announced rather than hidden: a `script` row re-reads the
+tool's version after installing and reports a mismatch against the declared
+value, so an installer that overshot the pin is visible instead of quietly
+redefining it. Reconciling that means bumping the declared version, which is
+again a repo edit. Pinning such a row properly would mean this repo
+reimplementing the vendor's installer around a checksummed release asset — the
+`binary` shape `49` already uses — which is worth doing only if the vendor
+keeps publishing latest-only installers.
+
+Nothing here fails an apply: a missing `curl` or `npm`, a failed install and an
+overshoot all print and continue, since `chezmoi apply` runs unattended. An
+installer runs only when a tool is absent or its version differs from the
+declared one, so a converged machine touches no network and no package manager.
+
 ## Download integrity
 
 Two of these scripts fetch an archive and put its contents on `PATH`, so both
@@ -235,11 +280,13 @@ stricter treatment because it lands ahead of the system directories on `PATH`
 *and* builds `claude-status`, which Claude Code executes on every statusline
 render — a swapped archive there compromises every later build.
 
-Three paths remain unverified, and knowingly so: the uv installer is a
+Four paths remain unverified, and knowingly so: the uv installer is a
 pipe-to-shell, the AWS CLI publishes only a detached GPG signature (which needs
-a key imported before it means anything), and `az` comes from PyPI through uv.
-All are HTTPS fetches from vendor-controlled hosts, so the exposure is a vendor
-or CDN compromise rather than anything a network attacker can reach.
+a key imported before it means anything), `az` comes from PyPI through uv, and
+the agent CLI installers in `43` are vendor pipe-to-shell scripts that resolve
+their own version. All are HTTPS fetches from vendor-controlled hosts, so the
+exposure is a vendor or CDN compromise rather than anything a network attacker
+can reach.
 
 ## Testing
 
@@ -251,6 +298,7 @@ bash tests/scripts/test_toolchain_scripts.sh
 bash tests/scripts/test_provision_persistence_script.sh
 bash tests/scripts/test_provision_tailscale_script.sh
 bash tests/scripts/test_tmux_plugins_script.sh
+bash tests/scripts/test_agent_toolchain_scripts.sh
 ```
 
 They shellcheck each script and assert the invariants that are easy to break by
@@ -272,6 +320,15 @@ deliberately asymmetric about templates: a `.sh.tmpl` is skipped by the lint
 sweep, because Go template source is not valid shell until chezmoi renders it,
 but it is still required to have a test — one that renders it via `chez_render`
 and asserts behaviour, which is where its shellcheck coverage comes from.
+
+`tests/scripts/test_agent_toolchain_scripts.sh` covers `43` the same way: it
+renders the template and runs it against stub `curl`, `npm` and CLI binaries on
+a sealed `PATH`, asserting that an absent tool installs at the declared
+version, a tool already at that version invokes no installer at all, a stale
+one advances rather than being skipped, and a vendor installer landing past the
+declared version is reported. Reading the script's source could not have caught
+the bug it exists for — a presence check and a version check look alike until
+you run them against a tool that is present but old.
 
 The Tailscale test is the pattern to copy for anything new. Rather than reading
 the script's source, it puts stub `id`, `curl`, `apt-get`, `systemctl` and

@@ -32,9 +32,9 @@ manual step on a new machine.
 | Tool | Role | Enforced by |
 |---|---|---|
 | **AXI** (`axi`, `axi-quickref` skills) | Design standard for any CLI an agent drives. 10 principles; TOON output is ~40% cheaper than JSON. | `axi` via `agentSkills`; `axi-quickref` is hand-written and vendored in `private_dot_claude/skills/` |
-| **no-mistakes** | Validation pipeline: branch → commit → isolated worktree → infer intent → rebase → adversarial review → e2e test with evidence → docs → lint → push → PR → babysit until merged. | CLI via `agentClis`; its `/no-mistakes` skill is installed by `no-mistakes init`, not by the skills CLI |
+| **no-mistakes** | Validation pipeline: branch → commit → isolated worktree → infer intent → rebase → adversarial review → e2e test with evidence → docs → lint → push → PR → babysit until merged. | CLI via `agentClis`, pinned to a version declared there; its `/no-mistakes` skill is installed by `no-mistakes init`, not by the skills CLI |
 | **lavish** | Interactive HTML planning artifacts instead of a wall-of-text plan. | Skill via `agentSkills`; the CLI itself runs through `npx -y lavish-axi`, so nothing is installed |
-| **gnhf** | Long-running unattended loop with hard token/iteration caps. Built for overnight runs. | CLI via `agentClis` |
+| **gnhf** | Long-running unattended loop with hard token/iteration caps. Built for overnight runs. | CLI via `agentClis`, pinned to a version declared there |
 | **whisper-local** | Local voice input. The highest-leverage single change — dictation is roughly 3× typing throughput. | `run_onchange_after_50-install-whisper-local.sh.tmpl` |
 | **mattpocock/skills** | General engineering skills (tdd, diagnosing-bugs, code-review, …). | `claudePlugins` marketplace install; loads namespaced as `mattpocock-skills:*` |
 | **caveman** | Token-efficient output mode. | `claudePlugins` marketplace install |

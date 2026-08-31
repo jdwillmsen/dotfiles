@@ -50,11 +50,19 @@ agentSkills:
     source: vercel-labs/skills
 # CLIs the skills above drive. lavish is absent because its skill shells out to
 # `npx -y lavish-axi`, so there is nothing to install.
+# `version` is the version this repo wants, in the vendor's own tag format —
+# bumping it here is both the upgrade and the trigger that re-runs the install
+# script. npm rows install exactly it; script rows are vendor curl-pipe
+# installers that take no version input, so there the declared value is what
+# the result is checked against afterwards rather than something that can be
+# handed to the installer (see docs/provisioning.md).
 agentClis:
   - name: no-mistakes
     kind: script
+    version: v1.60.2
     posixUrl: "https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh"
     windowsUrl: "https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.ps1"
   - name: gnhf
     kind: npm
+    version: 0.1.47
     package: gnhf

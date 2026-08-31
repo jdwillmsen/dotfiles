@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# CLIs the agent skills drive. Each row declares the version this repo wants,
+# so an upgrade is a reviewable one-line edit to .chezmoidata.yaml rather than
+# an invisible "whatever landed on the box first" — and because the declared
+# version is rendered into this script, bumping it is also what re-triggers
+# the run. run_onchange_ rather than run_once_ for the reverse direction:
+# run_once_ keys on the content hash it has *ever* run, so rolling a pin back
+# to a version this machine already applied is silently a no-op, which is the
+# one thing a pin must not be.
+
+# Bare digits from a tool's own `--version`, or empty when it is absent or
+# answers nothing version-shaped. Declared versions carry whatever prefix the
+# vendor tags with, so comparisons strip a leading `v` from both sides.
+installed_version() {
+    local name=$1 out
+    command -v "$name" &>/dev/null || return 0
+    out="$("$name" --version 2>/dev/null | head -n1)" || true
+    printf '%s' "$out" | grep -oE '[0-9]+\.[0-9]+[0-9A-Za-z.+-]*' | head -n1 || true
+}
+
+# The vendor installers resolve their own version from a "latest" endpoint and
+# accept no version input, so a declared pin can only be checked after the
+# fact, never handed to them. Saying so out loud is what stops the declared
+# value from quietly becoming fiction on a machine that overshot it.
+confirm_version() {
+    local name=$1 want=$2 got
+    got="$(installed_version "$name")"
+    if [ -z "$got" ]; then
+        echo "$name: installed, but its version could not be read"
+    elif [ "${got#v}" != "${want#v}" ]; then
+        echo "$name: now at $got, but $want is declared — reconcile .chezmoidata.yaml"
+    else
+        echo "$name: now at $want"
+    fi
+}
+{{ range .agentClis }}
+want={{ .version | quote }}
+have="$(installed_version {{ .name | quote }})"
+echo "{{ .name }}: installed ${have:-none}, declared $want"
+if [ -n "$have" ] && [ "${have#v}" = "${want#v}" ]; then
+    echo "{{ .name }} is at the declared version — nothing to do"
+{{- if eq .kind "npm" }}
+elif command -v npm &>/dev/null; then
+    pkg={{ .package | quote }}
+    if npm install -g "$pkg@${want#v}"; then
+        confirm_version {{ .name | quote }} "$want"
+    else
+        echo "{{ .name }} npm install failed"
+    fi
+else
+    echo "{{ .name }} requires npm — install node first"
+{{- else if eq .kind "script" }}
+{{- if eq $.chezmoi.os "windows" }}
+elif command -v powershell &>/dev/null; then
+    # The vendor ships separate POSIX and Windows installers; the .ps1 places a
+    # native binary that Git Bash then sees on PATH.
+    if powershell -NoProfile -Command "irm {{ .windowsUrl }} | iex"; then
+        confirm_version {{ .name | quote }} "$want"
+    else
+        echo "{{ .name }} install failed"
+    fi
+else
+    echo "{{ .name }} requires powershell on Windows"
+{{- else }}
+elif command -v curl &>/dev/null; then
+    if curl -fsSL {{ .posixUrl | quote }} | sh; then
+        confirm_version {{ .name | quote }} "$want"
+    else
+        echo "{{ .name }} install failed"
+    fi
+else
+    echo "{{ .name }} requires curl"
+{{- end }}
+{{- end }}
+fi
+{{ end }}
+# no-mistakes gates a repo, not a machine: `no-mistakes init` must be run inside
+# each repo you want routed through it, and that is also what installs the
+# /no-mistakes skill at user level. Deliberately not automated here — gating a
+# repo changes how its pushes work and is a per-repo decision.
+if command -v no-mistakes &>/dev/null; then
+    echo "note: run 'no-mistakes init' inside a repo to gate it (also installs the /no-mistakes skill)"
+fi
+
+echo "agent CLIs reconciled"

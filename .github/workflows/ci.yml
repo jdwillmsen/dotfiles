@@ -118,7 +118,9 @@ jobs:
           # The apply above installs and starts a no-mistakes daemon inside its
           # sandbox HOME, and nothing else in this job installs one anywhere, so
           # any surviving daemon means the harness teardown regressed.
-          stray="$(ps -eo pid=,args= | grep -F 'no-mistakes daemon' | grep -v grep || true)"
+          # shellcheck disable=SC2009  # pgrep is not installed everywhere
+          stray="$(ps -eo pid=,args= |
+            grep -F 'no-mistakes daemon' | grep -v grep || true)"
           if [ -n "$stray" ]; then
             echo "smoke.sh leaked a daemon:"
             echo "$stray"

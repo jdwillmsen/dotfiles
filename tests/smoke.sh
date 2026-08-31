@@ -3,7 +3,7 @@ set -euo pipefail
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck disable=SC1091  # dynamic path resolved at runtime; harness lives at tests/lib.sh
 . "$repo/tests/lib.sh"
-h="$(mktemp -d)"
+h="$(chez_sandbox)"
 chez_apply "$(chez_init personal)" "$h"
 for f in .bashrc .zshrc .gitconfig .config/shell/aliases.sh .config/starship.toml .claude/settings.json; do
     [ -f "$h/$f" ] || { echo "FAIL: missing $f"; exit 1; }

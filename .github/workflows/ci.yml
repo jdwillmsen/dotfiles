@@ -94,7 +94,9 @@ jobs:
           # shellcheck disable=SC1091
           . tests/lib.sh
           cfg="$(chez_init ephemeral)"
-          dest="$(mktemp -d)"
+          # chez_sandbox, not mktemp -d: an apply leaves a daemon rooted at the
+          # sandbox, and only the harness teardown stops it before unlinking.
+          dest="$(chez_sandbox)"
           # `chezmoi verify` reports drift against the *current* destination —
           # it never applies anything itself. Verifying a still-empty dest
           # would trivially fail (every managed file "differs" from nothing),
@@ -111,4 +113,14 @@ jobs:
         # dummy): tests/smoke.sh's chez_apply does a real full apply that
         # decrypts encrypted_ source files, and a bad key would abort the
         # whole apply on first decrypt failure.
-        run: bash tests/smoke.sh
+        run: |
+          bash tests/smoke.sh
+          # The apply above installs and starts a no-mistakes daemon inside its
+          # sandbox HOME, and nothing else in this job installs one anywhere, so
+          # any surviving daemon means the harness teardown regressed.
+          stray="$(ps -eo pid=,args= | grep -F 'no-mistakes daemon' | grep -v grep || true)"
+          if [ -n "$stray" ]; then
+            echo "smoke.sh leaked a daemon:"
+            echo "$stray"
+            exit 1
+          fi

@@ -136,9 +136,30 @@ chez_render() { chezmoi execute-template --source "$CHEZ_SRC" --config "$1" < "$
 # path is already on PATH, which a sandbox HOME never is, and otherwise falls
 # through to `sudo ln -s /usr/local/bin/no-mistakes` — a root-owned symlink on
 # the real machine pointing at a sandbox that is about to be deleted.
+#
+# HOME alone still does not contain a full apply, because two install channels
+# do not derive their target from it. `npm install -g` resolves its prefix from
+# the node installation, so it writes the machine's real global node_modules no
+# matter where HOME points; npm_config_prefix is what actually moves it. And an
+# installer whose link directory is unwritable escalates with sudo, which on a
+# passwordless-sudo box succeeds — so a sudo that always fails backstops the
+# link-dir pin above, turning that into the "needs passwordless sudo —
+# skipping" path every privileged script here already handles.
+#
+# The guard nests under CHEZ_TMP_ROOT so teardown reaps it even on a signal.
 chez_apply() {
-    HOME="$2" NO_MISTAKES_LINK_DIR="$2/.local/bin" \
-        chezmoi apply --source "$CHEZ_SRC" --config "$1" --destination "$2" --force
+    local guard rc=0
+    guard="$(mktemp -d "$CHEZ_TMP_ROOT/guard.XXXXXXXX")"
+    printf '#!/usr/bin/env bash
+exit 1
+' >"$guard/sudo"
+    chmod 755 "$guard/sudo"
+    HOME="$2" PATH="$guard:$PATH" \
+        NO_MISTAKES_LINK_DIR="$2/.local/bin" \
+        npm_config_prefix="$2/.npm-global" \
+        chezmoi apply --source "$CHEZ_SRC" --config "$1" --destination "$2" --force || rc=$?
+    rm -rf -- "$guard"
+    return "$rc"
 }
 
 # chez_verify CONFIG DEST — verify DEST with the same HOME override as

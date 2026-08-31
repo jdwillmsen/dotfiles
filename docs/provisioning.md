@@ -330,6 +330,19 @@ declared version is reported. Reading the script's source could not have caught
 the bug it exists for — a presence check and a version check look alike until
 you run them against a tool that is present but old.
 
+Sealing a test's own `PATH` is not sufficient on its own, though, because two
+template tests do a full `chezmoi apply` into a throwaway `HOME` and that runs
+the real install scripts. `HOME` does not contain them: `npm install -g` takes
+its prefix from the node installation rather than from `HOME`, and a vendor
+installer that cannot write its link directory escalates with sudo — on a box
+with passwordless sudo that leaves a root-owned symlink in `/usr/local/bin`
+pointing into the throwaway `HOME`, which outlives the test and then dangles.
+Both escaped that way once the agent CLI installer started converging versions
+instead of skipping any tool that was merely present. `chez_apply` now pins
+`npm_config_prefix` inside the destination and puts a failing `sudo` ahead of
+the real one, which lands every privileged script on the "needs passwordless
+sudo — skipping" path it already handles.
+
 The Tailscale test is the pattern to copy for anything new. Rather than reading
 the script's source, it puts stub `id`, `curl`, `apt-get`, `systemctl` and
 `tailscale` binaries on a sealed `PATH` and runs the real script against them,

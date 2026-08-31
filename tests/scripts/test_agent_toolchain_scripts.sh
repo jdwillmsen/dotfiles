@@ -109,6 +109,36 @@ for u in bash sh env head grep cat chmod rm printf; do
     ln -sf "$(command -v "$u")" "$sysbin/$u" || fail "cannot sandbox $u"
 done
 
+# Seal self-test. Every case below asserts what the script does about a tool at
+# a given version, which means nothing if a real binary on this machine can
+# answer for its stub. Prove the hole is shut rather than trusting `env -i` to
+# have shut it — a leak here would make the whole file pass vacuously.
+seal_resolves() { env -i PATH="$1" bash -c "command -v $2 || true"; }
+for b in npm curl no-mistakes gnhf node; do
+    got="$(seal_resolves "$stub:$sysbin" "$b")"
+    case "$got" in
+        "$stub"/*|"") ;;
+        *) fail "sealed PATH leaks: $b resolves to $got, not a stub" ;;
+    esac
+done
+[ -z "$(seal_resolves "$sysbin" npm)" ] || fail "the no-npm PATH still resolves an npm"
+
+# Belt and braces behind the seal: `npm install -g` takes its prefix from the
+# node installation, not from PATH or HOME, so a stub that ever fell through to
+# the real npm would install into the machine's real global node_modules. The
+# runs below pin the prefix into the sandbox; this records the real one so the
+# end of the file can prove nothing reached it.
+real_global=""
+if command -v npm &>/dev/null; then real_global="$(npm root -g 2>/dev/null || true)"; fi
+global_stamp() {
+    if [ -n "$real_global" ] && [ -d "$real_global" ]; then
+        stat -c %Y "$real_global" 2>/dev/null || echo unavailable
+    else
+        echo none
+    fi
+}
+global_before="$(global_stamp)"
+
 log="$tmp/log"
 
 seed() {
@@ -128,6 +158,7 @@ run() {
     rc=0
     out="$(env -i PATH="$path" HOME="$tmp/home" \
         STUB_LOG="$log" STUB_DIR="$stub" VENDOR_INSTALLER="$tmp/vendor-installer" \
+        npm_config_prefix="$tmp/npm-global" \
         VENDOR_VERSION="${VENDOR_VERSION:-$nm_want}" \
         CURL_MODE="${CURL_MODE:-ok}" NPM_MODE="${NPM_MODE:-ok}" \
         bash "$tmp/clis.sh" 2>&1)" || rc=$?
@@ -182,5 +213,9 @@ SEED_NM='' SEED_GNHF='' CURL_MODE=fail NPM_MODE=fail run
 echo "$out" | grep -q "no-mistakes install failed" || fail "no install-failure report" "$out"
 echo "$out" | grep -q "gnhf npm install failed" || fail "no npm-failure report" "$out"
 echo "$out" | grep -q "agent CLIs reconciled" || fail "run aborted before completing" "$out"
+
+# The seal held for every case above, not just at the moment it was checked.
+[ "$(global_stamp)" = "$global_before" ] ||
+    fail "a run reached the real global npm prefix at $real_global"
 
 echo "PASS"

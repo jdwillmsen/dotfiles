@@ -147,8 +147,13 @@ run_trigger() {  # $1 = HOME to run the trigger under; sets $trig_out and $trig_
     # silently widen PATH="$trig_sealed" back open, letting the real
     # systemctl/loginctl leak into a supposedly hermetic run. Pin it to
     # /dev/null so sourcing it is a no-op regardless of what the caller has.
+    # XDG_CONFIG_HOME must also be pinned to the HOME under test: the trigger
+    # derives unit_dir from it, and an ambient value (real CI runners can set
+    # one) would point the timer-file check at a real config dir that never
+    # has our unit installed, sending every call down the "not a home apply"
+    # skip path before systemctl is ever touched.
     trig_out="$(PATH="$trig_sealed" HOME="$1" USER="tester" CALL_LOG="$call_log" \
-        BASH_ENV=/dev/null \
+        BASH_ENV=/dev/null XDG_CONFIG_HOME="$1/.config" \
         STUB_MANAGER_HOME="${STUB_MANAGER_HOME:-}" STUB_NO_MANAGER="${STUB_NO_MANAGER:-0}" \
         STUB_LINGER="${STUB_LINGER:-no}" "$trig_bash" "$trigger" 2>&1)"
     trig_rc=$?

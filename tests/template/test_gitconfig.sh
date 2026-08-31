@@ -29,7 +29,7 @@ echo "$p" | grep -q 'path = ~/.gitconfig.local' || { echo "FAIL: gitconfig.local
 # role=work reads the encrypted work-identity slot, which only exists as a
 # destination file after a real apply (run_before writes the CI/local age
 # identity, then chezmoi decrypts) — probe via chez_apply, not chez_render.
-dest="$(mktemp -d)"
+dest="$(chez_sandbox)"
 chez_apply "$(chez_init work)" "$dest" >/dev/null
 w="$(grep -A2 '\[user\]' "$dest/.gitconfig")"
 echo "$w" | grep -q "42048994+jdwillmsen@users.noreply.github.com" || { echo "FAIL: work role should fall back to default email for blank work-identity"; exit 1; }

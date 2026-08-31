@@ -29,10 +29,8 @@ echo "$skills" | grep -q 'skills add.*mattpocock' && { echo "FAIL: mattpocock mu
 # cd silently installs into whatever repo the apply ran from.
 echo "$skills" | grep -q 'cd "$HOME"' || { echo "FAIL: skills script must cd to \$HOME before installing"; exit 1; }
 
-clis="$(render home/run_once_43-install-agent-clis.sh.tmpl)"
+clis="$(render home/run_onchange_43-install-agent-clis.sh.tmpl)"
 echo "$clis" | shellcheck -s bash -
-echo "$clis" | grep -q 'docs/install' || { echo "FAIL: no-mistakes installer url missing"; exit 1; }
-echo "$clis" | grep -q 'npm install -g' || { echo "FAIL: gnhf npm install missing"; exit 1; }
 
 # Both scripts run under `set -e`, where a trailing `cond && echo` aborts the
 # script whenever the condition is false — silently skipping everything after it.
@@ -40,5 +38,149 @@ for s in "$skills" "$clis"; do
     printf '%s\n' "$s" | grep -qE '^[[:space:]]*(command -v|\[ -n).*&&$' &&
         { echo "FAIL: trailing '&&' continuation aborts under set -e"; exit 1; }
 done
+
+# ── Agent CLI reconcile, executed rather than read ──────────────────────────
+# The bug this covers was invisible to source-reading: the script's first
+# branch was `command -v <tool>`, so any installed version read as done and no
+# tool ever advanced again. Only running it against tools that report a
+# *version* shows the difference, so the whole table is driven through stubs.
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+printf '%s\n' "$clis" >"$tmp/clis.sh"
+
+fail() { echo "FAIL: $1"; [ -n "${2:-}" ] && echo "--- $2"; exit 1; }
+
+# Declared versions come from the same data the script renders from, so a
+# routine version bump does not turn into a test edit.
+declared() { chez_tmpl "$cfg" "{{ range .agentClis }}{{ if eq .name \"$1\" }}{{ .version }}{{ end }}{{ end }}"; }
+nm_want="$(declared no-mistakes)"
+gnhf_want="$(declared gnhf)"
+# A row with no version renders an empty pin, which never matches what is
+# installed — the tool would then be reinstalled on every run rather than
+# converging.
+unpinned="$(chez_tmpl "$cfg" '{{ range .agentClis }}{{ if not .version }} {{ .name }}{{ end }}{{ end }}')"
+[ -z "$unpinned" ] || fail "agentClis rows with no declared version:$unpinned"
+if [ -z "$nm_want" ] || [ -z "$gnhf_want" ]; then fail "the stubbed rows left agentClis"; fi
+
+stub="$tmp/stub"; mkdir -p "$stub"
+
+# Stands in for the vendor's install.sh. The point it models is the whole
+# design tension: it resolves its own version and takes no version input, so a
+# declared pin can only be checked after it runs.
+cat >"$tmp/vendor-installer" <<'SH'
+#!/usr/bin/env bash
+echo "vendor-installer $VENDOR_VERSION" >>"$STUB_LOG"
+cat >"$STUB_DIR/no-mistakes" <<EOF
+#!/usr/bin/env bash
+echo "no-mistakes version $VENDOR_VERSION (deadbee) 2026-01-01T00:00:00Z"
+EOF
+chmod 755 "$STUB_DIR/no-mistakes"
+SH
+
+cat >"$stub/curl" <<'SH'
+#!/usr/bin/env bash
+echo "curl ${!#}" >>"$STUB_LOG"
+[ "${CURL_MODE:-ok}" = ok ] || exit 22
+printf 'exec "$VENDOR_INSTALLER"\n'
+SH
+
+# npm honours an exact `pkg@version`, so this stub installs whatever version
+# the spec names — a script that dropped the pin would install "gnhf" and the
+# resulting version assertion would catch it.
+cat >"$stub/npm" <<'SH'
+#!/usr/bin/env bash
+echo "npm $*" >>"$STUB_LOG"
+[ "$1" = install ] || exit 0
+[ "${NPM_MODE:-ok}" = ok ] || exit 1
+spec="${!#}"
+cat >"$STUB_DIR/gnhf" <<EOF
+#!/usr/bin/env bash
+echo "${spec##*@}"
+EOF
+chmod 755 "$STUB_DIR/gnhf"
+SH
+chmod +x "$stub"/* "$tmp/vendor-installer"
+
+# A sealed PATH: inheriting the caller's would let the real no-mistakes, gnhf
+# and npm on this machine answer for the stubs, and every case below would
+# assert nothing.
+sysbin="$tmp/sysbin"; mkdir -p "$sysbin"
+for u in bash sh env head grep cat chmod rm printf; do
+    ln -sf "$(command -v "$u")" "$sysbin/$u" || fail "cannot sandbox $u"
+done
+
+log="$tmp/log"
+
+seed() {
+    printf '#!/usr/bin/env bash\necho %s\n' "$2" >"$stub/$1"
+    chmod 755 "$stub/$1"
+}
+
+# SEED_NM / SEED_GNHF are the versions already on the box ("" for absent);
+# VENDOR_VERSION is what the vendor's latest-only installer would land.
+run() {
+    : >"$log"
+    rm -f "$stub/no-mistakes" "$stub/gnhf"
+    [ -z "${SEED_NM:-}" ] || seed no-mistakes "\"no-mistakes version $SEED_NM (cafe123) 2026-01-01T00:00:00Z\""
+    [ -z "${SEED_GNHF:-}" ] || seed gnhf "$SEED_GNHF"
+    local path="$stub:$sysbin"
+    [ "${WITH_NPM:-1}" = 1 ] || path="$sysbin"
+    rc=0
+    out="$(env -i PATH="$path" HOME="$tmp/home" \
+        STUB_LOG="$log" STUB_DIR="$stub" VENDOR_INSTALLER="$tmp/vendor-installer" \
+        VENDOR_VERSION="${VENDOR_VERSION:-$nm_want}" \
+        CURL_MODE="${CURL_MODE:-ok}" NPM_MODE="${NPM_MODE:-ok}" \
+        bash "$tmp/clis.sh" 2>&1)" || rc=$?
+}
+
+logged() { grep -q "$1" "$log"; }
+
+# ── Absent tools install, at the declared version ───────────────────────────
+SEED_NM='' SEED_GNHF='' run
+[ "$rc" -eq 0 ] || fail "bare-machine run failed" "$out"
+logged '^curl ' || fail "absent no-mistakes did not fetch the installer" "$out"
+logged "^npm install -g gnhf@$gnhf_want\$" ||
+    fail "absent gnhf was not installed at the declared version" "$(cat "$log")"
+echo "$out" | grep -q "no-mistakes: now at $nm_want" || fail "no-mistakes not converged" "$out"
+echo "$out" | grep -q "gnhf: now at $gnhf_want" || fail "gnhf not converged" "$out"
+
+# ── Already at the declared version: a genuine no-op ────────────────────────
+SEED_NM="$nm_want" SEED_GNHF="$gnhf_want" run
+[ "$rc" -eq 0 ] || fail "converged re-run failed" "$out"
+if [ -s "$log" ]; then fail "converged re-run still invoked an installer" "$(cat "$log")"; fi
+echo "$out" | grep -q "no-mistakes is at the declared version" || fail "no no-op report" "$out"
+echo "$out" | grep -q "gnhf is at the declared version" || fail "no no-op report" "$out"
+
+# ── Out of date: the regression. An older tool must advance, not be skipped ──
+SEED_NM="v0.0.1" SEED_GNHF="0.0.1" run
+[ "$rc" -eq 0 ] || fail "upgrade run failed" "$out"
+logged '^curl ' || fail "stale no-mistakes was skipped instead of upgraded" "$out"
+logged "^npm install -g gnhf@$gnhf_want\$" || fail "stale gnhf was skipped" "$(cat "$log")"
+echo "$out" | grep -q "no-mistakes: installed 0.0.1, declared $nm_want" ||
+    fail "installed-versus-declared state was not reported" "$out"
+echo "$out" | grep -q "no-mistakes: now at $nm_want" || fail "no-mistakes did not advance" "$out"
+echo "$out" | grep -q "gnhf: now at $gnhf_want" || fail "gnhf did not advance" "$out"
+
+# ── The pin cannot be handed to a vendor installer, so it must be checked ────
+# A curl-pipe installer resolves its own version. When that overshoots what the
+# repo declares, the run has to say so — a silent overshoot is exactly how the
+# declared value becomes fiction.
+SEED_NM="v0.0.1" SEED_GNHF="$gnhf_want" VENDOR_VERSION="v9.9.9" run
+[ "$rc" -eq 0 ] || fail "vendor overshoot aborted the run" "$out"
+echo "$out" | grep -q "no-mistakes: now at 9.9.9, but $nm_want is declared" ||
+    fail "vendor installing past the declared version was not reported" "$out"
+
+# ── Unattended safety: no installer or package manager still exits clean ────
+SEED_NM='' SEED_GNHF='' WITH_NPM=0 run
+[ "$rc" -eq 0 ] || fail "missing package managers must not fail the apply" "$out"
+echo "$out" | grep -q "gnhf requires npm" || fail "no npm diagnostic" "$out"
+echo "$out" | grep -q "no-mistakes requires curl" || fail "no curl diagnostic" "$out"
+
+# A failing installer must not abort the rest of the table under `set -e`.
+SEED_NM='' SEED_GNHF='' CURL_MODE=fail NPM_MODE=fail run
+[ "$rc" -eq 0 ] || fail "installer failures aborted the apply" "$out"
+echo "$out" | grep -q "no-mistakes install failed" || fail "no install-failure report" "$out"
+echo "$out" | grep -q "gnhf npm install failed" || fail "no npm-failure report" "$out"
+echo "$out" | grep -q "agent CLIs reconciled" || fail "run aborted before completing" "$out"
 
 echo "PASS"

@@ -20,30 +20,161 @@ shellcheck -s bash "$check"
 shellcheck -s bash "$trigger"
 
 # ── Unit wiring ──
-grep -q '^Type=oneshot$' "$svc" || fail "check service is not Type=oneshot"
-grep -q '^ExecStart=%h/.local/bin/t3-session-expiry$' "$svc" \
+# Verified through the real consumer (systemd's own parser) and a parsed
+# key=value model, not by grepping the unit text, so a semantically
+# equivalent file passes and a behaviour-changing edit does not slip through.
+declare -A UNIT_PROPS
+parse_unit() {  # $1 = unit file -> populates UNIT_PROPS as "Section.Key"=value
+    UNIT_PROPS=()
+    local section="" line key value
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            \#*) ;;
+            \[*\]) section="${line#\[}"; section="${section%\]}" ;;
+            *=*)
+                key="${line%%=*}"; value="${line#*=}"
+                [ -n "$section" ] && UNIT_PROPS["$section.$key"]="$value"
+                ;;
+        esac
+    done <"$1"
+}
+has_section() {  # $1 = section name -> 0 if any parsed key belongs to it
+    local k
+    for k in "${!UNIT_PROPS[@]}"; do
+        case "$k" in "$1".*) return 0 ;; esac
+    done
+    return 1
+}
+
+if command -v systemd-analyze >/dev/null 2>&1; then
+    verify_home="$(mktemp -d)"
+    mkdir -p "$verify_home/.local/bin" "$verify_home/.config/systemd/user"
+    cp "$check" "$verify_home/.local/bin/t3-session-expiry"
+    chmod +x "$verify_home/.local/bin/t3-session-expiry"
+    cp "$svc" "$timer" "$verify_home/.config/systemd/user/"
+    for u in t3-session-expiry.service t3-session-expiry.timer; do
+        if ! verify_out="$(HOME="$verify_home" systemd-analyze verify --user \
+            "$verify_home/.config/systemd/user/$u" 2>&1)"; then
+            rm -rf "$verify_home"
+            fail "systemd-analyze rejected $u" "$verify_out"
+        fi
+    done
+    rm -rf "$verify_home"
+else
+    echo "SKIP: systemd-analyze not on this host — unit syntax/semantics unverified by the real consumer"
+fi
+
+parse_unit "$svc"
+[ "${UNIT_PROPS[Service.Type]-}" = "oneshot" ] || fail "check service is not Type=oneshot"
+[ "${UNIT_PROPS[Service.ExecStart]-}" = "%h/.local/bin/t3-session-expiry" ] \
     || fail "ExecStart does not point at the deployed check"
 # A non-zero exit is the warning signal; masking it would hide the one state
 # the unit exists to surface.
-grep -q '^SuccessExitStatus=' "$svc" && fail "a warning exit must stay a unit failure"
+[ -z "${UNIT_PROPS[Service.SuccessExitStatus]+x}" ] || fail "a warning exit must stay a unit failure"
 # Timer-triggered only: an [Install] here would also run it once at login and
 # then never again, which silently replaces the schedule.
-grep -q '^\[Install\]' "$svc" && fail "check service should be timer-triggered only"
+! has_section Install || fail "check service should be timer-triggered only"
 
-grep -q '^OnCalendar=' "$timer" || fail "timer is not calendar-scheduled"
+parse_unit "$timer"
+[ -n "${UNIT_PROPS[Timer.OnCalendar]-}" ] || fail "timer is not calendar-scheduled"
 # Persistent= is honoured only for calendar timers, and a box that was off
 # must not silently eat days out of the warning window.
-grep -q '^Persistent=true$' "$timer" || fail "timer does not catch up after downtime"
-grep -q '^WantedBy=timers.target$' "$timer" || fail "timer will not be started by systemd"
+[ "${UNIT_PROPS[Timer.Persistent]-}" = "true" ] || fail "timer does not catch up after downtime"
+[ "${UNIT_PROPS[Install.WantedBy]-}" = "timers.target" ] || fail "timer will not be started by systemd"
 
-for dep in t3-session-expiry.service t3-session-expiry.timer executable_t3-session-expiry; do
-    grep -q "$dep" "$trigger" || fail "$dep edits do not re-trigger daemon-reload"
+# ── Trigger: dependency hashes actually couple to the files they name ──
+# The daemon-reload trigger fires on a content-hash change, computed by
+# chezmoi's own template renderer, not by string presence in the trigger's
+# source. Prove the coupling by editing each dependency through the real
+# consumer and checking the rendered hash line actually moves.
+if command -v chezmoi >/dev/null 2>&1; then
+    render_src="$(mktemp -d)"
+    cp -a "$here/home" "$render_src/home"
+    base_render="$(chezmoi execute-template --source="$render_src/home" \
+        <"$render_src/home/run_onchange_51-enable-t3-session-expiry.sh.tmpl")"
+    for relpath in dot_config/systemd/user/t3-session-expiry.service \
+        dot_config/systemd/user/t3-session-expiry.timer \
+        dot_local/bin/executable_t3-session-expiry; do
+        rm -rf "${render_src:?}/home"
+        cp -a "$here/home" "$render_src/home"
+        printf '\n# touched-for-test\n' >>"$render_src/home/$relpath"
+        touched_render="$(chezmoi execute-template --source="$render_src/home" \
+            <"$render_src/home/run_onchange_51-enable-t3-session-expiry.sh.tmpl")"
+        [ "$touched_render" != "$base_render" ] \
+            || fail "editing $relpath does not change the trigger's re-run hash"
+    done
+    rm -rf "$render_src"
+else
+    echo "SKIP: chezmoi not on this host — dependency-hash coupling unverified by the real consumer"
+fi
+
+# ── Trigger: executed against stub systemctl/loginctl, asserted on behaviour ──
+trig_tmp="$(mktemp -d)"
+mkdir -p "$trig_tmp/bin" "$trig_tmp/sys" "$trig_tmp/home/.config/systemd/user" "$trig_tmp/emptyhome"
+for b in env bash sh uname sed cat; do
+    src="$(command -v "$b")" || fail "test host is missing $b"
+    ln -s "$src" "$trig_tmp/sys/$b"
 done
-grep -q 'daemon-reload' "$trigger" || fail "trigger never reloads systemd"
-grep -q 'enable --now t3-session-expiry.timer' "$trigger" || fail "trigger never enables the timer"
+trig_sealed="$trig_tmp/bin:$trig_tmp/sys"
+trig_bash="$(command -v bash)"
+call_log="$trig_tmp/calls.log"
+cp "$svc" "$timer" "$trig_tmp/home/.config/systemd/user/"
+
+cat >"$trig_tmp/bin/systemctl" <<'STUB'
+#!/bin/sh
+if [ "$1" = "--user" ] && [ "$2" = "show-environment" ]; then
+    [ "${STUB_NO_MANAGER:-0}" = "1" ] && exit 1
+    echo "HOME=${STUB_MANAGER_HOME}"
+    exit 0
+fi
+echo "$*" >>"$CALL_LOG"
+exit 0
+STUB
+chmod +x "$trig_tmp/bin/systemctl"
+
+cat >"$trig_tmp/bin/loginctl" <<'STUB'
+#!/bin/sh
+echo "${STUB_LINGER:-no}"
+STUB
+chmod +x "$trig_tmp/bin/loginctl"
+
+run_trigger() {  # $1 = HOME to run the trigger under; sets $trig_out and $trig_rc
+    : >"$call_log"
+    set +e
+    trig_out="$(PATH="$trig_sealed" HOME="$1" USER="tester" CALL_LOG="$call_log" \
+        STUB_MANAGER_HOME="${STUB_MANAGER_HOME:-}" STUB_NO_MANAGER="${STUB_NO_MANAGER:-0}" \
+        STUB_LINGER="${STUB_LINGER:-no}" "$trig_bash" "$trigger" 2>&1)"
+    trig_rc=$?
+    set -e
+}
+
 # systemctl acts on the real home regardless of chezmoi's destination, so a
 # scratch-dest apply must skip rather than enable a timer for the live user.
-grep -q 'skipping enable' "$trigger" || fail "trigger does not skip on a non-home apply"
+STUB_MANAGER_HOME="/nonexistent/other-home" run_trigger "$trig_tmp/home"
+[ "$trig_rc" -eq 0 ] || fail "trigger did not exit cleanly on a HOME mismatch" "$trig_out"
+echo "$trig_out" | grep -q "skipping enable" || fail "trigger does not skip on a non-home apply" "$trig_out"
+[ -s "$call_log" ] && fail "trigger touched systemctl despite a HOME mismatch" "$(cat "$call_log")"
+
+# No unit installed under the apply's HOME: also not a live-home apply.
+STUB_MANAGER_HOME="$trig_tmp/emptyhome" run_trigger "$trig_tmp/emptyhome"
+[ "$trig_rc" -eq 0 ] || fail "trigger did not exit cleanly with no unit applied" "$trig_out"
+[ -s "$call_log" ] && fail "trigger enabled a timer that was never applied" "$(cat "$call_log")"
+
+# A real apply: reload, enable, start, and warn when linger is off.
+STUB_MANAGER_HOME="$trig_tmp/home" STUB_LINGER="no" run_trigger "$trig_tmp/home"
+[ "$trig_rc" -eq 0 ] || fail "trigger failed on a real home apply" "$trig_out"
+grep -qx -- "--user daemon-reload" "$call_log" || fail "trigger never reloads systemd" "$(cat "$call_log")"
+grep -qx -- "--user enable --now t3-session-expiry.timer" "$call_log" \
+    || fail "trigger never enables the timer" "$(cat "$call_log")"
+grep -qx -- "--user start t3-session-expiry.service" "$call_log" \
+    || fail "trigger never starts the service" "$(cat "$call_log")"
+echo "$trig_out" | grep -q "linger is off" || fail "trigger does not warn when linger is off" "$trig_out"
+
+STUB_MANAGER_HOME="$trig_tmp/home" STUB_LINGER="yes" run_trigger "$trig_tmp/home"
+[ "$trig_rc" -eq 0 ] || fail "trigger failed with linger enabled" "$trig_out"
+echo "$trig_out" | grep -q "linger is off" && fail "trigger warned about linger despite it being on" "$trig_out"
+
+rm -rf "$trig_tmp"
 
 # ── Sealed execution environment ──
 # The real box has no `t3` on PATH but does have `npx`, and a stray HOME would

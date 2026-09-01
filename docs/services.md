@@ -19,21 +19,29 @@ pressure is how a five-minute outage becomes an hour.
 | `no-mistakes-daemon-<hash>.service` | user | `no-mistakes daemon start` — **unit vendor-generated**; the binary is repo-owned | yes | unix socket only (`~/.no-mistakes/socket`) | `no-mistakes daemon status` |
 | `ssh.socket` → `ssh.service` | system | apt (`openssh-server`) | socket enabled, service `disabled` by design | `0.0.0.0:22`, `[::]:22` | `systemctl status ssh.socket` |
 | `docker.service`, `containerd.service` | system | `run_once_49-install-dev-tools.sh.tmpl` (opt-in, via `chezmoi apply`) | yes | nothing — no containers, `docker0` is DOWN | `docker info` |
+| `t3-session-expiry.timer` → `.service` | user | `home/dot_config/systemd/user/`, enabled by `run_onchange_51-enable-t3-session-expiry.sh.tmpl` — **repo-owned** | yes | — | `systemctl --user list-timers t3-session-expiry` |
 | `user@1000.service` + linger | system/user | `scripts/provision-persistence.sh` (root step) | `Linger=yes` | — | `loginctl show-user dev-admin -p Linger` |
 
+The `Enabled` column reports unit state and the presence of a `wants` symlink,
+which is what was actually verified. It is not evidence of survival across a
+boot: this box has not been rebooted since these services were configured, so
+reboot behaviour here is inferred from enablement rather than observed.
+
 Everything else in `systemctl list-units` is stock Ubuntu (journald, resolved,
-logind, udev, cron, rsyslog, oomd, qemu-guest-agent, unattended-upgrades). No
-timer on this box comes from this repo — the user timer list holds only
-`launchpadlib-cache-clean.timer`, and the system list is apt/fwupd/logrotate
-housekeeping. A timer you do not recognise there is new, not baseline.
+logind, udev, cron, rsyslog, oomd, qemu-guest-agent, unattended-upgrades).
+`t3-session-expiry.timer` is the only timer this repo owns; the rest of the
+user list is `launchpadlib-cache-clean.timer` and the system list is
+apt/fwupd/logrotate housekeeping. A timer beyond those is new, not baseline.
 
 ## Three tiers of recoverability
 
 "Managed by this repo" is not one thing, and the distinction is what this
 document exists to preserve. Sorted by how much a rebuild gets for free:
 
-**1. `chezmoi apply` recreates it.** Only `docker`/`containerd`, and only on a
-machine that answered `installDevTooling`. Nothing else on the list.
+**1. `chezmoi apply` recreates it.** `t3-session-expiry.timer` and its service,
+whose units are repo-owned and whose trigger enables them on a normal home
+apply; and `docker`/`containerd`, but only on a machine that answered
+`installDevTooling`. Nothing else on the list.
 
 **2. The repo can rebuild it, but you have to ask.** `tailscaled` and linger
 are both `sudo scripts/provision-*.sh` steps. They are deliberately not
@@ -80,10 +88,10 @@ upgraded to 1.102.3, and came back with Serve intact.
 
 If `tailscaled` dies, every remote path except plain SSH from the LAN goes with
 it. That fallback exists and is worth knowing about before you need it: `sshd`
-listens on `0.0.0.0:22`, the box is reachable at `192.168.1.56` and on a
-routable IPv6 address, and `ufw` is inactive. Key-only auth
+listens on all interfaces and no host firewall is enabled. Key-only auth
 (`PasswordAuthentication no`) is what makes that acceptable rather than
-alarming.
+alarming — it is the only thing standing there, so treat it as load-bearing
+rather than as defence in depth.
 
 The peer-API ports (`44334` and `55615` at the time of writing) are assigned
 per daemon start. Do not treat those numbers as stable or firewall them by

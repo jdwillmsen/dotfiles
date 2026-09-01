@@ -46,6 +46,7 @@ You'll be prompted for a machine role (see Targets below). Re-running `chezmoi a
 sudo scripts/provision-swap.sh          # zram + swapfile tiers, sysctl tuning, systemd-oomd
 sudo scripts/provision-persistence.sh   # loginctl enable-linger, so a detached tmux server survives zero logins
 sudo scripts/provision-tailscale.sh     # Tailscale + tailnet join, so the box is reachable by stable identity from any network
+sudo scripts/provision-lan-dns.sh       # routes jdwlabs.com to the LAN resolver, so cluster.jdwlabs.com reaches the apiserver
 ```
 
 A dev/infra tooling catalog — Docker, Node/pnpm, Rust, helm, gh, kubectl, talosctl, sops, age, Java — sits on top of that, opt-in per machine via an `installDevTooling` prompt so a personal laptop does not grow a Docker daemon by accident.

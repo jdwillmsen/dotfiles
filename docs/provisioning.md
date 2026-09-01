@@ -97,6 +97,35 @@ arrives, so an interrupted transfer would leave partial bytes that still
 satisfy the "already present" guard, and apt would then fail GPG verification
 on every later run until someone deleted the file by hand.
 
+## LAN name resolution
+
+```bash
+sudo scripts/provision-lan-dns.sh
+```
+
+Idempotent; re-run it any time. Environment overrides: `RESOLVER` (defaults to
+`192.168.1.199`), `FALLBACK`, `DOMAIN` and `DROPIN`.
+
+Writes a `systemd-resolved` drop-in that routes `jdwlabs.com` to the dnsmasq
+resolver on the HAProxy VM, then verifies `cluster.jdwlabs.com` actually
+resolves there. Without it the box gets the public answer for that name, which
+is the WAN address — and the Kubernetes apiserver port is not forwarded there,
+so a LAN machine resolving publicly has no path to the cluster at all. The
+gateway's admin UI has no per-name override page, which is why this is a
+resolver setting per machine rather than one router change.
+
+The drop-in uses a routing domain (`Domains=~jdwlabs.com`) instead of replacing
+the machine's default nameservers. That is the whole safety argument: if the
+resolver on the HAProxy VM goes down, only `jdwlabs.com` degrades back to the
+gateway's public answer, and every other name resolves exactly as before.
+Listing the gateway as a second server in the same block makes that fallback
+automatic rather than a manual rollback.
+
+The script verifies with `resolvectl query` rather than trusting the file it
+just wrote — a correct drop-in still loses to a VPN client rewriting
+`resolv.conf` or a stale stub, and the file alone cannot tell you which
+resolver won.
+
 ## User-level toolchain
 
 These run as part of `chezmoi apply` and need no root:

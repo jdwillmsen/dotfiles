@@ -162,14 +162,23 @@ Classifying them fast is most of the value of this section.
   PulseAudio port from [`voice-mode-ssh.md`](voice-mode-ssh.md), alive only for
   the SSH connection that requested it. In `ss -tlnp` it reads like a resident
   audio daemon. It is not one, and it is not something to restart.
-- **An orphaned `no-mistakes` daemon under `/tmp`** — rooted at
-  `/tmp/tmp.<random>/.no-mistakes`, parented to PID 1, under no systemd unit,
-  and still running ten days after it started. `tests/smoke.sh` applies chezmoi
-  into a `mktemp -d` HOME; the vendor installer that `run_once_43` pipes to
-  `sh` starts a daemon under whatever HOME it was installed into, and the smoke
-  test has no cleanup trap. Every smoke run leaks one. Kill it by PID — nothing
-  restarts it, and it holds a SQLite database in a temp directory that will
-  vanish under it at the next `/tmp` sweep.
+- **`/tmp/tmp.<random>/.no-mistakes` directories, with nothing running in
+  them** — residue from a leak that is closed. `tests/smoke.sh` applies chezmoi
+  into a throwaway HOME, and the vendor installer that `run_once_43` pipes to
+  `sh` starts a daemon under whatever HOME it installed into; that daemon used
+  to survive the run, orphaned to PID 1 under no unit. `tests/lib.sh`, which
+  the smoke test sources, now roots every temp path under one per-run
+  directory, traps `EXIT` plus `INT`/`TERM`/`HUP`, and on teardown sends `TERM`
+  then `KILL` to every process whose argv mentions that root before unlinking
+  the tree. CI re-checks the outcome: the smoke step fails the job if any
+  `no-mistakes daemon` process survives it. Three of these directories are
+  still on the box, all created on 2026-08-31, before that teardown landed;
+  each holds an installed binary and no state, and no process is attached to
+  any of them. Deleting them is safe. A run killed with `SIGKILL` can still
+  leave one, since no trap catches that signal — if you do find a live daemon
+  under a temp root, kill it by PID, because nothing restarts it and its SQLite
+  database sits in a directory that will vanish under it at the next `/tmp`
+  sweep.
 - **Headless Chrome trees under `~/.cache/ms-playwright-mcp`** — spawned by the
   Playwright MCP server inside a Claude Code session and reaped with it. Several
   hundred MB resident each; they are agent state, not infrastructure.

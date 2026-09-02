@@ -178,12 +178,18 @@ Classifying them fast is most of the value of this section.
 - **`/tmp/tmp.<random>` sandbox homes, with nothing running in them** —
   residue from a leak that is closed. Each one is a *whole* applied HOME, not a
   stray file: `tests/smoke.sh` applies chezmoi into a throwaway home, so the
-  tree holds the full dotfiles set plus everything an apply installs beneath it
-  (`.claude/`, `.codex/`, `.config/`, `.local/`, `.npm/`, `.agents/`,
-  `.no-mistakes/`). They are hundreds of MB each — three of them were 582 MB
-  together when this was written — so they are worth knowing about in a disk
-  investigation, and the parent temp root, not any subdirectory of it, is the
-  thing to delete.
+  tree holds the full dotfiles set plus everything an apply installs beneath
+  it. Identify them by the applied dotfiles themselves, which every run leaves
+  — `ls -d /tmp/tmp.*/.bashrc` — and *not* by the installed subdirectories
+  under them, which differ by how old the run is: `.no-mistakes/` exists only
+  in runs newer than that installer, so keying on it silently skips every
+  older sandbox. Size the set with `du -csh $(ls -d /tmp/tmp.*/.bashrc | xargs
+  -n1 dirname) | tail -1`; measure rather than trust a figure here, because
+  the number moves with every run. The snapshot when this was written was 34
+  homes totalling 7.7 GB, in two size classes: most are 100–200 MB, and a
+  couple are ~1.7 GB each. That shape is the point — the tail is where the
+  space is, so a cleanup can be worth it even when the count looks small. The
+  parent temp root, not any subdirectory of it, is the thing to delete.
 
   The leak: the vendor installer that `run_once_43` pipes to `sh` starts a
   daemon under whatever HOME it installed into, and that daemon used to survive

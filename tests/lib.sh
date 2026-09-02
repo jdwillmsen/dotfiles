@@ -42,7 +42,7 @@ chez_pids_under() {
     done
 }
 
-# A full apply does not only place files. run_once_43 pipes the agent-CLI vendor
+# A full apply does not only place files. run_onchange_43 pipes the agent-CLI vendor
 # installer to sh, and that installer ends by starting a no-mistakes daemon
 # rooted at whatever HOME it installed into. Under a sandbox HOME the daemon's
 # systemd unit is written to $HOME/.config/systemd/user, which the already

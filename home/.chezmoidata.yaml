@@ -59,10 +59,10 @@ agentSkills:
 agentClis:
   - name: no-mistakes
     kind: script
-    version: v1.60.2
+    version: "v1.60.2"
     posixUrl: "https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh"
     windowsUrl: "https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.ps1"
   - name: gnhf
     kind: npm
-    version: 0.1.47
+    version: "0.1.47"
     package: gnhf

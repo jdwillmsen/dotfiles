@@ -162,7 +162,7 @@ Everything lives under `~/.t3`:
 | Path | Contents |
 |---|---|
 | `userdata/state.sqlite` | Threads, sessions, settings |
-| `userdata/logs/` | `server.log`, per-terminal logs, provider events |
+| `userdata/logs/` | `server.log`, per-terminal logs, provider events. The unit appends its own stdout/stderr here as `boot-service.log`, which nothing rotates — `server.trace.ndjson` does, around 10 MB |
 | `userdata/secrets/` | Provider env values marked sensitive |
 | `worktrees/` | Per-thread git worktrees |
 

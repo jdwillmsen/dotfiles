@@ -41,9 +41,10 @@ touched block; never comment out dead code. Match surrounding density.
 - **NEVER work on `main`/`master`.** Before touching code check
   `git branch --show-current`; if on main, create a worktree first
   (`superpowers:using-git-worktrees` skill).
-- Agent sessions: native `EnterWorktree` (branches fresh from origin under
-  `.claude/worktrees/`). Terminal: `gwta <name>` / `wtd` / `wtclean` — full
-  command reference in `docs/shell-helpers.md` (dotfiles repo).
+- Agent sessions: native `EnterWorktree` (by default branches fresh from
+  origin under `.claude/worktrees/`). Terminal: `gwta <name>` / `wtd` /
+  `wtclean` — full command reference in `docs/shell-helpers.md` (dotfiles
+  repo).
 - Branch names: `feat/`, `fix/`, `chore/`, `docs/`, `refactor/` + ticket key +
   kebab-case — `feat/JDWLABS-123-fix-login-retry`. The key is what the
   statusline and `cj` resolve; omit it only for work with no ticket.
@@ -63,12 +64,13 @@ touched block; never comment out dead code. Match surrounding density.
   enforced per-agent instead of per-session.
 - **Branch a fan-out from what is landing, not from `origin/main`.** If any
   dispatched agent's work depends on an open PR's content, base every worktree
-  on that PR's branch, whatever mechanism creates it — anything branching
-  fresh from origin gives the wrong base; `git worktree add` with that branch
-  as start point, then entering that path, is one way to the right one. Agents
-  given a stale base assert what the open PR falsifies, and the damage is
-  invisible: the claims are true when written and wrong on merge, so review
-  sees a clean diff. Tell each agent which base it has and what is pending.
+  on that PR's branch, whatever mechanism creates it — only the base is
+  constrained, so give the native tool that branch where it takes one, or use
+  `git worktree add` with it as start point. Agents given a stale base assert
+  what the open PR falsifies, and the damage is invisible: the claims are true
+  when written and wrong on merge, so review sees a clean diff. Always tell
+  every dispatched agent which base it has and what is pending in it, even
+  when no dependency is apparent.
 
 ## Shell
 

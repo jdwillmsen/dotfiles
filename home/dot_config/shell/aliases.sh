@@ -72,10 +72,13 @@ alias orcheck='check-openrouter-freshness'
 alias tk='tmux-cheat'
 alias tkc='tmux-cheat --custom'
 
-# Claude Code usage/cost tracking (ccusage — reads ~/.claude/projects locally)
+# Claude Code usage/cost tracking. ccusage reads ~/.claude/projects, but npx
+# resolves the package from the registry on every run, so these need network
+# even though the data is local. `--active` is a one-shot view of the current
+# block; the refreshing `--live` it replaces was removed upstream.
 alias ccu='npx ccusage@latest daily'
 alias ccus='npx ccusage@latest session'
-alias ccub='npx ccusage@latest blocks --live'
+alias ccub='npx ccusage@latest blocks --active'
 
 # Misc
 alias reload='source ~/.zshrc 2>/dev/null || source ~/.bashrc'

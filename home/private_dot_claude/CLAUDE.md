@@ -63,14 +63,12 @@ touched block; never comment out dead code. Match surrounding density.
   working tree across concurrent agents — same rule as solo work above, just
   enforced per-agent instead of per-session.
 - **Branch a fan-out from what is landing, not from `origin/main`.** If any
-  dispatched agent's work depends on an open PR's content, base every worktree
-  on that PR's branch: `git worktree add` with it as start point, then
-  `EnterWorktree` with that `path` (or `worktree.baseRef: head` from a session
-  already on that branch). A stale base makes agents assert what the open PR
-  falsifies, and the damage is invisible: claims true when written are wrong
-  on merge, so review sees a clean diff. Always tell every dispatched agent
-  which base it has and what is pending in it, even when no dependency is
-  apparent.
+  dispatched agent's work depends on an open PR's content, every worktree must
+  start from that PR's branch; the routes above take no start point, so
+  arrange that base deliberately. A stale base has agents assert what the open
+  PR falsifies — claims true when written, wrong on merge, invisible to review
+  because each diff reads fine alone. Always tell every dispatched agent which
+  base it has and what is pending in it.
 
 ## Shell
 

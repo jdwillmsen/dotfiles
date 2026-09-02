@@ -74,11 +74,12 @@ alias tkc='tmux-cheat --custom'
 
 # Claude Code usage/cost tracking. ccusage reads ~/.claude/projects, but npx
 # resolves the package from the registry on every run, so these need network
-# even though the data is local. `--active` is a one-shot view of the current
-# block; the refreshing `--live` it replaces was removed upstream.
-alias ccu='npx ccusage@latest daily'
-alias ccus='npx ccusage@latest session'
-alias ccub='npx ccusage@latest blocks --active'
+# even though the data is local. The major is pinned so an upstream flag change
+# is a deliberate bump rather than a silent break — `--live` vanishing that way
+# is why `--active` is now the one-shot view of the current block.
+alias ccu='npx "ccusage@^20" daily'
+alias ccus='npx "ccusage@^20" session'
+alias ccub='npx "ccusage@^20" blocks --active'
 
 # Misc
 alias reload='source ~/.zshrc 2>/dev/null || source ~/.bashrc'

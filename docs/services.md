@@ -121,15 +121,14 @@ line:
 
 - **Application output does not reach the journal.** Both `StandardOutput` and
   `StandardError` are `append:` to `~/.t3/userdata/logs/boot-service.log`, so
-  `journalctl --user -u t3code` shows lifecycle lines and nothing else. That
-  file has no rotation (the separate `server.trace.ndjson` does rotate around
-  10 MB); check its size before assuming a full disk is someone else's fault.
-- **`ExecStart` hardcodes an nvm-versioned interpreter path** under
-  `~/.nvm/versions/node/<version>/bin/node`, baked in when the unit was
-  generated. A Node upgrade that prunes that version breaks the service at its
-  next start with no warning until then, so after any nvm change confirm the
-  path in the unit still exists. `npx t3@latest service update` regenerates the
-  unit; see [`t3code.md`](t3code.md#operating-notes).
+  `journalctl --user -u t3code` shows lifecycle lines and nothing else — read
+  that file, not the journal, when the unit reads healthy and the server does
+  not answer. Its rotation, and the rest of the `~/.t3` layout, are in
+  [`t3code.md`](t3code.md#state-on-disk).
+- **`ExecStart` hardcodes an nvm-versioned interpreter path**, so a Node
+  upgrade that prunes that version breaks the service at its next start with no
+  warning until then — confirm the path after any nvm change. The recovery is
+  [`t3code.md`](t3code.md#operating-notes).
 
 ## no-mistakes daemon — background half of the ship pipeline
 

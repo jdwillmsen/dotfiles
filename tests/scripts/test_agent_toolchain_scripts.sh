@@ -108,7 +108,7 @@ chmod +x "$stub"/* "$tmp/vendor-installer"
 # assert nothing.
 sysbin="$tmp/sysbin"; mkdir -p "$sysbin"
 for u in bash sh env head grep cat chmod rm printf; do
-    up="$(type -P "$u")"
+    up="$(type -P "$u")" || true
     [ -n "$up" ] || fail "cannot sandbox $u: no external binary"
     ln -sf "$up" "$sysbin/$u" || fail "cannot sandbox $u"
 done

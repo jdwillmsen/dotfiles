@@ -104,11 +104,11 @@ These run as part of `chezmoi apply` and need no root:
 | Script | Installs |
 |---|---|
 | `run_once_42-install-cli-tools.sh` | ripgrep, delta, fd, eza, zoxide, starship, fzf, direnv, nvim, sox (Claude Code voice mode's audio recorder), cmake |
+| `run_onchange_43-install-agent-clis.sh.tmpl` | the CLIs the agent skills drive — version-pinned, see below |
 | `run_once_45-install-python-tools.sh` | uv, pipx |
 | `run_once_46-install-cloud-clis.sh` | terraform, aws, gcloud, az |
 | `run_once_47-install-go.sh` | Go toolchain |
 | `run_once_49-install-dev-tools.sh.tmpl` | docker, node/pnpm, rust, helm, gh, kubectl, talosctl, sops, age, Java — opt-in only |
-| `run_onchange_43-install-agent-clis.sh.tmpl` | the CLIs the agent skills drive — version-pinned, see below |
 
 `42` is table-driven across brew, winget, scoop, apt, and cargo, in that order —
 prebuilt-binary managers first, cargo last because it compiles from source. The
@@ -330,10 +330,11 @@ declared version is reported. Reading the script's source could not have caught
 the bug it exists for — a presence check and a version check look alike until
 you run them against a tool that is present but old.
 
-Sealing a test's own `PATH` is not sufficient on its own, though, because two
-template tests do a full `chezmoi apply` into a throwaway `HOME` and that runs
-the real install scripts. `HOME` does not contain them: `npm install -g` takes
-its prefix from the node installation rather than from `HOME`, and a vendor
+Sealing a test's own `PATH` is not sufficient on its own, though, because every
+`chez_apply` caller — two template tests, `tests/smoke.sh` and CI's verify
+step — does a full `chezmoi apply` into a throwaway `HOME`, and that runs the
+real install scripts. `HOME` does not contain them: `npm install -g` takes its
+prefix from the node installation rather than from `HOME`, and a vendor
 installer that cannot write its link directory escalates with sudo — on a box
 with passwordless sudo that leaves a root-owned symlink in `/usr/local/bin`
 pointing into the throwaway `HOME`, which outlives the test and then dangles.

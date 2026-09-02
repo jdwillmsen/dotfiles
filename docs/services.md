@@ -68,10 +68,10 @@ box with no tailnet.
   only claims the daemon exists and how to tell if it is up.
 - **The `no-mistakes` unit** is written by `no-mistakes daemon start`. The
   *binary* is repo-owned (the `agentClis` table in `home/.chezmoidata.yaml`,
-  installed by `run_onchange_43-install-agent-clis.sh.tmpl`), so a rebuild gets the
-  CLI and no daemon. That split is deliberate upstream of us — consistent with
-  `no-mistakes init` gating a repo rather than a machine — it just means the
-  daemon is one more thing to start by hand.
+  installed by `run_onchange_43-install-agent-clis.sh.tmpl`), so a rebuild
+  gets the CLI and no daemon. That split is deliberate upstream of us —
+  consistent with `no-mistakes init` gating a repo rather than a machine — it
+  just means the daemon is one more thing to start by hand.
 - **The tailnet node's identity and authorisation**, in root-only
   `/var/lib/tailscale/tailscaled.state`. `provision-tailscale.sh` *joins* a
   machine to the tailnet; it cannot restore an existing node. Rebuilding means

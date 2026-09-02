@@ -19,19 +19,23 @@ pressure is how a five-minute outage becomes an hour.
 | `no-mistakes-daemon-<hash>.service` | user | `no-mistakes daemon start` — **unit vendor-generated**; the binary is repo-owned | yes | unix socket only (`~/.no-mistakes/socket`) | `no-mistakes daemon status` |
 | `ssh.socket` → `ssh.service` | system | apt (`openssh-server`) | socket enabled, service `disabled` by design | `0.0.0.0:22`, `[::]:22` | `systemctl status ssh.socket` |
 | `docker.service`, `containerd.service` | system | `run_once_49-install-dev-tools.sh.tmpl` (opt-in, via `chezmoi apply`) | yes | nothing — no containers, `docker0` is DOWN | `docker info` |
-| `t3-session-expiry.timer` → `.service` | user | `home/dot_config/systemd/user/`, enabled by `run_onchange_51-enable-t3-session-expiry.sh.tmpl` — **repo-owned** | yes | — | `systemctl --user list-timers t3-session-expiry` |
+| `t3-session-expiry.timer` → `.service` | user | `home/dot_config/systemd/user/`, enabled by `run_onchange_51-enable-t3-session-expiry.sh.tmpl` — **repo-owned** | **no — not installed here**; no home apply has run since the units landed | — | `systemctl --user list-timers t3-session-expiry` (`not-found` until an apply runs) |
 | `user@1000.service` + linger | system/user | `scripts/provision-persistence.sh` (root step) | `Linger=yes` | — | `loginctl show-user dev-admin -p Linger` |
 
-The `Enabled` column reports unit state and the presence of a `wants` symlink,
-which is what was actually verified. It is not evidence of survival across a
-boot: this box has not been rebooted since these services were configured, so
-reboot behaviour here is inferred from enablement rather than observed.
+`Owned by` and `Enabled` answer different questions and can disagree. `Owned
+by` is a property of the repo and stays true wherever you read this. `Enabled`
+is a property of *this box* — unit state plus the presence of a `wants`
+symlink, which is what was actually verified — so a repo-owned unit that no
+apply has installed here reads `no`. Read a `no` as "not converged yet", not as
+"lost". Neither column is evidence of surviving a reboot: enablement is what
+was checked, and a boot was not.
 
 Everything else in `systemctl list-units` is stock Ubuntu (journald, resolved,
 logind, udev, cron, rsyslog, oomd, qemu-guest-agent, unattended-upgrades).
-`t3-session-expiry.timer` is the only timer this repo owns; the rest of the
-user list is `launchpadlib-cache-clean.timer` and the system list is
-apt/fwupd/logrotate housekeeping. A timer beyond those is new, not baseline.
+`t3-session-expiry.timer` is the only timer this repo owns. Baseline for the
+user manager is `launchpadlib-cache-clean.timer` and for the system manager is
+apt/fwupd/logrotate housekeeping; a timer outside those and the repo-owned one
+is new.
 
 ## Three tiers of recoverability
 
@@ -40,8 +44,10 @@ document exists to preserve. Sorted by how much a rebuild gets for free:
 
 **1. `chezmoi apply` recreates it.** `t3-session-expiry.timer` and its service,
 whose units are repo-owned and whose trigger enables them on a normal home
-apply; and `docker`/`containerd`, but only on a machine that answered
-`installDevTooling`. Nothing else on the list.
+apply — which is also why the inventory can list them as not installed here and
+still call them fully recoverable: one apply is the whole remedy. And
+`docker`/`containerd`, but only on a machine that answered `installDevTooling`.
+Nothing else on the list.
 
 **2. The repo can rebuild it, but you have to ask.** `tailscaled` and linger
 are both `sudo scripts/provision-*.sh` steps. They are deliberately not
@@ -54,9 +60,11 @@ box with no tailnet.
 **3. Nothing in the repo recreates it.** Two services and one pile of state:
 
 - **`t3code.service`** is written by `npx t3@latest service install`. There is
-  no `t3` binary on `PATH`; the runtime is vendored under `~/.t3/runtime` and
-  updates itself in place (active version 0.0.36, rewritten on its own on
-  2026-08-29). [`t3code.md`](t3code.md) is the owner's manual — this document
+  no `t3` binary on `PATH`; the runtime is vendored under
+  `~/.t3/runtime/versions/<version>` and updates itself in place, so the active
+  version moves with no repo action and nothing here pins it. Read it from
+  `~/.t3/runtime` rather than from this page.
+  [`t3code.md`](t3code.md) is the owner's manual — this document
   only claims the daemon exists and how to tell if it is up.
 - **The `no-mistakes` unit** is written by `no-mistakes daemon start`. The
   *binary* is repo-owned (the `agentClis` table in `home/.chezmoidata.yaml`,
@@ -116,11 +124,12 @@ line:
   `journalctl --user -u t3code` shows lifecycle lines and nothing else. That
   file has no rotation (the separate `server.trace.ndjson` does rotate around
   10 MB); check its size before assuming a full disk is someone else's fault.
-- **`ExecStart` hardcodes an nvm-versioned interpreter path**, currently
-  `.../node/v24.19.0/bin/node`, and nvm has exactly that one version installed.
-  A Node upgrade that prunes the old version breaks the service at its next
-  start with no warning until then. `npx t3@latest service update` regenerates
-  the unit; see [`t3code.md`](t3code.md#operating-notes).
+- **`ExecStart` hardcodes an nvm-versioned interpreter path** under
+  `~/.nvm/versions/node/<version>/bin/node`, baked in when the unit was
+  generated. A Node upgrade that prunes that version breaks the service at its
+  next start with no warning until then, so after any nvm change confirm the
+  path in the unit still exists. `npx t3@latest service update` regenerates the
+  unit; see [`t3code.md`](t3code.md#operating-notes).
 
 ## no-mistakes daemon — background half of the ship pipeline
 
@@ -153,32 +162,51 @@ detached tmux session; that is a single-cause outage worth checking first.
 These show up in `ps` next to the real daemons and get mistaken for them.
 Classifying them fast is most of the value of this section.
 
-- **VS Code Remote-SSH server** — `~/.vscode-server/code-<hash> … agent host`
-  on `127.0.0.1:35813`. Started by a Remote-SSH connection and deliberately
-  outlives it; the instance running now dates from 2026-08-21. No unit, no
-  restart policy. Killing it is safe and costs the next connection a
+- **VS Code Remote-SSH servers** — `~/.vscode-server/code-<hash> … agent
+  host`, each on its own loopback port assigned at start. Started by a
+  Remote-SSH connection and deliberately outliving it, so expect *several* at
+  once: there is one `code-<hash>` per client build that has ever connected,
+  and a client upgrade adds a new one beside the old rather than replacing it.
+  Neither the count nor the ports are fixed — map a mystery loopback listener
+  back to one with `ss -tlnp`, whose process name is the truncated hash. No
+  unit, no restart policy. Killing one is safe and costs the next connection a
   reconnect.
 - **`sshd` holding `127.0.0.1:4713`** — this is the reverse-forwarded
   PulseAudio port from [`voice-mode-ssh.md`](voice-mode-ssh.md), alive only for
   the SSH connection that requested it. In `ss -tlnp` it reads like a resident
   audio daemon. It is not one, and it is not something to restart.
-- **`/tmp/tmp.<random>/.no-mistakes` directories, with nothing running in
-  them** — residue from a leak that is closed. `tests/smoke.sh` applies chezmoi
-  into a throwaway HOME, and the vendor installer that `run_once_43` pipes to
-  `sh` starts a daemon under whatever HOME it installed into; that daemon used
-  to survive the run, orphaned to PID 1 under no unit. `tests/lib.sh`, which
-  the smoke test sources, now roots every temp path under one per-run
-  directory, traps `EXIT` plus `INT`/`TERM`/`HUP`, and on teardown sends `TERM`
-  then `KILL` to every process whose argv mentions that root before unlinking
-  the tree. CI re-checks the outcome: the smoke step fails the job if any
-  `no-mistakes daemon` process survives it. Three of these directories are
-  still on the box, all created on 2026-08-31, before that teardown landed;
-  each holds an installed binary and no state, and no process is attached to
-  any of them. Deleting them is safe. A run killed with `SIGKILL` can still
-  leave one, since no trap catches that signal — if you do find a live daemon
-  under a temp root, kill it by PID, because nothing restarts it and its SQLite
-  database sits in a directory that will vanish under it at the next `/tmp`
-  sweep.
+- **`/tmp/tmp.<random>` sandbox homes, with nothing running in them** —
+  residue from a leak that is closed. Each one is a *whole* applied HOME, not a
+  stray file: `tests/smoke.sh` applies chezmoi into a throwaway home, so the
+  tree holds the full dotfiles set plus everything an apply installs beneath it
+  (`.claude/`, `.codex/`, `.config/`, `.local/`, `.npm/`, `.agents/`,
+  `.no-mistakes/`). They are hundreds of MB each — three of them were 582 MB
+  together when this was written — so they are worth knowing about in a disk
+  investigation, and the parent temp root, not any subdirectory of it, is the
+  thing to delete.
+
+  The leak: the vendor installer that `run_once_43` pipes to `sh` starts a
+  daemon under whatever HOME it installed into, and that daemon used to survive
+  the run, orphaned to PID 1 under no unit. `tests/lib.sh`, which the smoke
+  test sources, now roots every temp path under one per-run directory, traps
+  `EXIT` plus `INT`/`TERM`/`HUP`, and on teardown sends `TERM` then `KILL` to
+  every process whose argv mentions that root before unlinking the tree. CI
+  re-checks the outcome: the smoke step fails the job if any `no-mistakes
+  daemon` process survives it. What is left on the box predates that teardown,
+  and no process is attached to any of it.
+
+  Deleting a root is safe because the whole thing is a throwaway home that
+  nothing references — not because it is empty. Do delete rather than leave
+  them: an apply decrypts `encrypted_` sources, so each sandbox contains the
+  plaintext products of the repo's encrypted files. The sandbox root is `0700`,
+  so no other user can traverse into one and this is cleanup hygiene rather
+  than an exposure — but plaintext with no owner and no expiry is not something
+  to leave sitting in `/tmp` indefinitely.
+
+  A run killed with `SIGKILL` can still leave one, since no trap catches that
+  signal — if you do find a live daemon under a temp root, kill it by PID,
+  because nothing restarts it and its SQLite database sits in a directory that
+  will vanish under it at the next `/tmp` sweep.
 - **Headless Chrome trees under `~/.cache/ms-playwright-mcp`** — spawned by the
   Playwright MCP server inside a Claude Code session and reaped with it. Several
   hundred MB resident each; they are agent state, not infrastructure.

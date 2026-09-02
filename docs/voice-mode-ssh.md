@@ -5,6 +5,12 @@ process runs on. Over a plain SSH + tmux session that's the remote box — which
 has no microphone. This forwards the client's mic to the remote box over the
 SSH connection so voice mode works there anyway.
 
+**Scope: Claude Code's CLI dictation only.** T3 Code's voice input records on
+the client device and never asks the server for audio, so it does not use any
+of this — see [`t3code.md`](t3code.md#the-devbox-never-records-audio). Nothing
+else on the devbox needs a capture device either; this chain exists solely
+because SoX runs wherever `claude` runs.
+
 Client and server need matching PulseAudio-over-TCP setup. `sox`,
 `libasound2-plugins`, `pulseaudio-utils`, and `dot_asoundrc.tmpl` (redirects
 ALSA's default device to PulseAudio) are provisioned by this repo — see
@@ -68,13 +74,31 @@ install or configure `pipewire-pulse` for this path, it isn't there.
 
 Client runs PipeWire-Pulse rather than WSLg's bundled server:
 
-1. Enable PipeWire-Pulse's TCP listener:
+1. Enable PipeWire-Pulse's TCP listener with a drop-in, rather than copying
+   the whole shipped config — a full copy silently stops tracking upstream
+   changes to every other setting in it:
+
    ```
-   cp /usr/share/pipewire/pipewire-pulse.conf ~/.config/pipewire/pipewire-pulse.conf
+   # ~/.config/pipewire/pipewire-pulse.conf.d/50-tcp.conf
+   pulse.properties = {
+     server.address = [
+       "unix:native"
+       { address = "tcp:127.0.0.1:4713"
+         client.access = "restricted"
+       }
+     ]
+   }
    ```
-   Edit the copy's `server.address` to add `"tcp:127.0.0.1:4713"` alongside
-   `"unix:native"`, then `systemctl --user restart pipewire pipewire-pulse`.
+
+   Then `systemctl --user restart pipewire-pulse`.
 2. Same `~/.ssh/config` `RemoteForward` and server-side verification as above.
+
+Note the `auth-anonymous=1` discussion in the WSLg section does not carry over.
+PipeWire's Pulse emulation implements neither `auth-anonymous` nor
+`auth-ip-acl` — its TCP listener accepts whoever can reach it, and
+`pulse.allow-module-loading` defaults to true. Binding `127.0.0.1` is therefore
+the only thing keeping that socket private, which makes the loopback bind
+load-bearing here rather than merely tidy.
 
 ## Caveat
 

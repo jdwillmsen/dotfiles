@@ -132,6 +132,76 @@ notes): a systemd user unit inherits no interactive `PATH`.
 `chezmoi apply` reloads and enables the timer; by hand, `systemctl --user
 daemon-reload && systemctl --user enable --now t3-session-expiry.timer`.
 
+## Voice input
+
+Voice input exists on the **iOS app only**, and it needs nothing from this box.
+
+On an iPhone running iOS 26 or later, the composer has a microphone button.
+Recording and transcription both happen on the phone, using Apple's
+`SpeechAnalyzer`/`SpeechTranscriber`; the first use downloads a speech model
+and needs network, after which it works offline for that language. A recording
+caps at five minutes, the local audio file is deleted after transcription or
+cancellation, and only the resulting message text is submitted. There is no
+setting to turn on, on the phone or on the server.
+
+Web and desktop have no voice input. The upstream design note states it
+plainly: "Environment-provided transcription and transcription on web and
+desktop are not implemented." So the Electron app and a browser tab get
+nothing, and OS-level dictation (`Win+H` on Windows) into the composer is the
+whole workaround.
+
+### The devbox never records audio
+
+This is a deliberate upstream boundary, not a gap waiting to be filled. From
+the same design note:
+
+> Local means the client device, regardless of which machine hosts the
+> environment.
+
+> Remote service configuration and API keys belong to the environment. The
+> environment calls the external service.
+
+This box is the *environment*. Even in the planned remote-transcription path,
+its role is to hold a credential and proxy audio to an external service — it
+never opens a capture device. That matters because it has none: `/dev/snd`
+carries only `seq` and `timer`, and no PulseAudio or PipeWire daemon is
+installed.
+
+The practical consequence: [`voice-mode-ssh.md`](voice-mode-ssh.md) is **not** a
+dependency of T3 Code voice input. That document forwards a client microphone
+to this box for Claude Code's CLI dictation, which runs its recorder locally.
+The two look related and are not. Do not wire T3 Code to it.
+
+For the same reason there is nothing to add to any `.devcontainer` — passing
+`--device /dev/snd` into a container whose host has no capture device maps
+nothing, and there is no PulseAudio socket to bind.
+
+### When web voice does arrive
+
+The prerequisite is already satisfied. `getUserMedia()` requires a secure
+context, and Tailscale Serve publishes this server at
+`https://<machine>.<tailnet>.ts.net` with a real certificate. A plain LAN or
+tailnet-IP origin such as `http://100.x.y.z:3773` would **not** work — there is
+no private-address exemption to the secure-context rule, and the failure is
+opaque (`navigator.mediaDevices` is `undefined` rather than a permission
+error). `ssh -L 3773:127.0.0.1:3773` is the fallback, because `127.0.0.1` is
+trustworthy unconditionally.
+
+Upstream work to watch, all unmerged as of 2026-09-02: `pingdotgg/t3code`
+[#5213](https://github.com/pingdotgg/t3code/pull/5213) (web, desktop and
+server, BYOK through a `/api/transcription` proxy),
+[#8928](https://github.com/pingdotgg/t3code/pull/8928) (desktop-local capture)
+and [#9028](https://github.com/pingdotgg/t3code/pull/9028)
+(environment-backed, which unlocks Android and pre-26 iOS). Forking the client
+to add a microphone ahead of these is a poor trade: the package ships multiple
+releases a week plus nightlies, and #5213 already implements the design the
+maintainers' own note specifies.
+
+Sources: [voice input on
+iPhone](https://github.com/pingdotgg/t3code/blob/main/docs/user/composer.md#voice-input-on-iphone),
+[voice input
+internals](https://github.com/pingdotgg/t3code/blob/main/docs/internals/voice-input.md).
+
 ## Operating notes
 
 **Pairing tokens are passwords.** The token rides in the URL fragment, so it

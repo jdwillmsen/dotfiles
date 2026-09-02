@@ -64,13 +64,13 @@ touched block; never comment out dead code. Match surrounding density.
   enforced per-agent instead of per-session.
 - **Branch a fan-out from what is landing, not from `origin/main`.** If any
   dispatched agent's work depends on an open PR's content, base every worktree
-  on that PR's branch, whatever mechanism creates it — only the base is
-  constrained, so give the native tool that branch where it takes one, or use
-  `git worktree add` with it as start point. Agents given a stale base assert
-  what the open PR falsifies, and the damage is invisible: the claims are true
-  when written and wrong on merge, so review sees a clean diff. Always tell
-  every dispatched agent which base it has and what is pending in it, even
-  when no dependency is apparent.
+  on that PR's branch: `git worktree add` with it as start point, then
+  `EnterWorktree` with that `path` (or `worktree.baseRef: head` from a session
+  already on that branch). A stale base makes agents assert what the open PR
+  falsifies, and the damage is invisible: claims true when written are wrong
+  on merge, so review sees a clean diff. Always tell every dispatched agent
+  which base it has and what is pending in it, even when no dependency is
+  apparent.
 
 ## Shell
 

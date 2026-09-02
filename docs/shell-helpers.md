@@ -71,6 +71,29 @@ wtd feat/auth-jwt [-Force] [-KeepBranch]
 └── .claude/worktrees/       ← worktrees (native tool)
 ```
 
+### What a new worktree branches from
+
+Neither route takes a start point per invocation:
+
+- `gwta` runs `git worktree add <path> -b <branch>` with no start point, so the
+  new branch starts at the HEAD of the worktree you ran it from.
+- Native `EnterWorktree` takes a name or an existing path, never a base. Its
+  base is the `worktree.baseRef` setting: `fresh` (default) branches from
+  `origin/<default-branch>`, `head` from local HEAD.
+
+So a base other than those defaults has to be arranged explicitly — the case
+the global `CLAUDE.md` requires when fanning agents out over an open PR:
+
+```bash
+git fetch origin feat/open-pr
+git worktree add <path> -b feat/agent-1 origin/feat/open-pr
+```
+
+One fresh branch per worktree, not the PR branch itself: two worktrees cannot
+check out the same branch, and committing onto the PR branch breaks the
+branch-per-unit rule. To hand such a worktree to an agent session, create it
+under `.claude/worktrees/` and enter it with `EnterWorktree`'s `path`.
+
 ## `cj` — ticket-named Claude Code launcher
 
 Launches Claude Code named after the current worktree's Jira ticket, so the

@@ -44,8 +44,10 @@ done
 # branch was `command -v <tool>`, so any installed version read as done and no
 # tool ever advanced again. Only running it against tools that report a
 # *version* shows the difference, so the whole table is driven through stubs.
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+# No local EXIT trap: bash keeps one handler per signal, so installing one here
+# would replace the harness teardown and leave the run root unswept. Allocating
+# under it instead lets that teardown reap this too, on signals as well as exit.
+tmp="$(mktemp -d "$CHEZ_TMP_ROOT/agentcli.XXXXXXXX")"
 printf '%s\n' "$clis" >"$tmp/clis.sh"
 
 fail() { echo "FAIL: $1"; [ -n "${2:-}" ] && echo "--- $2"; exit 1; }
@@ -106,7 +108,9 @@ chmod +x "$stub"/* "$tmp/vendor-installer"
 # assert nothing.
 sysbin="$tmp/sysbin"; mkdir -p "$sysbin"
 for u in bash sh env head grep cat chmod rm printf; do
-    ln -sf "$(command -v "$u")" "$sysbin/$u" || fail "cannot sandbox $u"
+    up="$(type -P "$u")"
+    [ -n "$up" ] || fail "cannot sandbox $u: no external binary"
+    ln -sf "$up" "$sysbin/$u" || fail "cannot sandbox $u"
 done
 
 # Seal self-test. Every case below asserts what the script does about a tool at

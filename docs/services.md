@@ -68,7 +68,7 @@ box with no tailnet.
   only claims the daemon exists and how to tell if it is up.
 - **The `no-mistakes` unit** is written by `no-mistakes daemon start`. The
   *binary* is repo-owned (the `agentClis` table in `home/.chezmoidata.yaml`,
-  installed by `run_once_43-install-agent-clis.sh.tmpl`), so a rebuild gets the
+  installed by `run_onchange_43-install-agent-clis.sh.tmpl`), so a rebuild gets the
   CLI and no daemon. That split is deliberate upstream of us — consistent with
   `no-mistakes init` gating a repo rather than a machine — it just means the
   daemon is one more thing to start by hand.
@@ -142,10 +142,14 @@ The unit name carries a hash of `--root`, so each root gets its own unit. One
 root, one unit, today. If you ever see two `no-mistakes-daemon-*` units, the
 second one has a different root and is almost certainly unintended.
 
-Version drift is silent here: `run_once_43` skips the install entirely when the
-binary already exists, so the CLI never advances on its own. `no-mistakes
-daemon status` prints the available upgrade alongside the running state, which
-makes it the honest health check to run.
+The version this box should run is declared in `.chezmoidata.yaml`, and
+`run_onchange_43` compares installed against declared rather than merely
+checking the binary exists — the presence check it replaced meant no tool ever
+advanced once installed. The script re-runs when its rendered contents change,
+so bumping a declared version is what triggers an upgrade; leaving the
+declaration alone changes nothing on the next apply. `no-mistakes daemon
+status` prints the available upgrade alongside the running state, which stays
+the honest health check for what upstream has moved on to.
 
 ## The interactive layer
 
@@ -190,7 +194,7 @@ Classifying them fast is most of the value of this section.
   space is, so a cleanup can be worth it even when the count looks small. The
   parent temp root, not any subdirectory of it, is the thing to delete.
 
-  The leak: the vendor installer that `run_once_43` pipes to `sh` starts a
+  The leak: the vendor installer that `run_onchange_43` pipes to `sh` starts a
   daemon under whatever HOME it installed into, and that daemon used to survive
   the run, orphaned to PID 1 under no unit. `tests/lib.sh`, which the smoke
   test sources, now roots every temp path under one per-run directory, traps

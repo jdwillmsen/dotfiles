@@ -146,6 +146,17 @@ chez_render() { chezmoi execute-template --source "$CHEZ_SRC" --config "$1" < "$
 # link-dir pin above, turning that into the "needs passwordless sudo —
 # skipping" path every privileged script here already handles.
 #
+# What that contains, exactly: the global npm prefix, the vendor installers'
+# link directory, and every install that needs elevation to reach a system
+# path. What it does not contain: an install channel that writes a shared
+# prefix without elevation. `run_once_42-install-cli-tools.sh` calls `brew
+# install` whenever brew is on PATH, and `winget`/`scoop` the same on Windows —
+# a failing sudo is irrelevant to those, so on a machine that has one of them
+# a full-apply test can still install into the shared prefix. Blocking sudo
+# also steers that script's apt branch onto its cargo fallback; those builds
+# land under the sandbox HOME, so they cost time and noise rather than machine
+# state.
+#
 # The guard nests under CHEZ_TMP_ROOT so teardown reaps it even on a signal.
 chez_apply() {
     local guard rc=0

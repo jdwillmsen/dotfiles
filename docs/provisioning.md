@@ -341,7 +341,12 @@ Both escaped that way once the agent CLI installer started converging versions
 instead of skipping any tool that was merely present. `chez_apply` now pins
 `npm_config_prefix` inside the destination and puts a failing `sudo` ahead of
 the real one, which lands every privileged script on the "needs passwordless
-sudo — skipping" path it already handles.
+sudo — skipping" path it already handles. That covers the npm prefix, the
+vendor link directory and anything needing elevation — but not an install
+channel that writes a shared prefix without it: where `brew`, `winget` or
+`scoop` is on `PATH`, `42`'s CLI-tool installs still reach that prefix, so the
+containment is real but partial and a full-apply test on such a machine can
+still install into it.
 
 The Tailscale test is the pattern to copy for anything new. Rather than reading
 the script's source, it puts stub `id`, `curl`, `apt-get`, `systemctl` and

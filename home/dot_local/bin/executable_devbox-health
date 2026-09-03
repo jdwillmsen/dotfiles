@@ -11,9 +11,14 @@ set -uo pipefail
 # split matters: this is meant to be readable by a human at a prompt and
 # usable in a conditional, so a partial answer must not look like a pass.
 #
+# Three outcomes, not two: a check that cannot be run — no interpreter, no
+# user bus, no output from the tool asked — is neither ok nor skip. Reporting
+# it as either would hide exactly the quiet failure this script exists to
+# catch, so undetermined is its own outcome and it exits non-zero.
+#
 # See docs/services.md for what each service is and who owns it.
 
-pass=0; fail=0; skip=0
+pass=0; fail=0; skip=0; undet=0
 
 chk() {  # chk LABEL EXPECTED ACTUAL
     if [ "$2" = "$3" ]; then
@@ -27,68 +32,148 @@ note() {  # note LABEL REASON — for things genuinely absent rather than broken
     printf '  skip  %-30s %s\n' "$1" "$2"; skip=$((skip + 1))
 }
 
-json_field() {  # json_field FIELD — read one top-level key from stdin JSON
+unkn() {  # unkn LABEL REASON — the check could not be run at all
+    printf '  UNKN  %-30s %s\n' "$1" "$2"; undet=$((undet + 1))
+}
+
+chk_known() {  # chk_known LABEL EXPECTED ACTUAL REASON — empty ACTUAL is undetermined
+    if [ -n "$3" ]; then chk "$1" "$2" "$3"; else unkn "$1" "$4"; fi
+}
+
+json_field() {  # json_field DOTTED.PATH — read one value from stdin JSON
     python3 -c 'import json,sys
-try: print(json.load(sys.stdin).get(sys.argv[1]) or "")
+try:
+    v = json.load(sys.stdin)
+    for k in sys.argv[1].split("."):
+        v = v.get(k) if isinstance(v, dict) else None
+    print("" if v is None else v)
 except Exception: print("")' "$1" 2>/dev/null
 }
+
+have() { command -v "$1" >/dev/null 2>&1; }
 
 echo "uptime: $(uptime -p 2>/dev/null || echo unknown)"
 echo
 
-if command -v tailscale >/dev/null 2>&1; then
-    chk "tailscaled active" active "$(systemctl is-active tailscaled 2>/dev/null)"
+have python3 && have_python3=yes || have_python3=no
+
+ts_json=""
+if have tailscale; then
+    chk_known "tailscaled active" active \
+        "$(systemctl is-active tailscaled 2>/dev/null)" "systemctl produced no state"
     ts_json="$(tailscale status --json 2>/dev/null)"
-    chk "tailnet backend" Running "$(printf '%s' "$ts_json" | json_field BackendState)"
-    # RunSSH is the break-glass: without it a lapsed harness session cannot be
-    # re-paired from a device that has no key.
-    run_ssh="$(tailscale debug prefs 2>/dev/null | json_field RunSSH)"
-    chk "tailscale ssh" True "$run_ssh"
+    if [ "$have_python3" = no ]; then
+        unkn "tailnet backend" "python3 not installed — cannot read tailscale JSON"
+        unkn "tailscale ssh" "python3 not installed — cannot read tailscale JSON"
+    else
+        chk_known "tailnet backend" Running \
+            "$(printf '%s' "$ts_json" | json_field BackendState)" \
+            "tailscale status --json gave no BackendState"
+        # RunSSH is the break-glass: without it a lapsed harness session cannot
+        # be re-paired from a device that has no key.
+        chk_known "tailscale ssh" True \
+            "$(tailscale debug prefs 2>/dev/null | json_field RunSSH)" \
+            "tailscale debug prefs gave no RunSSH"
+    fi
 else
     note "tailscale" "not installed — see scripts/provision-tailscale.sh"
 fi
 
 # Without linger the user manager dies at logout, taking every user unit below
 # it, so a green unit list means nothing on its own.
-chk "linger" yes "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)"
+user="${USER:-$(id -un 2>/dev/null)}"
+if [ -z "$user" ]; then
+    unkn "linger" "cannot determine the current user"
+elif ! have loginctl; then
+    unkn "linger" "loginctl not installed"
+else
+    chk_known "linger" yes \
+        "$(loginctl show-user "$user" -p Linger --value 2>/dev/null)" \
+        "loginctl gave no Linger value for $user"
+fi
+
+# systemctl --user needs a reachable user bus, which cron and system units do
+# not get. Probing it once is what keeps a broken unit from reading as an
+# absent one: without this, "cat" failing for want of a bus looks like "not
+# installed here" and the whole run passes.
+bus_state="$(systemctl --user is-system-running 2>/dev/null)"
+case "$bus_state" in
+    running | degraded | starting | initializing | stopping | maintenance) user_bus=up ;;
+    *) user_bus=down ;;
+esac
 
 for unit in t3code.service t3-session-expiry.timer; do
-    if systemctl --user cat "$unit" >/dev/null 2>&1; then
-        chk "$unit active" active "$(systemctl --user is-active "$unit" 2>/dev/null)"
-        chk "$unit enabled" enabled "$(systemctl --user is-enabled "$unit" 2>/dev/null)"
+    if [ "$user_bus" = down ]; then
+        unkn "$unit" "user systemd bus unreachable (${bus_state:-no answer})"
+    elif systemctl --user cat "$unit" >/dev/null 2>&1; then
+        chk_known "$unit active" active \
+            "$(systemctl --user is-active "$unit" 2>/dev/null)" "systemctl gave no state"
+        chk_known "$unit enabled" enabled \
+            "$(systemctl --user is-enabled "$unit" 2>/dev/null)" "systemctl gave no state"
     else
         note "$unit" "not installed on this machine"
     fi
 done
 
-chk "ssh.socket enabled" enabled "$(systemctl is-enabled ssh.socket 2>/dev/null)"
+# Debian ships ssh.socket even where sshd is service-activated, so presence of
+# a unit says nothing — what matters is whether any of them starts SSH at boot.
+ssh_unit=""; ssh_state=""
+for unit in ssh.socket ssh.service sshd.service; do
+    systemctl cat "$unit" >/dev/null 2>&1 || continue
+    state="$(systemctl is-enabled "$unit" 2>/dev/null)"
+    if [ -z "$ssh_unit" ] || [ "$state" = enabled ]; then
+        ssh_unit="$unit"; ssh_state="$state"
+    fi
+    [ "$state" = enabled ] && break
+done
+if [ -z "$ssh_unit" ]; then
+    note "ssh" "no ssh socket or service unit on this machine"
+else
+    chk_known "$ssh_unit enabled" enabled "$ssh_state" "systemctl gave no state"
+fi
 
 # The harness listens on loopback only by design; Tailscale Serve fronts it.
 # Checking the port separately from the URL is what distinguishes "the server
 # is down" from "the tunnel is down" — they look identical from a browser.
 port="${DEVBOX_HEALTH_PORT:-3773}"
-listening=no
-ss -tln 2>/dev/null | grep -q "127.0.0.1:$port" && listening=yes
-chk "loopback $port" yes "$listening"
+case "$port" in
+    '' | *[!0-9]*)
+        unkn "loopback listener" "DEVBOX_HEALTH_PORT is not a port number: $port" ;;
+    *)
+        if ! have ss; then
+            unkn "loopback $port" "ss not installed — cannot list listeners"
+        else
+            listening=no
+            # Anchored: an unanchored match lets a listener on 37730 answer for 3773.
+            ss -tln 2>/dev/null |
+                grep -qE "(^|[[:space:]])127\.0\.0\.1:$port([[:space:]]|\$)" && listening=yes
+            chk "loopback $port" yes "$listening"
+        fi ;;
+esac
 
-if command -v tailscale >/dev/null 2>&1; then
-    dns="$(tailscale status --json 2>/dev/null |
-        python3 -c 'import json,sys
-try: print((json.load(sys.stdin).get("Self") or {}).get("DNSName","").rstrip("."))
-except Exception: print("")' 2>/dev/null)"
-    if [ -n "$dns" ]; then
-        code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "https://$dns/" 2>/dev/null)"
-        chk "https://$dns" 200 "$code"
+if have tailscale; then
+    if [ "$have_python3" = no ]; then
+        unkn "https endpoint" "python3 not installed — cannot read the MagicDNS name"
     else
-        note "https endpoint" "no MagicDNS name resolved"
+        dns="$(printf '%s' "$ts_json" | json_field Self.DNSName)"; dns="${dns%.}"
+        if [ -z "$dns" ]; then
+            unkn "https endpoint" "no MagicDNS name in tailscale status"
+        elif ! have curl; then
+            unkn "https://$dns" "curl not installed"
+        else
+            chk_known "https://$dns" 200 \
+                "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "https://$dns/" 2>/dev/null)" \
+                "curl produced no status code"
+        fi
     fi
 fi
 
+bad=$((fail + undet))
 echo
-echo "passed=$pass failed=$fail skipped=$skip"
-if [ "$fail" -eq 0 ]; then
+echo "passed=$pass failed=$fail skipped=$skip undetermined=$undet"
+if [ "$bad" -eq 0 ]; then
     echo "all good"
 else
-    echo "something above is not running — docs/services.md says who owns each"
+    echo "something above is not running or could not be checked — docs/services.md says who owns each"
 fi
-[ "$fail" -eq 0 ]
+[ "$bad" -eq 0 ]

@@ -245,12 +245,19 @@ prompt and in a conditional:
 devbox-health
 ```
 
-It checks the tailnet daemon and its SSH server, linger, the user units, the
-loopback listener, and a real request to the MagicDNS endpoint, which it
-derives rather than hardcodes. It distinguishes *absent* from *broken*: a
-machine without these units skips them instead of failing. Checking the
-loopback port separately from the URL is deliberate — a dead server and a dead
-tunnel look identical from a browser, and only the pair tells them apart.
+It checks the tailnet daemon and its SSH server, linger, the user units, SSH
+at boot, the loopback listener, and a real request to the MagicDNS endpoint,
+which it derives rather than hardcodes. Checking the loopback port separately
+from the URL is deliberate — a dead server and a dead tunnel look identical
+from a browser, and only the pair tells them apart.
+
+It reports three outcomes, not two. `skip` is genuine absence: a machine
+without a unit is not failing it. `UNKN` is a check it could not run at all —
+no `python3` to read the tailnet JSON, no reachable `systemctl --user` bus, or
+a tool that answered with nothing — and it exits non-zero, because a check
+that never ran must not read as one that passed. That distinction is the point
+under `cron` or a system unit, where there is no user bus: without it a dead
+`t3-session-expiry.timer` would report as merely not installed.
 
 Reach for the commands below when it reports a failure and you want the
 detail behind it:

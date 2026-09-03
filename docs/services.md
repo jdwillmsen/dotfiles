@@ -27,8 +27,16 @@ by` is a property of the repo and stays true wherever you read this. `Enabled`
 is a property of *this box* — unit state plus the presence of a `wants`
 symlink, which is what was actually verified — so a repo-owned unit that no
 apply has installed here reads `no`. Read a `no` as "not converged yet", not as
-"lost". Neither column is evidence of surviving a reboot: enablement is what
-was checked, and a boot was not.
+"lost". Neither column is evidence of surviving a reboot on its own —
+enablement is a claim about intent, not about what a boot actually does.
+
+That claim has since been tested rather than assumed. On 2026-09-03 this box
+was rebooted deliberately, and every service below came back with no
+intervention: the tailnet daemon and its SSH server, linger, both user units,
+the loopback listener, the Serve mapping, and a real request to the HTTPS
+endpoint. Reboot survival is therefore observed here, not inferred. Re-check it
+with `devbox-health` after any future boot rather than trusting this
+paragraph — it is a record of one boot, not a guarantee about the next.
 
 Everything else in `systemctl list-units` is stock Ubuntu (journald, resolved,
 logind, udev, cron, rsyslog, oomd, qemu-guest-agent, unattended-upgrades).
@@ -64,6 +72,13 @@ box with no tailnet.
   `~/.t3/runtime/versions/<version>` and updates itself in place, so the active
   version moves with no repo action and nothing here pins it. Read it from
   `~/.t3/runtime` rather than from this page.
+  That self-update is a known way to lose the service: an update stops the
+  unit to swap versions, and a failed activation has been observed rolling the
+  active version back while leaving the unit stopped. `Restart=always` does not
+  cover it, because systemd does not restart a unit that was deliberately
+  stopped — so the failure is silent and lasts until someone reaches for the
+  harness. A deliberate `npx t3@latest service update` recovered the same
+  version that had failed unattended. `devbox-health` is what surfaces it.
   [`t3code.md`](t3code.md) is the owner's manual — this document
   only claims the daemon exists and how to tell if it is up.
 - **The `no-mistakes` unit** is written by `no-mistakes daemon start`. The
@@ -221,6 +236,24 @@ Classifying them fast is most of the value of this section.
   hundred MB resident each; they are agent state, not infrastructure.
 
 ## One sweep
+
+`devbox-health` answers the yes/no question — is everything that should be
+running actually running — and exits non-zero when it is not, so it works at a
+prompt and in a conditional:
+
+```bash
+devbox-health
+```
+
+It checks the tailnet daemon and its SSH server, linger, the user units, the
+loopback listener, and a real request to the MagicDNS endpoint, which it
+derives rather than hardcodes. It distinguishes *absent* from *broken*: a
+machine without these units skips them instead of failing. Checking the
+loopback port separately from the URL is deliberate — a dead server and a dead
+tunnel look identical from a browser, and only the pair tells them apart.
+
+Reach for the commands below when it reports a failure and you want the
+detail behind it:
 
 ```bash
 loginctl show-user dev-admin -p Linger

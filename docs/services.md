@@ -250,7 +250,8 @@ It checks the tailnet daemon and its SSH server, linger, the user units, SSH
 at boot, the loopback listener, and a real request to the MagicDNS endpoint,
 which it derives rather than hardcodes. Checking the loopback port separately
 from the URL is deliberate — a dead server and a dead tunnel look identical
-from a browser, and only the pair tells them apart.
+from a browser, and only the pair tells them apart. The port defaults to the
+harness's `3773`; `DEVBOX_HEALTH_PORT` overrides it.
 
 It reports three outcomes, not two. `skip` is genuine absence: a machine
 without a unit is not failing it. `UNKN` is a check it could not run at all —

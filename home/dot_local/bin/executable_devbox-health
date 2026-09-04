@@ -87,9 +87,20 @@ if [ -z "$user" ]; then
 elif ! have loginctl; then
     unkn "linger" "loginctl not installed"
 else
-    chk_known "linger" yes \
-        "$(loginctl show-user "$user" -p Linger --value 2>/dev/null)" \
-        "loginctl gave no Linger value for $user"
+    linger="$(loginctl show-user "$user" -p Linger --value 2>/dev/null)"
+    # loginctl only answers for users logind is tracking — logged in or lingering —
+    # so silence is what linger-off looks like from a system unit. The file that
+    # enable-linger writes is the record of truth and answers when loginctl cannot.
+    linger_dir=/var/lib/systemd/linger
+    if [ -z "$linger" ]; then
+        if [ -e "$linger_dir/$user" ]; then
+            linger=yes
+        elif [ ! -e "$linger_dir" ] || [ -x "$linger_dir" ]; then
+            linger=no
+        fi
+    fi
+    chk_known "linger" yes "$linger" \
+        "loginctl gave no Linger value for $user and $linger_dir is unreadable"
 fi
 
 # systemctl --user needs a reachable user bus, which cron and system units do
@@ -143,11 +154,15 @@ case "$port" in
         if ! have ss; then
             unkn "loopback $port" "ss not installed — cannot list listeners"
         else
-            listening=no
-            # Anchored: an unanchored match lets a listener on 37730 answer for 3773.
-            ss -tln 2>/dev/null |
-                grep -qE "(^|[[:space:]])127\.0\.0\.1:$port([[:space:]]|\$)" && listening=yes
-            chk "loopback $port" yes "$listening"
+            listeners="$(ss -tln 2>/dev/null)"; ss_rc=$?
+            if [ "$ss_rc" -ne 0 ] || [ -z "$listeners" ]; then
+                unkn "loopback $port" "ss -tln produced no listener list (rc=$ss_rc)"
+            else
+                listening=no
+                # Anchored: an unanchored match lets a listener on 37730 answer for 3773.
+                grep -qE "(^|[[:space:]])127\.0\.0\.1:$port([[:space:]]|\$)" <<<"$listeners" && listening=yes
+                chk "loopback $port" yes "$listening"
+            fi
         fi ;;
 esac
 

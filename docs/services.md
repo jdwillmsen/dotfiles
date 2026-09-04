@@ -19,7 +19,7 @@ pressure is how a five-minute outage becomes an hour.
 | `no-mistakes-daemon-<hash>.service` | user | `no-mistakes daemon start` — **unit vendor-generated**; the binary is repo-owned | yes | unix socket only (`~/.no-mistakes/socket`) | `no-mistakes daemon status` |
 | `ssh.socket` → `ssh.service` | system | apt (`openssh-server`) | socket enabled, service `disabled` by design | `0.0.0.0:22`, `[::]:22` | `systemctl status ssh.socket` |
 | `docker.service`, `containerd.service` | system | `run_once_49-install-dev-tools.sh.tmpl` (opt-in, via `chezmoi apply`) | yes | nothing — no containers, `docker0` is DOWN | `docker info` |
-| `t3-session-expiry.timer` → `.service` | user | `home/dot_config/systemd/user/`, enabled by `run_onchange_51-enable-t3-session-expiry.sh.tmpl` — **repo-owned** | **no — not installed here**; no home apply has run since the units landed | — | `systemctl --user list-timers t3-session-expiry` (`not-found` until an apply runs) |
+| `t3-session-expiry.timer` → `.service` | user | `home/dot_config/systemd/user/`, enabled by `run_onchange_51-enable-t3-session-expiry.sh.tmpl` — **repo-owned** | yes, installed by a home apply; a box that has not applied since the units landed reads `not-found` here | — | `systemctl --user list-timers t3-session-expiry` |
 | `user@1000.service` + linger | system/user | `scripts/provision-persistence.sh` (root step) | `Linger=yes` | — | `loginctl show-user dev-admin -p Linger` |
 
 `Owned by` and `Enabled` answer different questions and can disagree. `Owned
@@ -31,12 +31,13 @@ apply has installed here reads `no`. Read a `no` as "not converged yet", not as
 enablement is a claim about intent, not about what a boot actually does.
 
 That claim has since been tested rather than assumed. On 2026-09-03 this box
-was rebooted deliberately, and every service below came back with no
-intervention: the tailnet daemon and its SSH server, linger, both user units,
-the loopback listener, the Serve mapping, and a real request to the HTTPS
-endpoint. Reboot survival is therefore observed here, not inferred. Re-check it
-with `devbox-health` after any future boot rather than trusting this
-paragraph — it is a record of one boot, not a guarantee about the next.
+was rebooted deliberately, and everything `devbox-health` covers came back with
+no intervention: the tailnet daemon and its SSH server, linger, both user units
+it checks (`t3code.service` and `t3-session-expiry.timer`), the loopback
+listener, the Serve mapping, and a real request to the HTTPS endpoint. Reboot
+survival is therefore observed here, not inferred. Re-check it with
+`devbox-health` after any future boot rather than trusting this paragraph — it
+is a record of one boot, not a guarantee about the next.
 
 Everything else in `systemctl list-units` is stock Ubuntu (journald, resolved,
 logind, udev, cron, rsyslog, oomd, qemu-guest-agent, unattended-upgrades).
@@ -52,8 +53,8 @@ document exists to preserve. Sorted by how much a rebuild gets for free:
 
 **1. `chezmoi apply` recreates it.** `t3-session-expiry.timer` and its service,
 whose units are repo-owned and whose trigger enables them on a normal home
-apply — which is also why the inventory can list them as not installed here and
-still call them fully recoverable: one apply is the whole remedy. And
+apply — which is why a box that reads them as `not-found` is still fully
+recoverable: one apply is the whole remedy. And
 `docker`/`containerd`, but only on a machine that answered `installDevTooling`.
 Nothing else on the list.
 

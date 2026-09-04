@@ -87,8 +87,12 @@ EOF
 }
 write_stubs
 
+# The linger record dir is part of the seal too: the script falls back to it
+# when loginctl is silent, and the real one would answer for this host.
+linger_dir="$tmp/linger"; mkdir -p "$linger_dir"
+
 run() {  # run -> stdout+stderr of the script, sets RC
-    local envargs=(PATH="$SEALED" HOME="$tmp/home") k
+    local envargs=(PATH="$SEALED" HOME="$tmp/home" DEVBOX_HEALTH_LINGER_DIR="$linger_dir") k
     [ "${NO_USER:-0}" = 1 ] || envargs+=(USER=tester)
     for k in "${KNOBS[@]}"; do envargs+=("$k=${!k-}"); done
     set +e
@@ -163,6 +167,13 @@ LINGER_OK=0 run
 [ "$RC" -eq 1 ] || fail "silent loginctl with no linger record must fail" "$OUT"
 has "FAIL  linger .*got=no" || fail "silent loginctl must report linger as off" "$OUT"
 hasnt "UNKN  linger" || fail "silent loginctl must not read as a tooling problem" "$OUT"
+
+# ── ...unless the on-disk record says the user lingers, which is the answer ──
+touch "$linger_dir/tester"
+LINGER_OK=0 run
+[ "$RC" -eq 0 ] || fail "a linger record must satisfy the check when loginctl is silent" "$OUT"
+has "ok    linger .*yes" || fail "a linger record must read as linger on" "$OUT"
+rm "$linger_dir/tester"
 unset LINGER_OK
 
 # ── break-glass off is a failure, and it must not read as an unreadable dump ──

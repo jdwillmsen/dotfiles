@@ -31,9 +31,9 @@ SEALED="$bin:$sysbin"
 # the stub. HAVE_* decide whether a unit exists at all, so absent can be told
 # from broken; USER_BUS decides whether systemctl --user can answer, which is
 # the third case — present but unaskable.
-KNOBS=(TAILSCALED_STATE BACKEND RUNSSH PREFS_OK LINGER USER_BUS
+KNOBS=(TAILSCALED_STATE BACKEND RUNSSH PREFS_OK LINGER LINGER_OK USER_BUS
     HAVE_T3 HAVE_TIMER T3_ACTIVE T3_ENABLED TIMER_ACTIVE TIMER_ENABLED
-    HAVE_SSHSOCK SSHSOCK HAVE_SSHSVC SSHSVC PORT_UP LISTEN_ADDR HTTP_CODE)
+    HAVE_SSHSOCK SSHSOCK HAVE_SSHSVC SSHSVC SS_OK PORT_UP LISTEN_ADDR HTTP_CODE)
 
 write_stubs() {
     cat >"$bin/systemctl" <<'EOF'
@@ -57,11 +57,18 @@ esac
 EOF
     cat >"$bin/loginctl" <<'EOF'
 #!/usr/bin/env bash
+[ "${LINGER_OK:-1}" = 1 ] || { echo "Failed to get user: not logged in or lingering" >&2; exit 1; }
 echo "${LINGER:-yes}"
 EOF
+    # The wanted line comes first and is followed by far more than a stdio
+    # buffer of other listeners: a reader that stops at the first match while
+    # the writer is still mid-output is exactly the shape this must catch.
     cat >"$bin/ss" <<'EOF'
 #!/usr/bin/env bash
+[ "${SS_OK:-1}" = 1 ] || exit 255
+echo "State Recv-Q Send-Q Local Address:Port Peer Address:Port Process"
 [ "${PORT_UP:-1}" = 1 ] && echo "LISTEN 0 511 ${LISTEN_ADDR:-127.0.0.1:3773} 0.0.0.0:*"
+printf 'LISTEN 0 4096 127.0.0.1:%d 0.0.0.0:*\n' {40000..43000}
 EOF
     cat >"$bin/curl" <<'EOF'
 #!/usr/bin/env bash
@@ -127,6 +134,13 @@ PORT_UP=0 run
 has "FAIL  loopback 3773" || fail "loopback failure must be named" "$OUT"
 unset PORT_UP
 
+# ── ss failing outright is not a dead listener; it is a check that could not run ──
+SS_OK=0 run
+[ "$RC" -eq 1 ] || fail "a failing ss must exit non-zero" "$OUT"
+has "UNKN  loopback 3773" || fail "a failing ss must report undetermined" "$OUT"
+hasnt "FAIL  loopback 3773" || fail "a failing ss must not claim the listener is dead" "$OUT"
+unset SS_OK
+
 # ── a longer port that merely starts with the wanted one is not the wanted one ──
 LISTEN_ADDR=127.0.0.1:37730 run
 [ "$RC" -eq 1 ] || fail "a listener on 37730 must not satisfy the 3773 check" "$OUT"
@@ -142,6 +156,14 @@ unset HTTP_CODE
 LINGER=no run
 [ "$RC" -eq 1 ] || fail "linger off must fail" "$OUT"
 unset LINGER
+
+# ── ...and loginctl is silent about a user it is not tracking, which is what
+# linger off looks like from a system unit: that is a plain failure, not UNKN ──
+LINGER_OK=0 run
+[ "$RC" -eq 1 ] || fail "silent loginctl with no linger record must fail" "$OUT"
+has "FAIL  linger .*got=no" || fail "silent loginctl must report linger as off" "$OUT"
+hasnt "UNKN  linger" || fail "silent loginctl must not read as a tooling problem" "$OUT"
+unset LINGER_OK
 
 # ── break-glass off is a failure, and it must not read as an unreadable dump ──
 RUNSSH=false run

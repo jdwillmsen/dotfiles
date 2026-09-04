@@ -190,10 +190,11 @@ Classifying them fast is most of the value of this section.
   back to one with `ss -tlnp`, whose process name is the truncated hash. No
   unit, no restart policy. Killing one is safe and costs the next connection a
   reconnect.
-- **`sshd` holding `127.0.0.1:4713`** — this is the reverse-forwarded
-  PulseAudio port from [`voice-mode-ssh.md`](voice-mode-ssh.md), alive only for
-  the SSH connection that requested it. In `ss -tlnp` it reads like a resident
-  audio daemon. It is not one, and it is not something to restart.
+- **`sshd` holding `127.0.0.1:4713`** — a reverse-forwarded PulseAudio port
+  from a client whose `~/.ssh/config` still carries the retired microphone
+  forward (see [`voice-mode-ssh.md`](voice-mode-ssh.md)). In `ss -tlnp` it
+  reads like a resident audio daemon. It is not one, nothing on this box
+  listens for it any more, and the fix is on the client, not here.
 - **`/tmp/tmp.<random>` sandbox homes, with nothing running in them** —
   residue from a leak that is closed. Each one is a *whole* applied HOME, not a
   stray file: `tests/smoke.sh` applies chezmoi into a throwaway home, so the

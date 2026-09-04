@@ -5,3 +5,10 @@
 .config/systemd/user/ccr-health.service
 .config/systemd/user/ccr-health.timer
 .local/bin/ccr-health
+
+# The SSH-tunnelled microphone forward was retired: it only ever existed so
+# Claude Code's CLI recorder could reach a client mic from a box that has no
+# capture device, and the harness this machine now runs records on the phone
+# instead. This is the target it left behind on machines that applied the old
+# dotfiles.
+.asoundrc

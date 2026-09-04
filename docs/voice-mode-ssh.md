@@ -1,108 +1,46 @@
-# Claude Code Voice Mode Over SSH
+# Claude Code Voice Mode Over SSH — Retired
 
-Voice mode's dictation recorder (SoX) runs on whatever host the `claude`
-process runs on. Over a plain SSH + tmux session that's the remote box — which
-has no microphone. This forwards the client's mic to the remote box over the
-SSH connection so voice mode works there anyway.
+This box forwarded a client microphone to itself over SSH so Claude Code's CLI
+dictation would work in a remote session. That chain is gone. This note stays
+so the absence is a decision on the record rather than a gap someone rebuilds.
 
-**Scope: Claude Code's CLI dictation only.** T3 Code's voice input records on
-the client device and never asks the server for audio, so it does not use any
-of this — see [`t3code.md`](t3code.md#the-devbox-never-records-audio). Nothing
-else on the devbox needs a capture device either; this chain exists solely
-because SoX runs wherever `claude` runs.
+## What it was
 
-Client and server need matching PulseAudio-over-TCP setup. `sox`,
-`libasound2-plugins`, `pulseaudio-utils`, and `dot_asoundrc.tmpl` (redirects
-ALSA's default device to PulseAudio) are provisioned by this repo — see
-[`provisioning.md`](provisioning.md).
+Voice mode's recorder (SoX) runs on whatever host the `claude` process runs on.
+Over SSH that is this box, which has no capture device — `/dev/snd` carries
+only `seq` and `timer`. So the client ran a loopback PulseAudio TCP listener,
+`ssh` reverse-forwarded port 4713 to it, `PULSE_SERVER` pointed at the
+forwarded port inside SSH sessions, and `~/.asoundrc` redirected ALSA's default
+device to PulseAudio so SoX found something to record from.
 
-## WSL2 (WSLg) client → Linux server
+## Why it went
 
-WSLg ships its own PulseAudio server at `unix:/mnt/wslg/PulseServer` — that's
-what bridges the Windows mic into WSL. There's no PipeWire involved; don't
-install or configure `pipewire-pulse` for this path, it isn't there.
+- It was broken: the client no longer runs the PulseAudio tools the chain
+  needs, so the recorder had nothing to reach.
+- It announced that breakage on every login, as a failed-port-forward warning
+  from a forward nothing was listening for.
+- Its setup was written against WSLg's bundled PulseAudio server, which is a
+  client-side assumption this repo cannot see and had already drifted.
+- The capability it provided arrived by a path that asks nothing of this box:
+  the agent harness in [`t3code.md`](t3code.md#voice-input) takes voice input on
+  the iOS app, recording and transcribing on the phone and submitting text.
 
-**Client (inside WSL):**
+What is lost is dictation into the `claude` CLI *specifically*, in a session
+hosted here. Voice mode on a machine that has its own microphone is unaffected
+— `sox` is still provisioned for that.
 
-1. Load a TCP listener onto WSLg's existing Pulse server, loopback-only:
-   ```
-   pactl load-module module-native-protocol-tcp listen=127.0.0.1 port=4713 auth-ip-acl=127.0.0.1 auth-anonymous=1
-   ```
-   `auth-anonymous=1` is required — cookie-based auth over this path doesn't
-   cleanly reject on mismatch, it **hangs** (`pactl info` times out instead of
-   refusing). Copying `~/.config/pulse/cookie` to the server is not a
-   reliable fix (WSLg regenerates the cookie on module reload); anonymous
-   auth is safe here because the listener is already restricted to loopback
-   + `auth-ip-acl=127.0.0.1`, and nothing reaches that port except through
-   the SSH tunnel below. Verify:
-   ```
-   PULSE_SERVER=tcp:127.0.0.1:4713 pactl info
-   ```
-   Want a normal info dump (check `Default Source:`), not "Connection
-   refused" or a hang.
+## What was removed
 
-2. Persist across WSL restarts — module loads don't survive a reboot.
-   `dot_bashrc` in this repo already carries a guarded loader for this
-   (search `WSL_DISTRO_NAME` there); it polls for `/mnt/wslg/PulseServer`
-   for up to 5s before giving up, since a one-shot check can run before
-   WSLg's Pulse socket exists yet and would otherwise skip loading for the
-   rest of that shell's life. `chezmoi apply` deploys it — no manual edit
-   needed.
+The provisioning script for `pulseaudio-utils`, `libasound2-plugins` and
+`alsa-utils`; `dot_asoundrc.tmpl`; the `PULSE_SERVER` export in
+`dot_config/shell/exports.sh`; and the WSL-guarded PulseAudio TCP loader in
+`dot_bashrc`. `home/.chezmoiremove` deletes the deployed `~/.asoundrc` on the
+next apply.
 
-3. Add to `~/.ssh/config`:
-   ```
-   Host <remote-host>
-       RemoteForward 4713 127.0.0.1:4713
-   ```
-   The forward only comes up for the lifetime of that SSH connection — reconnect
-   after adding it.
+## The client-side leftover
 
-4. `ssh <remote-host>` as usual.
-
-**Server (this repo already provisions the packages and `~/.asoundrc`):**
-
-- `PULSE_SERVER` is exported automatically inside SSH sessions (see
-  `dot_config/shell/exports.sh`), pointing at the forwarded port.
-- Verify: `pactl info` should report the client's Pulse server (`Host Name:`
-  will be the Windows/WSL box), not "Connection refused" or a hang. A hang
-  here almost always means step 1's `auth-anonymous=1` is missing on the
-  client.
-- `arecord -d 2 -f cd /tmp/mictest.wav` should produce a non-trivial file if
-  the whole chain works.
-
-## Native Linux client → Linux server
-
-Client runs PipeWire-Pulse rather than WSLg's bundled server:
-
-1. Enable PipeWire-Pulse's TCP listener with a drop-in, rather than copying
-   the whole shipped config — a full copy silently stops tracking upstream
-   changes to every other setting in it:
-
-   ```
-   # ~/.config/pipewire/pipewire-pulse.conf.d/50-tcp.conf
-   pulse.properties = {
-     server.address = [
-       "unix:native"
-       { address = "tcp:127.0.0.1:4713"
-         client.access = "restricted"
-       }
-     ]
-   }
-   ```
-
-   Then `systemctl --user restart pipewire-pulse`.
-2. Same `~/.ssh/config` `RemoteForward` and server-side verification as above.
-
-Note the `auth-anonymous=1` discussion in the WSLg section does not carry over.
-PipeWire's Pulse emulation implements neither `auth-anonymous` nor
-`auth-ip-acl` — its TCP listener accepts whoever can reach it, and
-`pulse.allow-module-loading` defaults to true. Binding `127.0.0.1` is therefore
-the only thing keeping that socket private, which makes the loopback bind
-load-bearing here rather than merely tidy.
-
-## Caveat
-
-The tunnel binds `127.0.0.1` on both ends — nothing but that SSH session can
-reach the forwarded mic. Don't widen this to `0.0.0.0` without knowing why.
-
-Source: [javedab.com/.../claude-code-voice-over-ssh](https://javedab.com/en/pub/ai/ai-editors/claude-code-voice-over-ssh/)
+The forward itself was never in this repo — it lives in the client's
+`~/.ssh/config` as a `RemoteForward 4713 127.0.0.1:4713` line under the devbox
+host. Delete that line; until it is gone, each connection still asks for a
+forward this box no longer serves, and `ss -tlnp` here still shows `sshd`
+holding `127.0.0.1:4713`.

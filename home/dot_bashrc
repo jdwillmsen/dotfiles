@@ -81,17 +81,3 @@ export SDKMAN_DIR="$HOME/.sdkman"
 
 # cargo
 [ -s "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
-
-# Voice mode mic forward (see docs/voice-mode-ssh.md): WSLg's Pulse socket
-# can still be initialising when this file is sourced, so a one-shot check
-# here would silently skip forever on that shell. Poll briefly instead of
-# checking once.
-if [ -n "$WSL_DISTRO_NAME" ] && command -v pactl &>/dev/null; then
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-        [ -S /mnt/wslg/PulseServer ] && break
-        sleep 0.5
-    done
-    if [ -S /mnt/wslg/PulseServer ] && ! PULSE_SERVER=tcp:127.0.0.1:4713 pactl info &>/dev/null; then
-        pactl load-module module-native-protocol-tcp listen=127.0.0.1 port=4713 auth-ip-acl=127.0.0.1 auth-anonymous=1 &>/dev/null
-    fi
-fi

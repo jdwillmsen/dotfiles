@@ -103,7 +103,7 @@ These run as part of `chezmoi apply` and need no root:
 
 | Script | Installs |
 |---|---|
-| `run_once_42-install-cli-tools.sh` | ripgrep, delta, fd, eza, zoxide, starship, fzf, direnv, nvim, sox (Claude Code voice mode's audio recorder), cmake |
+| `run_once_42-install-cli-tools.sh` | ripgrep, delta, fd, eza, zoxide, starship, fzf, direnv, nvim, sox (Claude Code voice mode's recorder, useful only on a host that has a microphone of its own), cmake |
 | `run_onchange_43-install-agent-clis.sh.tmpl` | the CLIs the agent skills drive — version-pinned, see below |
 | `run_once_45-install-python-tools.sh` | uv, pipx |
 | `run_once_46-install-cloud-clis.sh` | terraform, aws, gcloud, az |

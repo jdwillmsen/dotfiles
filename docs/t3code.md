@@ -167,10 +167,12 @@ never opens a capture device. That matters because it has none: `/dev/snd`
 carries only `seq` and `timer`, and no PulseAudio or PipeWire daemon is
 installed.
 
-The practical consequence: [`voice-mode-ssh.md`](voice-mode-ssh.md) is **not** a
-dependency of T3 Code voice input. That document forwards a client microphone
-to this box for Claude Code's CLI dictation, which runs its recorder locally.
-The two look related and are not. Do not wire T3 Code to it.
+The SSH microphone forward that once carried a client mic to this box was
+**not** a dependency of T3 Code voice input — it existed because Claude Code's
+CLI recorder runs on whatever host `claude` runs on, which is the opposite of
+the boundary above. It has since been retired;
+[`voice-mode-ssh.md`](voice-mode-ssh.md) records why. Do not rebuild it for T3
+Code.
 
 For the same reason there is nothing to add to any `.devcontainer` — passing
 `--device /dev/snd` into a container whose host has no capture device maps

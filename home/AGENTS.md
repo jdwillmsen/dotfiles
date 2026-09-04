@@ -21,7 +21,7 @@ with the `dotfiles` alias (`cd "$(chezmoi source-path)"`).
 - No standalone `~/dotfiles` clone exists or should be made — it drifts from
   this source and has caused confusion before.
 - **Standing rule:** any devbox config change — shell, tmux, SSH-into-devbox
-  setup (`docs/provisioning.md`, `docs/voice-mode-ssh.md`), env vars, editor
+  setup (`docs/provisioning.md`), env vars, editor
   config — gets mirrored into chezmoi source and committed, not left only in
   the deployed target. Check `git status` in the source dir after any such
   change; if it's dirty, that change is not standardized yet.

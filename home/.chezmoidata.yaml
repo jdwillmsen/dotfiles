@@ -111,3 +111,10 @@ t3Providers:
   # account, a Gemini API key, or Gemini Enterprise, chosen in T3's settings.
   - driver: antigravity
     minVersion: "0.0.39"
+# Pipeline agent for no-mistakes, as an ordered fallback list. Its config file
+# is the tool's own, shipped full of documented defaults and extended by its
+# upgrades, so script 54 rewrites this one key in place rather than chezmoi
+# managing the file. claude leads because it reviews best; codex follows so a
+# usage limit on one account stops being a stopped pipeline, which is exactly
+# what it cost once.
+noMistakesAgent: "[claude, codex]"

@@ -280,6 +280,20 @@ the providers T3 Code spawns, listed in
 script, `52`, turns those on inside T3 and gives the service a `PATH` that can
 reach them — see the same document.
 
+Installing those providers also widened what no-mistakes itself can review
+with: `no-mistakes doctor` reports every agent binary it recognises, and until
+codex, grok and opencode were on the box, `claude` was the only one. Script
+`54` sets its `agent` key to the ordered fallback list declared as
+`noMistakesAgent`, so a usage limit on one account no longer stops the
+pipeline — which is what it did once, mid-run, at the review step.
+
+That key lives in `~/.no-mistakes/config.yaml`, which the tool ships full of
+documented defaults and extends on upgrade. Script `54` rewrites the one line
+and leaves the rest byte for byte, the same reasoning as `52` and T3's
+`settings.json`: chezmoi managing a file the application owns freezes it at
+whatever version wrote the copy in the source dir. The daemon reads its config
+at startup, so the change lands on `no-mistakes daemon restart`.
+
 The declared version is then enforced as far as each channel allows, and no
 further:
 

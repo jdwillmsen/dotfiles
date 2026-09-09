@@ -38,7 +38,10 @@ grep -qE 'sudo[^-]*apt-get' "$cli" && ! grep -q 'sudo -n apt-get' "$cli" &&
 # package's maintainer scripts run as root. Pin the set so a changed or added
 # package has to be an explicit, reviewed edit here rather than a one-word diff
 # in the table that reads like every other manager id.
-APT_ALLOWED='git-delta fd-find eza zoxide fzf direnv neovim unzip sox cmake ripgrep gh kubectl age openjdk-21-jdk'
+# bubblewrap is the one entry here that exists to *add* a boundary rather than
+# a convenience: it is the sandbox Codex confines its own tool calls to, and
+# without it Codex runs them against the real filesystem instead.
+APT_ALLOWED='git-delta fd-find eza zoxide fzf direnv neovim unzip sox cmake ripgrep gh kubectl age openjdk-21-jdk bubblewrap'
 # Whole-token comparison, not `grep -w`: a hyphen is a word boundary to grep,
 # so `fd` and `find` would both pass against the allowed `fd-find`, and a
 # security boundary that accepts substrings of its own entries is not one.

@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# no-mistakes ships its own config file, thick with documented defaults that its
+# upgrades extend. chezmoi managing that file would freeze it at whatever
+# version wrote the copy in the source dir, so this rewrites the single key the
+# repo has an opinion about and leaves every other line, comment included,
+# exactly as the tool wrote it.
+#
+# Rendering the wanted value is what retriggers the run:
+# want agent: {{ .noMistakesAgent }}
+{{ if ne .chezmoi.destDir .chezmoi.homeDir -}}
+echo "no-mistakes agent: applying to {{ .chezmoi.destDir }}, not the live home — skipping"
+exit 0
+{{ end -}}
+
+config="$HOME/.no-mistakes/config.yaml"
+want={{ .noMistakesAgent | quote }}
+
+if [ ! -f "$config" ]; then
+    echo "no-mistakes agent: no $config — run 'no-mistakes init' in a repo first"
+    exit 0
+fi
+
+# Anchored to the start of the line so a commented example of the same key is
+# left alone; the tool's own file carries several.
+current="$(sed -n 's/^agent:[[:space:]]*//p' "$config" | head -n1)"
+if [ -z "$current" ]; then
+    echo "no-mistakes agent: $config declares no top-level agent key — leaving it alone"
+    exit 0
+fi
+if [ "$current" = "$want" ]; then
+    echo "no-mistakes agent: already $want"
+    exit 0
+fi
+
+# awk over sed -i: the value carries brackets and commas, and only the first
+# matching line may change. Same-directory temp plus mv so a daemon reading the
+# file never sees a partial one.
+tmp="$(mktemp "${config}.XXXXXX")"
+awk -v want="$want" '
+    !done && /^agent:/ { print "agent: " want; done = 1; next }
+    { print }
+' "$config" >"$tmp"
+
+# A rewrite that changed no line, or dropped one, means the match above missed
+# and the file must not be replaced on a guess.
+if [ "$(wc -l <"$tmp")" != "$(wc -l <"$config")" ]; then
+    rm -f "$tmp"
+    echo "no-mistakes agent: rewrite changed the line count of $config — leaving it alone"
+    exit 0
+fi
+mv "$tmp" "$config"
+echo "no-mistakes agent: $current -> $want"
+
+# The daemon reads its config at startup, so a running one keeps the old agent.
+# Not restarted here: a restart during an active run is the pipeline's business,
+# not an apply's.
+if command -v no-mistakes >/dev/null 2>&1; then
+    echo "no-mistakes agent: restart the daemon to pick this up — no-mistakes daemon restart"
+fi

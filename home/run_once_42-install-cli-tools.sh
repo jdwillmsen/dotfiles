@@ -8,6 +8,9 @@ set -euo pipefail
 # rg leads the table: rtk shells out to it for every search and prints a
 # fallback warning per call when it is absent, so it is a hard dependency of the
 # rtk install rather than another convenience CLI.
+# bwrap is Linux-only by nature — it is the kernel-namespace sandbox Codex puts
+# its own tool calls inside. Without it Codex falls back to a bundled copy and
+# says so on every invocation.
 TOOLS='
 rg|ripgrep|BurntSushi.ripgrep.MSVC|ripgrep|ripgrep|ripgrep
 delta|git-delta|dandavison.delta|delta|git-delta|git-delta
@@ -20,6 +23,7 @@ direnv|direnv|direnv.direnv|direnv|direnv|
 nvim|neovim|Neovim.Neovim|neovim|neovim|
 sox|sox||sox|sox|
 cmake|cmake|Kitware.CMake|cmake|cmake|
+bwrap||||bubblewrap|
 '
 
 # apt is the only manager here that needs root. `chezmoi apply` runs unattended

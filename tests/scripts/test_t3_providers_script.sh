@@ -250,6 +250,27 @@ else
     echo "SKIP: npm not on this host — the npm-bin link cases were not exercised"
 fi
 
+# ── An npm that answers nothing must not resolve to /bin ──
+# "$(npm prefix -g)/bin" on empty output is the string "/bin", which exists —
+# so an unguarded version silently pointed the service's first PATH entry at
+# the system bin directory.
+h="$(new_home "0.0.38")"
+echo '{}' >"$h/.t3/userdata/settings.json"
+cat >"$tmp/bin/npm" <<'STUB'
+#!/bin/sh
+exit 1
+STUB
+chmod +x "$tmp/bin/npm"
+run_trigger "$h"
+[ "$rc" -eq 0 ] || fail "trigger failed against an npm that reports no prefix" "$out"
+[ "$(readlink "$h/.local/npm-bin" 2>/dev/null)" != "/bin" ] \
+    || fail "an npm reporting nothing linked the stable name at /bin"
+[ ! -e "$h/.local/npm-bin" ] || fail "a link was created from an unusable prefix" \
+    "$(readlink "$h/.local/npm-bin")"
+echo "$out" | grep -q "no usable global bin directory" \
+    || fail "an unusable npm prefix was not reported" "$out"
+rm -f "$tmp/bin/npm"
+
 # ── No npm at all: says so, and still reconciles the providers ──
 # A box can carry T3 without node; the merge must not be collateral damage.
 h="$(new_home "0.0.38")"

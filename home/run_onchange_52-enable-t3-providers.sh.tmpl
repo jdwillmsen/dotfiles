@@ -30,8 +30,12 @@ exit 0
 # the service pointed at a prefix that no longer exists.
 npm_bin_link="$HOME/.local/npm-bin"
 if command -v npm >/dev/null 2>&1; then
-    npm_bin="$(npm prefix -g 2>/dev/null)/bin"
-    if [ -d "$npm_bin" ]; then
+    # Held separately and checked for emptiness before the suffix goes on: an
+    # npm that answers nothing would otherwise make this "/bin", which exists,
+    # and the link would quietly put the system bin first on the service PATH.
+    npm_prefix="$(npm prefix -g 2>/dev/null)" || npm_prefix=""
+    npm_bin="${npm_prefix:+$npm_prefix/bin}"
+    if [ -n "$npm_bin" ] && [ -d "$npm_bin" ]; then
         # -n so an existing symlink is replaced rather than followed, which
         # would otherwise nest the new link inside the old target.
         if [ "$(readlink "$npm_bin_link" 2>/dev/null)" != "$npm_bin" ]; then
@@ -40,7 +44,7 @@ if command -v npm >/dev/null 2>&1; then
             echo "t3 providers: $npm_bin_link -> $npm_bin"
         fi
     else
-        echo "t3 providers: npm reports a global prefix with no bin directory — $npm_bin_link left alone"
+        echo "t3 providers: npm reported no usable global bin directory — $npm_bin_link left alone"
     fi
 else
     echo "t3 providers: no npm on PATH — $npm_bin_link left alone, npm-installed providers will not resolve"

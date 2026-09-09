@@ -60,6 +60,34 @@ while IFS= read -r row; do
     apt_allowed "$pkg" ||
         fail "apt package '$pkg' is not in the reviewed allowlist"
 done <<< "$rows"
+
+# Run the provisioner against an inert apt/sudo pair. This verifies the new
+# sandbox dependency reaches the root-facing invocation, rather than merely
+# appearing in the declarative table and its reviewed allowlist.
+apt_tmp="$(mktemp -d "$CHEZ_TMP_ROOT/apt-provision.XXXXXXXX")"
+apt_stub="$apt_tmp/stub"; apt_sysbin="$apt_tmp/sysbin"
+mkdir -p "$apt_stub" "$apt_sysbin"
+cat >"$apt_stub/sudo" <<'SH'
+#!/usr/bin/env sh
+[ "$1" = -n ] && shift
+[ "${1:-}" = true ] && exit 0
+exec "$@"
+SH
+cat >"$apt_stub/apt-get" <<'SH'
+#!/usr/bin/env sh
+printf '%s\n' "$*" >>"$APT_LOG"
+SH
+chmod 755 "$apt_stub/sudo" "$apt_stub/apt-get"
+for utility in bash sh env mkdir ln; do
+    utility_path="$(type -P "$utility")" || fail "cannot seal $utility"
+    ln -s "$utility_path" "$apt_sysbin/$utility"
+done
+apt_log="$apt_tmp/apt.log"
+env -i PATH="$apt_stub:$apt_sysbin" HOME="$apt_tmp/home" APT_LOG="$apt_log" \
+    bash "$cli" >/dev/null
+grep -qxF 'install -y -qq bubblewrap' "$apt_log" ||
+    fail "bubblewrap did not reach the apt-get invocation"
+
 # Same boundary, other script: unzip is the only package it may install.
 # Process substitution, not a pipeline: `fail` in a piped-into loop runs in a
 # subshell and its exit never reaches this script.

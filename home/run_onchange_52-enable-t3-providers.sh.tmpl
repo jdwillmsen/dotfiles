@@ -15,16 +15,36 @@ set -euo pipefail
 # changes the version, which is what lets a version-gated row switch on at the
 # first apply after the upgrade rather than waiting for an unrelated edit.
 # T3 runtime: {{ $activeVersion | default "none" }}
-# Provider PATH drop-in — hashed so an edit to it, and the npm prefix moving
-# under a node upgrade, both land the daemon-reload below:
-# {{ include "dot_config/systemd/user/t3code.service.d/10-provider-path.conf.tmpl" | sha256sum }}
-# {{ if lookPath "npm" }}{{ output "npm" "prefix" "-g" | trim }}{{ else }}no npm{{ end }}
+# Provider PATH drop-in — hashed so an edit to it lands the daemon-reload below:
+# {{ include "dot_config/systemd/user/t3code.service.d/10-provider-path.conf" | sha256sum }}
 {{ range .t3Providers }}# want {{ .driver }}{{ if hasKey . "minVersion" }} (needs T3 >= {{ .minVersion }}){{ end }}
 {{ end }}
 {{ if ne .chezmoi.destDir .chezmoi.homeDir -}}
 echo "t3 providers: applying to {{ .chezmoi.destDir }}, not the live home — skipping"
 exit 0
 {{ end -}}
+
+# The drop-in names ~/.local/npm-bin so it can stay static; this is what makes
+# that name mean something. Resolved from npm at run time rather than rendered,
+# so a node upgrade is repaired by the next apply instead of silently leaving
+# the service pointed at a prefix that no longer exists.
+npm_bin_link="$HOME/.local/npm-bin"
+if command -v npm >/dev/null 2>&1; then
+    npm_bin="$(npm prefix -g 2>/dev/null)/bin"
+    if [ -d "$npm_bin" ]; then
+        # -n so an existing symlink is replaced rather than followed, which
+        # would otherwise nest the new link inside the old target.
+        if [ "$(readlink "$npm_bin_link" 2>/dev/null)" != "$npm_bin" ]; then
+            mkdir -p "$HOME/.local"
+            ln -sfn "$npm_bin" "$npm_bin_link"
+            echo "t3 providers: $npm_bin_link -> $npm_bin"
+        fi
+    else
+        echo "t3 providers: npm reports a global prefix with no bin directory — $npm_bin_link left alone"
+    fi
+else
+    echo "t3 providers: no npm on PATH — $npm_bin_link left alone, npm-installed providers will not resolve"
+fi
 
 # The drop-in only takes effect once systemd re-reads the unit, and a provider
 # that cannot be spawned is indistinguishable from one that is broken.

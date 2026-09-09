@@ -107,14 +107,16 @@ t3Providers:
   - driver: opencode
     binaryPath: opencode
   # Antigravity gained a provider driver after 0.0.38, where the name meant
-  # only the "open in editor" target. It spawns nothing: sign-in is a Google
-  # account, a Gemini API key, or Gemini Enterprise, chosen in T3's settings.
+  # only the "open in editor" target. It carries no binaryPath deliberately:
+  # T3 downloads and resolves the official ACP server itself, so naming a path
+  # here would pin something T3 manages. Sign-in is chosen in T3's settings.
   - driver: antigravity
     minVersion: "0.0.39"
 # Pipeline agent for no-mistakes, as an ordered fallback list. Its config file
 # is the tool's own, shipped full of documented defaults and extended by its
 # upgrades, so script 54 rewrites this one key in place rather than chezmoi
-# managing the file. claude leads because it reviews best; codex follows so a
-# usage limit on one account stops being a stopped pipeline, which is exactly
-# what it cost once.
-noMistakesAgent: "[claude, codex]"
+# managing the file. claude leads because it reviews best, then codex, then
+# grok — a usage limit on one account stops being a stopped pipeline, which is
+# exactly what it cost twice: claude's daily limit, and then the free-tier
+# codex quota behind it, which does not reset for a month.
+noMistakesAgent: "[claude, codex, grok]"

@@ -32,15 +32,6 @@ echo "$skills" | grep -q 'cd "$HOME"' || { echo "FAIL: skills script must cd to 
 clis="$(render home/run_onchange_43-install-agent-clis.sh.tmpl)"
 echo "$clis" | shellcheck -s bash -
 
-# A script row is piped to `sh` unless it names a `shell`. Cursor's installer
-# is bash-only, and dash parses its `[[ ]]` without complaint before failing at
-# run time — so a row that lost its shell would install nothing and say so only
-# in the vendor installer's own error.
-echo "$clis" | grep -qF 'curl -fsSL "https://cursor.com/install" | bash' ||
-    { echo "FAIL: cursor's installer is not piped to bash"; exit 1; }
-echo "$clis" | grep -qE 'curl -fsSL "[^"]*no-mistakes[^"]*" \| sh; then$' ||
-    { echo "FAIL: a row without a shell no longer defaults to sh"; exit 1; }
-
 # Both scripts run under `set -e`, where a trailing `cond && echo` aborts the
 # script whenever the condition is false — silently skipping everything after it.
 for s in "$skills" "$clis"; do
@@ -101,7 +92,26 @@ cat >"$stub/curl" <<'SH'
 #!/usr/bin/env bash
 echo "curl ${!#}" >>"$STUB_LOG"
 [ "${CURL_MODE:-ok}" = ok ] || exit 22
-printf 'exec "$VENDOR_INSTALLER"\n'
+case "${!#}" in
+    https://cursor.com/install)
+        cat <<'INSTALLER'
+[[ -n "${BASH_VERSION:-}" ]] || { echo "cursor installer requires bash" >&2; exit 64; }
+printf 'cursor-bash\n' >>"$STUB_LOG"
+cat >"$STUB_DIR/cursor-agent" <<EOF
+#!/usr/bin/env bash
+echo "$CURSOR_VERSION"
+EOF
+chmod 755 "$STUB_DIR/cursor-agent"
+INSTALLER
+        ;;
+    *)
+        cat <<'INSTALLER'
+[ -z "${BASH_VERSION:-}" ] || { echo "default installer requires sh" >&2; exit 65; }
+printf 'default-sh\n' >>"$STUB_LOG"
+exec "$VENDOR_INSTALLER"
+INSTALLER
+        ;;
+esac
 SH
 
 # npm honours an exact `pkg@version`, so this stub installs whatever version
@@ -175,7 +185,10 @@ run() {
     local row
     for row in "${all_rows[@]}"; do rm -f "${stub:?}/$row"; done
     for row in "${all_rows[@]}"; do
-        case "$row" in no-mistakes|gnhf) continue ;; esac
+        case "$row" in
+            no-mistakes|gnhf) continue ;;
+            cursor-agent) [ "${EXERCISE_CURSOR:-0}" = 1 ] && continue ;;
+        esac
         seed "$row" "$(declared "$row")"
     done
     [ -z "${SEED_NM:-}" ] || seed no-mistakes "\"no-mistakes version $SEED_NM (cafe123) 2026-01-01T00:00:00Z\""
@@ -187,6 +200,7 @@ run() {
         STUB_LOG="$log" STUB_DIR="$stub" VENDOR_INSTALLER="$tmp/vendor-installer" \
         npm_config_prefix="$tmp/npm-global" \
         VENDOR_VERSION="${VENDOR_VERSION:-$nm_want}" \
+        CURSOR_VERSION="$(declared cursor-agent)" \
         CURL_MODE="${CURL_MODE:-ok}" NPM_MODE="${NPM_MODE:-ok}" \
         bash "$tmp/clis.sh" 2>&1)" || rc=$?
 }
@@ -201,6 +215,14 @@ logged "^npm install -g gnhf@$gnhf_want\$" ||
     fail "absent gnhf was not installed at the declared version" "$(cat "$log")"
 echo "$out" | grep -q "no-mistakes: now at $nm_want" || fail "no-mistakes not converged" "$out"
 echo "$out" | grep -q "gnhf: now at $gnhf_want" || fail "gnhf not converged" "$out"
+
+# Cursor's payload rejects sh, while the no-mistakes payload rejects bash.
+# Driving both through their script rows proves the optional shell reaches the
+# pipeline and that rows without it still execute with the default.
+SEED_NM='' SEED_GNHF="$gnhf_want" EXERCISE_CURSOR=1 run
+[ "$rc" -eq 0 ] || fail "script-installer shell selection failed" "$out"
+logged '^cursor-bash$' || fail "Cursor installer did not execute under bash" "$out"
+logged '^default-sh$' || fail "default script installer did not execute under sh" "$out"
 
 # ── Already at the declared version: a genuine no-op ────────────────────────
 SEED_NM="$nm_want" SEED_GNHF="$gnhf_want" run

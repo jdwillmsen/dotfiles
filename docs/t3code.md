@@ -1,9 +1,10 @@
 # T3 Code — driving devbox agents from a phone
 
 T3 Code is an agent harness: a web/desktop/mobile front end over the agent
-CLIs already installed here (Claude Code, and optionally Codex, Cursor, Grok,
-OpenCode). It runs as a headless server on the devbox and reuses the existing
-`~/.claude` credentials — there is no second login and no second subscription.
+CLIs already installed here (Claude Code, Codex, Cursor, Grok and OpenCode —
+see [Providers](#providers)). It runs as a headless server on the devbox and
+reuses each CLI's own credentials — for Claude Code that is `~/.claude`, so
+there is no second login and no second subscription.
 
 What it adds over `ssh` + `tmux` is a touch-usable surface. Reading a diff,
 approving a step, or starting a thread from a phone works in a way a terminal
@@ -132,6 +133,81 @@ notes): a systemd user unit inherits no interactive `PATH`.
 `chezmoi apply` reloads and enables the timer; by hand, `systemctl --user
 daemon-reload && systemctl --user enable --now t3-session-expiry.timer`.
 
+## Providers
+
+T3 Code drives each provider as a child process it spawns by bare binary name,
+except Antigravity, which it calls as an API. It sells nothing and stores no
+credential of its own: every CLI below is installed and authenticated
+separately, and the harness only launches what is already working.
+
+| Provider | Binary | Installed by | Sign-in |
+|---|---|---|---|
+| Claude Code | `claude` | vendor installer (`~/.local/bin`) | already signed in via `~/.claude` |
+| Codex | `codex` | `@openai/codex`, npm row in `agentClis` | `codex login` (ChatGPT plan or `OPENAI_API_KEY`) |
+| Cursor | `cursor-agent` | `https://cursor.com/install`, script row in `agentClis` | `cursor-agent login` |
+| Grok | `grok` | `@xai-official/grok`, npm row in `agentClis` | `grok` on first run, or `XAI_API_KEY` |
+| OpenCode | `opencode` | `opencode-ai`, npm row in `agentClis` | `opencode auth login`, plus the providers in `~/.config/opencode/opencode.json` |
+| Antigravity | none — API | nothing to install | Google account, Gemini API key, or Gemini Enterprise, chosen in T3's settings |
+
+Versions are pinned in the `agentClis` table described in
+[`provisioning.md`](provisioning.md#agent-cli-versions); upgrading any of them
+is a one-line edit there.
+
+**Sign-ins run in your own terminal, never through an agent.** Each command
+above prints or exchanges a credential, and an agent's shell tool persists that
+output into a transcript. Open a separate SSH login or tmux pane and run them
+there.
+
+### Enabling them in T3
+
+T3 ships Cursor, Grok, OpenCode and Antigravity disabled, and it owns
+`userdata/settings.json` — the server rewrites that file itself, so chezmoi
+does not manage it. Script `52` merges the enable flags and any missing
+provider instance into it instead, leaving every other key the server has
+written alone. The wanted set lives in the `t3Providers` table in
+`home/.chezmoidata.yaml`.
+
+Antigravity carries a `minVersion` there. It gained a provider driver after
+0.0.38, where the same name meant only the "open in editor" target, so the
+script leaves the row out entirely until `runtime/service-state.json` reports a
+runtime new enough to decode it — an older T3 meeting a driver its schema has
+never heard of risks the whole provider config. That version is rendered into
+the script, so the first apply after a T3 upgrade is what switches the row on.
+
+Neither the script nor an apply restarts the service. `t3code.service` owns
+every agent session on this box, so a restart is deliberate:
+
+```bash
+systemctl --user restart t3code.service
+```
+
+### PATH
+
+A systemd user unit inherits none of an interactive shell's `PATH`. The default
+reaches neither `~/.local/bin` nor the version-managed npm prefix, which is
+every provider binary here — so without help each one fails to spawn.
+`~/.config/systemd/user/t3code.service.d/10-provider-path.conf` supplies a
+`PATH` covering both. It is a drop-in rather than an edit to the unit because
+`npx t3@latest service update` regenerates the unit and would drop the setting.
+
+The npm prefix in it is resolved at chezmoi apply time and is node-version
+specific, exactly like the unit's own hardcoded `ExecStart` node path. After an
+nvm major-version change, run `chezmoi apply` alongside
+`npx t3@latest service update`.
+
+### OpenCode models
+
+OpenCode is bring-your-own-model. `~/.config/opencode/opencode.json` declares
+the two endpoints that need wiring by hand: the LAN `gpu-stack` server, which
+needs no credential, and NVIDIA NIM, which reads
+`PLATFORMCTL_JDWLABS_NVIDIA_API_KEY` from the environment. Anything OpenCode
+already knows from its own catalog — Anthropic, OpenAI, OpenRouter — is reached
+through `opencode auth login` instead and needs nothing in that file.
+
+The `gpu-stack` model carries an explicit `limit`. OpenCode otherwise requests
+32000 output tokens, which alone overruns that server's 32768-token window and
+fails every call.
+
 ## Voice input
 
 Voice input exists on the **iOS app only**, and it needs nothing from this box.
@@ -217,10 +293,10 @@ own branch and worktree under `~/.t3/worktrees`, which satisfies the
 throwaway-sandbox condition that mode assumes. The mode is per-thread, chosen
 in the composer; it is not a server-wide setting.
 
-**Provider binaries must be on the server's `PATH`.** `claude` resolves from
-`~/.local/bin`, which is stable. Anything installed through a version manager
-needs an explicit binary path set per provider in Settings, since the systemd
-unit does not inherit an interactive shell's `PATH`.
+**Provider binaries must be on the server's `PATH`**, which the systemd unit
+does not inherit from any shell. The drop-in described under
+[PATH](#path) supplies one; the alternative, if you ever need a binary outside
+it, is an explicit path set per provider in T3's settings.
 
 **The generated unit hardcodes an nvm-versioned node path** in `ExecStart`.
 Removing that node version breaks the service at next start, with no warning

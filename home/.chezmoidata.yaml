@@ -66,3 +66,48 @@ agentClis:
     kind: npm
     version: "0.1.47"
     package: gnhf
+  # The four agent CLIs T3 Code can drive besides Claude Code, which arrives
+  # with its own installer. T3 resolves each by bare binary name on PATH, so
+  # the names below are the ones its provider drivers look for — `cursor-agent`
+  # rather than the `agent` alias the same installer also places.
+  - name: codex
+    kind: npm
+    version: "0.153.4"
+    package: "@openai/codex"
+  - name: opencode
+    kind: npm
+    version: "1.18.30"
+    package: opencode-ai
+  - name: grok
+    kind: npm
+    version: "1.0.24"
+    package: "@xai-official/grok"
+  # Cursor's installer declares `#!/usr/bin/env bash` and uses a `[[ ]]`
+  # conditional, which the dash that `sh` resolves to on Debian parses but
+  # cannot run — so this row asks to be piped to bash rather than sh.
+  - name: cursor-agent
+    kind: script
+    version: "2026.09.08-6caf4ff"
+    shell: bash
+    posixUrl: "https://cursor.com/install"
+    windowsUrl: "https://cursor.com/install?win32=true"
+# T3 Code provider toggles. T3 ships these defaulted off and rewrites
+# ~/.t3/userdata/settings.json itself, so that file stays app-owned and script
+# 52 merges only these keys into it rather than chezmoi managing the whole
+# thing. `driver` is T3's own driver id — claudeAgent and codex are absent
+# because T3 enables those by default.
+# `binaryPath` is the name the driver resolves on PATH, omitted for a driver
+# that talks to an API rather than spawning a CLI. `minVersion` holds a row
+# back until the T3 runtime that will actually run is new enough to decode it.
+t3Providers:
+  - driver: cursor
+    binaryPath: cursor-agent
+  - driver: grok
+    binaryPath: grok
+  - driver: opencode
+    binaryPath: opencode
+  # Antigravity gained a provider driver after 0.0.38, where the name meant
+  # only the "open in editor" target. It spawns nothing: sign-in is a Google
+  # account, a Gemini API key, or Gemini Enterprise, chosen in T3's settings.
+  - driver: antigravity
+    minVersion: "0.0.39"

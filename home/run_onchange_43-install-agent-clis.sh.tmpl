@@ -64,7 +64,7 @@ else
     echo "{{ .name }} requires powershell on Windows"
 {{- else }}
 elif command -v curl &>/dev/null; then
-    if curl -fsSL {{ .posixUrl | quote }} | sh; then
+    if curl -fsSL {{ .posixUrl | quote }} | {{ if hasKey . "shell" }}{{ .shell }}{{ else }}sh{{ end }}; then
         confirm_version {{ .name | quote }} "$want"
     else
         echo "{{ .name }} install failed"

@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+set -euo pipefail
+{{ $stateFile := joinPath .chezmoi.homeDir ".t3" "runtime" "service-state.json" -}}
+{{- $activeVersion := "" -}}
+{{- if stat $stateFile -}}
+{{-   $activeVersion = get (output "cat" $stateFile | fromJson) "activeVersion" -}}
+{{- end -}}
+# T3 Code ships every provider below disabled and only ever writes
+# ~/.t3/userdata/settings.json itself — it is live application state, not
+# config, so chezmoi merges the enable flags in rather than managing the file
+# and clobbering whatever the server has written since the last apply.
+#
+# Rendering the wanted set and the runtime version below is also what
+# retriggers this run: adding a provider changes the set, and upgrading T3
+# changes the version, which is what lets a version-gated row switch on at the
+# first apply after the upgrade rather than waiting for an unrelated edit.
+# T3 runtime: {{ $activeVersion | default "none" }}
+# Provider PATH drop-in — hashed so an edit to it, and the npm prefix moving
+# under a node upgrade, both land the daemon-reload below:
+# {{ include "dot_config/systemd/user/t3code.service.d/10-provider-path.conf.tmpl" | sha256sum }}
+# {{ if lookPath "npm" }}{{ output "npm" "prefix" "-g" | trim }}{{ else }}no npm{{ end }}
+{{ range .t3Providers }}# want {{ .driver }}{{ if hasKey . "minVersion" }} (needs T3 >= {{ .minVersion }}){{ end }}
+{{ end }}
+{{ if ne .chezmoi.destDir .chezmoi.homeDir -}}
+echo "t3 providers: applying to {{ .chezmoi.destDir }}, not the live home — skipping"
+exit 0
+{{ end -}}
+
+# The drop-in only takes effect once systemd re-reads the unit, and a provider
+# that cannot be spawned is indistinguishable from one that is broken.
+dropin="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/t3code.service.d/10-provider-path.conf"
+if [ -f "$dropin" ] && systemctl --user show-environment >/dev/null 2>&1; then
+    systemctl --user daemon-reload
+    echo "t3 providers: reloaded units for $dropin"
+fi
+
+settings="${T3CODE_HOME:-$HOME/.t3}/userdata/settings.json"
+if [ ! -f "$settings" ]; then
+    echo "t3 providers: no $settings — install T3 Code first (npx t3@latest service install)"
+    exit 0
+fi
+if ! command -v jq >/dev/null 2>&1; then
+    echo "t3 providers: jq not found — cannot merge $settings safely"
+    exit 0
+fi
+
+active_version={{ $activeVersion | quote }}
+
+# True when the runtime that will actually serve these settings is at least
+# $1. A row gated above its version is left out entirely: an older T3 decodes
+# settings.json against a schema that has never heard of the driver, and the
+# cost of guessing wrong there is the whole provider config.
+runtime_at_least() {
+    [ -n "$active_version" ] || return 1
+    [ "$(printf '%s\n%s\n' "$1" "$active_version" | sort -V | head -n1)" = "$1" ]
+}
+
+before="$(cat "$settings")"
+merged="$before"
+skipped=()
+{{ range .t3Providers }}
+{{ if hasKey . "minVersion" }}if runtime_at_least {{ .minVersion | quote }}; then
+{{ end -}}
+merged="$(printf '%s' "$merged" | jq \
+    --arg driver {{ .driver | quote }} \
+    --arg binaryPath {{ if hasKey . "binaryPath" }}{{ .binaryPath | quote }}{{ else }}""{{ end }} '
+    .providers[$driver].enabled = true
+    # Only seed an instance that is absent. An existing row may carry a
+    # hand-edited binary path or server URL, and re-asserting the defaults here
+    # would silently undo that on every apply.
+    | if .providerInstances[$driver] == null then
+        .providerInstances[$driver] = {
+          driver: $driver,
+          enabled: true,
+          config: (if $binaryPath == "" then {} else { binaryPath: $binaryPath } end)
+        }
+      else
+        .providerInstances[$driver].enabled = true
+      end
+')"
+{{ if hasKey . "minVersion" -}}
+else
+    skipped+=({{ .driver | quote }})
+fi
+{{ end -}}
+{{ end }}
+for driver in ${skipped+"${skipped[@]}"}; do
+    echo "t3 providers: $driver needs a newer T3 than ${active_version:-none} — left off until the runtime is upgraded"
+done
+
+if [ "$merged" = "$before" ]; then
+    echo "t3 providers: already reconciled — nothing to do"
+    exit 0
+fi
+
+# Same-directory temp plus mv: settings.json is read by a running server, and a
+# partial write is a parse error that costs the whole provider config.
+tmp="$(mktemp "${settings}.XXXXXX")"
+printf '%s\n' "$merged" >"$tmp"
+mv "$tmp" "$settings"
+echo "t3 providers: reconciled $settings"
+
+# Deliberately not restarted here: t3code.service owns every agent session on
+# this box, including the one that may be running this apply, so picking the
+# moment is the operator's call.
+echo "t3 providers: restart to pick them up when no session is mid-flight — systemctl --user restart t3code.service"
+
+for binary in {{ range $i, $p := .t3Providers }}{{ if hasKey $p "binaryPath" }}{{ $p.binaryPath | quote }} {{ end }}{{ end }}; do
+    command -v "$binary" >/dev/null 2>&1 || echo "t3 providers: $binary is enabled but not on PATH — its sessions will fail to spawn"
+done

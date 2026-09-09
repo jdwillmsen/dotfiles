@@ -269,6 +269,17 @@ putting it back does not — the one case where a pin must not be a no-op.
 `run_onchange_` keys on the script name and re-runs whenever the contents
 differ from the last run, in either direction.
 
+A `script` row is piped to `sh` unless it names a `shell`. Cursor's installer
+is the reason the field exists: it declares `#!/usr/bin/env bash` and uses a
+`[[ ]]` conditional, which the dash behind `sh` on Debian parses without
+complaint and then cannot run.
+
+Rows exist here for two audiences. Some CLIs back an agent skill; the rest are
+the providers T3 Code spawns, listed in
+[`t3code.md`](t3code.md#providers) with their sign-in commands. A separate
+script, `52`, turns those on inside T3 and gives the service a `PATH` that can
+reach them — see the same document.
+
 The declared version is then enforced as far as each channel allows, and no
 further:
 

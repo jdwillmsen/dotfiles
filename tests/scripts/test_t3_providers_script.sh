@@ -67,7 +67,7 @@ run_trigger() {  # $1 = sandbox home; sets $out and $rc
     # BASH_ENV is re-sourced by bash on every non-interactive launch; an
     # ambient one from the caller's shell could reopen PATH and let the real
     # systemctl reach the live user manager instead of the stub.
-    out="$(PATH="$tmp/bin:$PATH" HOME="$1" CALL_LOG="$call_log" BASH_ENV=/dev/null \
+    out="$(PATH="$tmp/bin:$PATH" HOME="$1" XDG_CONFIG_HOME="$1/.config" CALL_LOG="$call_log" BASH_ENV=/dev/null \
         STUB_NO_MANAGER="${STUB_NO_MANAGER:-0}" "$bash_bin" "$script" 2>&1)"
     rc=$?
     set -e
@@ -166,7 +166,7 @@ echo '{}' >"$h/.t3/userdata/settings.json"
 elsewhere="$(mktemp -d "$tmp/dest.XXXXXX")"
 HOME="$h" chezmoi execute-template --source "$here/home" --destination "$elsewhere" \
     <"$trigger" >"$tmp/scratch-dest.sh"
-PATH="$tmp/bin:$PATH" HOME="$h" CALL_LOG="$call_log" BASH_ENV=/dev/null \
+PATH="$tmp/bin:$PATH" HOME="$h" XDG_CONFIG_HOME="$h/.config" CALL_LOG="$call_log" BASH_ENV=/dev/null \
     "$bash_bin" "$tmp/scratch-dest.sh" >"$tmp/scratch-dest.out" 2>&1
 grep -q "not the live home" "$tmp/scratch-dest.out" \
     || fail "a scratch-destination apply did not announce the skip" "$(cat "$tmp/scratch-dest.out")"

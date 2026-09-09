@@ -116,7 +116,9 @@ t3Providers:
 # is the tool's own, shipped full of documented defaults and extended by its
 # upgrades, so script 54 rewrites this one key in place rather than chezmoi
 # managing the file. claude leads because it reviews best, then codex, then
-# grok — a usage limit on one account stops being a stopped pipeline, which is
-# exactly what it cost twice: claude's daily limit, and then the free-tier
-# codex quota behind it, which does not reset for a month.
+# grok. The list exists because a usage limit on one account was a stopped
+# pipeline, three runs in a row: claude's daily window, then the free-tier
+# codex quota behind it, which does not reset for a month, then grok's free
+# Build quota. Failing over is worth having even when, as then, every account
+# behind the first is also free-tier.
 noMistakesAgent: "[claude, codex, grok]"

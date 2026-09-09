@@ -15,7 +15,7 @@ pressure is how a five-minute outage becomes an hour.
 | Service | Scope | Owned by | Enabled | Listens on | Health check |
 |---|---|---|---|---|---|
 | `tailscaled` | system | `scripts/provision-tailscale.sh` (root step, not `chezmoi apply`) | yes | UDP `41641` all interfaces; TCP `443` on the tailnet addresses (Serve); a random high port per family for the peer API | `tailscale status` |
-| `t3code.service` | user | `npx t3@latest service install` — **vendor-generated, no repo owner** | yes | `127.0.0.1:3773` | `systemctl --user status t3code` |
+| `t3code.service` | user | `npx t3@latest service install` — vendor-generated; the repo owns its provider-PATH drop-in | yes | `127.0.0.1:3773` | `systemctl --user status t3code` |
 | `no-mistakes-daemon-<hash>.service` | user | `no-mistakes daemon start` — **unit vendor-generated**; the binary is repo-owned | yes | unix socket only (`~/.no-mistakes/socket`) | `no-mistakes daemon status` |
 | `ssh.socket` → `ssh.service` | system | apt (`openssh-server`) | socket enabled, service `disabled` by design | `0.0.0.0:22`, `[::]:22` | `systemctl status ssh.socket` |
 | `docker.service`, `containerd.service` | system | `run_once_49-install-dev-tools.sh.tmpl` (opt-in, via `chezmoi apply`) | yes | nothing — no containers, `docker0` is DOWN | `docker info` |
@@ -68,8 +68,9 @@ box with no tailnet.
 
 **3. Nothing in the repo recreates it.** Two services and one pile of state:
 
-- **`t3code.service`** is written by `npx t3@latest service install`. There is
-  no `t3` binary on `PATH`; the runtime is vendored under
+- **`t3code.service`** is written by `npx t3@latest service install`; the repo
+  manages only `10-provider-path.conf` as a drop-in, detailed in
+  [`t3code.md`](t3code.md#path). There is no `t3` binary on `PATH`; the runtime is vendored under
   `~/.t3/runtime/versions/<version>` and updates itself in place, so the active
   version moves with no repo action and nothing here pins it. Read it from
   `~/.t3/runtime` rather than from this page.

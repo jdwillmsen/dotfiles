@@ -32,6 +32,15 @@ echo "$skills" | grep -q 'cd "$HOME"' || { echo "FAIL: skills script must cd to 
 clis="$(render home/run_onchange_43-install-agent-clis.sh.tmpl)"
 echo "$clis" | shellcheck -s bash -
 
+# A script row is piped to `sh` unless it names a `shell`. Cursor's installer
+# is bash-only, and dash parses its `[[ ]]` without complaint before failing at
+# run time — so a row that lost its shell would install nothing and say so only
+# in the vendor installer's own error.
+echo "$clis" | grep -qF 'curl -fsSL "https://cursor.com/install" | bash' ||
+    { echo "FAIL: cursor's installer is not piped to bash"; exit 1; }
+echo "$clis" | grep -qE 'curl -fsSL "[^"]*no-mistakes[^"]*" \| sh; then$' ||
+    { echo "FAIL: a row without a shell no longer defaults to sh"; exit 1; }
+
 # Both scripts run under `set -e`, where a trailing `cond && echo` aborts the
 # script whenever the condition is false — silently skipping everything after it.
 for s in "$skills" "$clis"; do
@@ -63,6 +72,15 @@ gnhf_want="$(declared gnhf)"
 unpinned="$(chez_tmpl "$cfg" '{{ range .agentClis }}{{ if not .version }} {{ .name }}{{ end }}{{ end }}')"
 [ -z "$unpinned" ] || fail "agentClis rows with no declared version:$unpinned"
 if [ -z "$nm_want" ] || [ -z "$gnhf_want" ]; then fail "the stubbed rows left agentClis"; fi
+
+# The two rows above carry this file's narrative; every other row exists to be
+# held at its declared version so it stays out of the assertions. Reading the
+# names from the data rather than listing them keeps adding a CLI from becoming
+# a test edit — and keeps a new row from silently installing during a case that
+# asserts nothing installed.
+mapfile -t all_rows < <(chez_tmpl "$cfg" '{{ range .agentClis }}{{ .name }}
+{{ end }}' | grep -v '^$')
+[ "${#all_rows[@]}" -ge 2 ] || fail "agentClis renders no rows"
 
 stub="$tmp/stub"; mkdir -p "$stub"
 
@@ -118,7 +136,7 @@ done
 # answer for its stub. Prove the hole is shut rather than trusting `env -i` to
 # have shut it — a leak here would make the whole file pass vacuously.
 seal_resolves() { env -i PATH="$1" bash -c "command -v $2 || true"; }
-for b in npm curl no-mistakes gnhf node; do
+for b in npm curl node "${all_rows[@]}"; do
     got="$(seal_resolves "$stub:$sysbin" "$b")"
     case "$got" in
         "$stub"/*|"") ;;
@@ -154,7 +172,12 @@ seed() {
 # VENDOR_VERSION is what the vendor's latest-only installer would land.
 run() {
     : >"$log"
-    rm -f "$stub/no-mistakes" "$stub/gnhf"
+    local row
+    for row in "${all_rows[@]}"; do rm -f "${stub:?}/$row"; done
+    for row in "${all_rows[@]}"; do
+        case "$row" in no-mistakes|gnhf) continue ;; esac
+        seed "$row" "$(declared "$row")"
+    done
     [ -z "${SEED_NM:-}" ] || seed no-mistakes "\"no-mistakes version $SEED_NM (cafe123) 2026-01-01T00:00:00Z\""
     [ -z "${SEED_GNHF:-}" ] || seed gnhf "$SEED_GNHF"
     local path="$stub:$sysbin"

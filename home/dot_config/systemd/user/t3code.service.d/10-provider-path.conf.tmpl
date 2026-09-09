@@ -1,0 +1,15 @@
+{{ $npmBin := "" }}{{ if lookPath "npm" }}{{ $npmBin = printf "%s/bin" (output "npm" "prefix" "-g" | trim) }}{{ end }}# T3 Code spawns each provider CLI by bare name, and a systemd user unit
+# inherits none of an interactive shell's PATH — the default reaches neither
+# ~/.local/bin (cursor-agent, claude) nor the version-managed npm prefix
+# (codex, opencode, grok), so every enabled provider fails to spawn.
+#
+# A drop-in rather than an edit to t3code.service: `npx t3@latest service
+# update` regenerates that unit and would drop the setting, but leaves this
+# directory alone.
+#
+# The npm prefix below is version-managed and so is resolved at chezmoi apply
+# time. A node upgrade moves it, which breaks provider spawns exactly as it
+# breaks the unit's own hardcoded ExecStart node path — re-run `chezmoi apply`
+# alongside `npx t3@latest service update` after one.
+[Service]
+Environment=PATH={{ if $npmBin }}{{ $npmBin }}:{{ end }}%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin

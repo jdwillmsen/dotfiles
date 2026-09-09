@@ -147,7 +147,7 @@ separately, and the harness only launches what is already working.
 | Cursor | `cursor-agent` | `https://cursor.com/install`, script row in `agentClis` | `cursor-agent login` |
 | Grok | `grok` | `@xai-official/grok`, npm row in `agentClis` | `grok` on first run, or `XAI_API_KEY` |
 | OpenCode | `opencode` | `opencode-ai`, npm row in `agentClis` | `opencode auth login`, plus the providers in `~/.config/opencode/opencode.json` |
-| Antigravity | none — API | nothing to install | Google account, Gemini API key, or Gemini Enterprise, chosen in T3's settings |
+| Antigravity | `agy_acp_server.par` | T3 itself — an action in its settings | Google account, Gemini API key, or Gemini Enterprise, chosen in T3's settings |
 
 Versions are pinned in the `agentClis` table described in
 [`provisioning.md`](provisioning.md#agent-cli-versions); upgrading any of them
@@ -166,6 +166,13 @@ does not manage it. Script `52` merges the enable flags and any missing
 provider instance into it instead, leaving every other key the server has
 written alone. The wanted set lives in the `t3Providers` table in
 `home/.chezmoidata.yaml`.
+
+Antigravity is the one provider T3 installs for you rather than expecting on
+`PATH`. Its settings carry an optional binary path where blank means automatic,
+and choosing Install fetches the official ACP server from `dl.google.com` —
+around 680 MB compressed, unpacking to roughly 2 GB under `~/.t3/tools`,
+SHA-256 verified against a digest baked into the release. Leave the binary path
+empty: naming one pins a file T3 manages.
 
 Antigravity carries a `minVersion` there. It gained a provider driver after
 0.0.38, where the same name meant only the "open in editor" target, so the
@@ -190,10 +197,14 @@ every provider binary here — so without help each one fails to spawn.
 `PATH` covering both. It is a drop-in rather than an edit to the unit because
 `npx t3@latest service update` regenerates the unit and would drop the setting.
 
-The npm prefix in it is resolved at chezmoi apply time and is node-version
-specific, exactly like the unit's own hardcoded `ExecStart` node path. After an
-nvm major-version change, run `chezmoi apply` alongside
-`npx t3@latest service update`.
+That file is static, and the moving part sits behind a name that is not:
+`~/.local/npm-bin` is a symlink script `52` points at the real npm global bin,
+which lives under a version-managed node install. An earlier version resolved
+the prefix at render time instead, which made a managed file's content depend
+on the environment rendering it — an apply and a verify disagreed, and CI
+failed on drift that was real. After an nvm major-version change, run
+`chezmoi apply` alongside `npx t3@latest service update`: the apply repoints
+the symlink, the update regenerates the unit's own hardcoded node path.
 
 ### OpenCode models
 

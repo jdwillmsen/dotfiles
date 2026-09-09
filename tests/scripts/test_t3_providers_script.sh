@@ -2,7 +2,7 @@
 set -euo pipefail
 here="$(cd "$(dirname "$0")/../.." && pwd)"
 trigger="$here/home/run_onchange_52-enable-t3-providers.sh.tmpl"
-dropin="$here/home/dot_config/systemd/user/t3code.service.d/10-provider-path.conf.tmpl"
+dropin="$here/home/dot_config/systemd/user/t3code.service.d/10-provider-path.conf"
 
 fail() {
     echo "FAIL: $1"
@@ -109,8 +109,8 @@ run_trigger "$h"
 echo "$out" | grep -q "already reconciled" || fail "trigger rewrote a file it had already reconciled" "$out"
 
 # ── A newer runtime lets the gated provider through, with no binary path ──
-# Antigravity is an API provider: seeding a binaryPath for it would describe a
-# process T3 never spawns.
+# T3 installs and resolves Antigravity's ACP server itself, and an empty
+# binaryPath is what selects that. Seeding one would pin a path T3 manages.
 h="$(new_home "0.0.40")"
 echo '{}' >"$h/.t3/userdata/settings.json"
 run_trigger "$h"
@@ -185,7 +185,7 @@ render_src="$(mktemp -d "$tmp/src.XXXXXX")"
 cp -a "$here/home" "$render_src/home"
 h="$(new_home "0.0.38")"
 base="$(HOME="$h" chezmoi execute-template --source "$render_src/home" --destination "$h" <"$trigger")"
-printf '\n# touched-for-test\n' >>"$render_src/home/dot_config/systemd/user/t3code.service.d/10-provider-path.conf.tmpl"
+printf '\n# touched-for-test\n' >>"$render_src/home/dot_config/systemd/user/t3code.service.d/10-provider-path.conf"
 touched="$(HOME="$h" chezmoi execute-template --source "$render_src/home" --destination "$h" <"$trigger")"
 [ "$touched" != "$base" ] || fail "editing the PATH drop-in does not change the trigger's re-run hash"
 
@@ -194,19 +194,87 @@ touched="$(HOME="$h" chezmoi execute-template --source "$render_src/home" --dest
 # provider installed under ~/.local/bin or a version-managed npm prefix cannot
 # be spawned by bare name.
 h="$(new_home "0.0.38")"
-rendered_dropin="$(HOME="$h" chezmoi execute-template --source "$here/home" --destination "$h" <"$dropin")"
-path_line="$(printf '%s\n' "$rendered_dropin" | sed -n 's/^Environment=PATH=//p')"
-[ -n "$path_line" ] || fail "drop-in sets no PATH" "$rendered_dropin"
+dropin_content="$(cat "$dropin")"
+path_line="$(printf '%s\n' "$dropin_content" | sed -n 's/^Environment=PATH=//p')"
+[ -n "$path_line" ] || fail "drop-in sets no PATH" "$dropin_content"
 case ":$path_line:" in
     *":%h/.local/bin:"*) ;;
     *) fail "drop-in PATH misses ~/.local/bin, where the vendor installers link" "$path_line" ;;
 esac
+case ":$path_line:" in
+    *":%h/.local/npm-bin:"*) ;;
+    *) fail "drop-in PATH misses the stable name for the npm prefix" "$path_line" ;;
+esac
+
+# The file must be static. Resolving the npm prefix at render time made its
+# content depend on the environment rendering it, so an apply and a verify
+# disagreed and CI failed on drift that was real.
+printf '%s' "$dropin_content" | grep -qF '{{' &&
+    fail "the drop-in carries template directives, so its content can vary by environment"
+case "$dropin" in
+    *.tmpl) fail "the drop-in is a template again; it must be a static file" ;;
+esac
+
+# ── The stable name is pointed at the real npm bin, and repointed after a move ──
+# That symlink is the whole reason the file above can be static.
+h="$(new_home "0.0.38")"
+echo '{}' >"$h/.t3/userdata/settings.json"
 if command -v npm >/dev/null 2>&1; then
-    npm_bin="$(npm prefix -g)/bin"
-    case ":$path_line:" in
-        *":$npm_bin:"*) ;;
-        *) fail "drop-in PATH misses the npm prefix, where codex/opencode/grok land" "$path_line" ;;
-    esac
+    fake_prefix="$(mktemp -d "$tmp/npmprefix.XXXXXX")"
+    mkdir -p "$fake_prefix/bin"
+    cat >"$tmp/bin/npm" <<STUB
+#!/bin/sh
+[ "\$1" = prefix ] && { echo "\${STUB_NPM_PREFIX:-$fake_prefix}"; exit 0; }
+exit 0
+STUB
+    chmod +x "$tmp/bin/npm"
+
+    STUB_NPM_PREFIX="$fake_prefix" run_trigger "$h"
+    [ "$rc" -eq 0 ] || fail "trigger failed while pointing the npm-bin link" "$out"
+    [ "$(readlink "$h/.local/npm-bin")" = "$fake_prefix/bin" ] \
+        || fail "npm-bin was not pointed at the resolved npm bin" "$(readlink "$h/.local/npm-bin" || echo absent)"
+
+    # A node upgrade moves the prefix. The link has to follow, or the service
+    # keeps a PATH entry aimed at a directory that no longer exists.
+    moved="$(mktemp -d "$tmp/npmmoved.XXXXXX")"
+    mkdir -p "$moved/bin"
+    STUB_NPM_PREFIX="$moved" run_trigger "$h"
+    [ "$rc" -eq 0 ] || fail "trigger failed after the npm prefix moved" "$out"
+    [ "$(readlink "$h/.local/npm-bin")" = "$moved/bin" ] \
+        || fail "npm-bin was not repointed after the prefix moved" "$(readlink "$h/.local/npm-bin" || echo absent)"
+
+    # An existing link must be replaced, not followed into.
+    [ ! -e "$h/.local/npm-bin/npm-bin" ] || fail "the link was nested inside its own old target"
+    rm -f "$tmp/bin/npm"
+else
+    echo "SKIP: npm not on this host — the npm-bin link cases were not exercised"
 fi
+
+# ── No npm at all: says so, and still reconciles the providers ──
+# A box can carry T3 without node; the merge must not be collateral damage.
+h="$(new_home "0.0.38")"
+echo '{}' >"$h/.t3/userdata/settings.json"
+cat >"$tmp/bin/npm" <<'STUB'
+#!/bin/sh
+exit 127
+STUB
+chmod +x "$tmp/bin/npm"
+rm -f "$tmp/bin/npm"
+nonpm="$tmp/nonpm"; mkdir -p "$nonpm"
+for u in bash sh env cat sed head sort jq mktemp mv rm mkdir ln readlink printf wc grep; do
+    up="$(command -v "$u" 2>/dev/null)" || continue
+    ln -sf "$up" "$nonpm/$u"
+done
+render "$h" >"$tmp/nonpm.sh"
+set +e
+out="$(PATH="$tmp/bin:$nonpm" HOME="$h" CALL_LOG="$call_log" BASH_ENV=/dev/null \
+    "$bash_bin" "$tmp/nonpm.sh" 2>&1)"
+rc=$?
+set -e
+[ "$rc" -eq 0 ] || fail "trigger failed on a box with no npm" "$out"
+echo "$out" | grep -q "no npm on PATH" || fail "absent npm was not reported" "$out"
+[ ! -e "$h/.local/npm-bin" ] || fail "a link was created with no npm to resolve"
+[ "$(settings_of "$h" | jq -r '.providers.grok.enabled')" = "true" ] \
+    || fail "absent npm stopped the provider merge" "$(settings_of "$h")"
 
 echo "PASS"

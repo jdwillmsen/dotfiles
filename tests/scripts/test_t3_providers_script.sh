@@ -119,6 +119,16 @@ run_trigger "$h"
 echo "$out" | grep -q "already reconciled" || fail "a formatting-only difference read as a change" "$out"
 [ "$(settings_of "$h")" = "$compact" ] || fail "a converged file was rewritten" "$(settings_of "$h")"
 
+# ── A settings file past the kernel's single-argument limit still converges ──
+# Handing the file to jq as one argv string fails with E2BIG above 128 KiB,
+# which would read as a change on every apply.
+h="$(new_home "0.0.38")"
+jq -n '{history: [range(20000) | "entry-\(.)"]}' >"$h/.t3/userdata/settings.json"
+run_trigger "$h"
+run_trigger "$h"
+[ "$rc" -eq 0 ] || fail "run against a large settings file failed" "$out"
+echo "$out" | grep -q "already reconciled" || fail "a large converged settings file read as a change" "$out"
+
 # ── A settings file that is not a JSON object is left alone, not fatal ──
 # jq under errexit would otherwise abort the whole chezmoi apply over a file
 # T3 is part-way through writing.
@@ -247,6 +257,20 @@ base="$(HOME="$h" chezmoi execute-template --source "$render_src/home" --destina
 printf '\n# touched-for-test\n' >>"$render_src/home/dot_config/systemd/user/t3code.service.d/10-provider-path.conf"
 touched="$(HOME="$h" chezmoi execute-template --source "$render_src/home" --destination "$h" <"$trigger")"
 [ "$touched" != "$base" ] || fail "editing the PATH drop-in does not change the trigger's re-run hash"
+
+# A node upgrade moves the npm prefix and nothing else chezmoi can see; unless
+# that changes the rendered trigger, the stale npm-bin link is never repaired.
+prefix_bin="$(mktemp -d "$tmp/prefixbin.XXXXXX")"
+cat >"$prefix_bin/npm" <<'STUB'
+#!/bin/sh
+[ "$1" = prefix ] && { echo "$STUB_NPM_PREFIX"; exit 0; }
+exit 0
+STUB
+chmod +x "$prefix_bin/npm"
+h="$(new_home "0.0.38")"
+old_node="$(PATH="$prefix_bin:$PATH" STUB_NPM_PREFIX=/opt/node-20 render "$h")"
+new_node="$(PATH="$prefix_bin:$PATH" STUB_NPM_PREFIX=/opt/node-22 render "$h")"
+[ "$old_node" != "$new_node" ] || fail "moving the npm prefix does not change the trigger's re-run hash"
 
 # ── The drop-in gives the service a PATH that reaches every provider ──
 # Its whole reason to exist: a systemd user unit inherits no shell PATH, so a

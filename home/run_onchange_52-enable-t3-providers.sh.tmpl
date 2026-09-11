@@ -5,6 +5,7 @@ set -euo pipefail
 {{- if stat $stateFile -}}
 {{-   $activeVersion = get (output "cat" $stateFile | fromJson) "activeVersion" -}}
 {{- end -}}
+{{- $npmPrefix := output "sh" "-c" "command -v npm >/dev/null 2>&1 && npm prefix -g 2>/dev/null || true" | trim -}}
 # T3 Code ships every provider below disabled and only ever writes
 # ~/.t3/userdata/settings.json itself — it is live application state, not
 # config, so chezmoi merges the enable flags in rather than managing the file
@@ -14,7 +15,11 @@ set -euo pipefail
 # retriggers this run: adding a provider changes the set, and upgrading T3
 # changes the version, which is what lets a version-gated row switch on at the
 # first apply after the upgrade rather than waiting for an unrelated edit.
+# The npm prefix is rendered for the same reason: a node upgrade moves it, and
+# the first apply after one has to repoint ~/.local/npm-bin. Scripts are not
+# verified, so this cannot drift the way the drop-in once did.
 # T3 runtime: {{ $activeVersion | default "none" }}
+# npm global prefix: {{ $npmPrefix | default "none" }}
 # Provider PATH drop-in — hashed so an edit to it lands the daemon-reload below:
 # {{ include "dot_config/systemd/user/t3code.service.d/10-provider-path.conf" | sha256sum }}
 {{ range .t3Providers }}# want {{ .driver }}{{ if hasKey . "minVersion" }} (needs T3 >= {{ .minVersion }}){{ end }}
@@ -25,9 +30,8 @@ exit 0
 {{ end -}}
 
 # The drop-in names ~/.local/npm-bin so it can stay static; this is what makes
-# that name mean something. Resolved from npm at run time rather than rendered,
-# so a node upgrade is repaired by the next apply instead of silently leaving
-# the service pointed at a prefix that no longer exists.
+# that name mean something. The link target is resolved from npm at run time;
+# the rendered prefix above only decides when this runs.
 npm_bin_link="$HOME/.local/npm-bin"
 if command -v npm >/dev/null 2>&1; then
     # Held separately and checked for emptiness before the suffix goes on: an
@@ -127,7 +131,7 @@ else
     echo "t3 providers: $dropin is not deployed — provider binaries were not checked against the service PATH"
 fi
 
-if printf '%s' "$merged" | jq -e --argjson before "$before" '. == $before' >/dev/null; then
+if printf '%s' "$merged" | jq -e --slurpfile before "$settings" '. == $before[0]' >/dev/null; then
     echo "t3 providers: already reconciled — nothing to do"
     exit 0
 fi

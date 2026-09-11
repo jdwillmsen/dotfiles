@@ -95,7 +95,7 @@ echo "curl ${!#}" >>"$STUB_LOG"
 case "${!#}" in
     https://cursor.com/install)
         cat <<'INSTALLER'
-[[ -n "${BASH_VERSION:-}" ]] || { echo "cursor installer requires bash" >&2; exit 64; }
+[ "${0##*/}" = bash ] || { echo "cursor installer requires bash, got $0" >&2; exit 64; }
 printf 'cursor-bash\n' >>"$STUB_LOG"
 cat >"$STUB_DIR/cursor-agent" <<EOF
 #!/usr/bin/env bash
@@ -106,7 +106,7 @@ INSTALLER
         ;;
     *)
         cat <<'INSTALLER'
-[ -z "${BASH_VERSION:-}" ] || { echo "default installer requires sh" >&2; exit 65; }
+[ "${0##*/}" = sh ] || { echo "default installer requires sh, got $0" >&2; exit 65; }
 printf 'default-sh\n' >>"$STUB_LOG"
 exec "$VENDOR_INSTALLER"
 INSTALLER

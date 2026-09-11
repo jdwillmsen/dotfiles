@@ -27,8 +27,8 @@ Work/Codex weekly-reset pool on every tier including Free, and **the local
 `.chezmoidata.yaml` comment claiming the free-tier Codex quota "does not reset
 for a month" looks wrong** — OpenAI's own help-center weekly-reset article
 (found via search, not directly fetched) describes a 7-day rolling reset, not
-monthly, on every plan including Free. Cursor is Free Hobby (undisclosed
-numeric caps) / $20 Pro / $60 Pro+ / $200 Ultra / $40+ Teams, and `cursor-agent`
+monthly, on every plan including Free (the comment now says weekly). Cursor is
+Free Hobby (undisclosed numeric caps) / $20 Pro / $60 Pro+ / $200 Ultra / $40+ Teams, and `cursor-agent`
 draws on the exact same pool as the IDE — no separate CLI allocation
 (`cursor.com/pricing` fetched 2026-09-10). xAI's SuperGrok is $10 Lite / $30
 standard / $300 Heavy, with Grok Build now free-tier-eligible but xAI publishes
@@ -133,7 +133,7 @@ monthly reset for Codex at all. Given WebFetch was fully blocked on every
 help.openai.com URL tried, treat this correction as probable-but-not-fully-
 verified and worth a follow-up manual check of
 `help.openai.com/en/articles/11369540-using-codex-with-your-chatgpt-plan` from
-a normal browser.
+a normal browser. The comment has since been corrected to a weekly reset.
 
 Separately, OpenAI toggled the five-hour window on/off for Plus during 2026
 (removed July 12, restored Aug 25 for Plus; Pro 5x/20x kept it off "for the

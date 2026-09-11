@@ -2,6 +2,8 @@
 
 Fetched 2026-09-10 for a devbox audit of the CLIs `t3code.md` lists under
 [Providers](t3code.md#providers): Claude Code, Codex, Cursor, Grok, OpenCode.
+Antigravity is also listed there, but its sign-in options and quota were not
+researched for this doc.
 Anthropic API token pricing (Opus 5 $5/$25, Sonnet 5 $2/$10, Haiku 4.5 $1/$5
 per MTok) came from an internal source already and is not re-derived here.
 
@@ -58,7 +60,7 @@ Source: [claude.com/pricing](https://claude.com/pricing), fetched 2026-09-10
 |---|---|---|
 | Pro | $17/mo billed annually ($200/yr) or $20/mo month-to-month | Claude Code included, shared usage pool with chat; ~5x Free tier's 5-hour allowance |
 | Max 5x | from $100/mo | 5x Pro's usage |
-| Max 20x | from $100/mo (20x priced separately, same page section) | 20x Pro's usage, priority access in high-traffic periods |
+| Max 20x | $100-200/mo | 20x Pro's usage, priority access in high-traffic periods |
 | Team Standard seat | $20/seat/mo billed annually, $25/mo month-to-month | 2-150 member team size |
 | Team Premium seat | $100/seat/mo billed annually, $125/mo month-to-month | 5x Standard seat usage, includes Claude Code dev environment |
 | Enterprise | $20/seat billed annually + usage at API rates | No published seat minimum |
@@ -177,16 +179,19 @@ direct fetch**. API/rate-limit figures below are from a genuine direct fetch of
 
 | Plan (unverified pricing) | Price |
 |---|---|
-| Free | $0, weekly usage pool (small) |
+| Free | $0, small usage pool (reset period undocumented) |
 | SuperGrok Lite | $10/mo (launched Mar 25, 2026) |
 | SuperGrok | $30/mo ($300/yr ≈ $25/mo) — full Grok 4/4.5, DeepSearch, Big Brain, Imagine, voice |
 | SuperGrok Heavy | $300/mo ($99/mo promo first 3 months) — Grok 4.5, Grok Bot beta |
 
-Per WebSearch synthesis: paid and free plans share "one shared weekly usage
-pool spanning Chat, Imagine, Voice, and Build" that resets weekly, replacing
-an older per-two-hour cap system retired June 2026. SuperGrok subscriptions do
-**not** include API credits — Grok Build/CLI API access is billed separately
-through `console.x.ai`.
+Per WebSearch synthesis: paid and free plans share one usage pool spanning
+Chat, Imagine, Voice, and Build, replacing an older per-two-hour cap system
+retired June 2026. Secondary sources describe that pool as weekly, but xAI
+documents no reset period for the free Build quota (see the verdict below).
+SuperGrok subscriptions do **not** include API credits — `console.x.ai` API
+usage is billed separately. Whether SuperGrok raises Grok Build/CLI limits is
+**unconfirmed**: the CLI's own limit message suggests it does, and nothing
+fetchable from xAI states either way.
 
 `docs.x.ai/developers/rate-limits` (direct fetch, primary source) only
 documents **API access tiers by cumulative spend**, not the consumer
@@ -215,8 +220,8 @@ Honest capability note up front: every option below is meaningfully behind
 Claude/GPT/Grok frontier models on multi-step agentic reliability (tool-call
 correctness across long chains, self-correction, big-context coherence).
 They're viable for short, well-scoped tool-use tasks and as a last-resort
-failover — not a drop-in replacement for a paid frontier model in `t3code`'s
-`noMistakesAgent` pipeline.
+failover — not a drop-in replacement for a paid frontier model in the
+no-mistakes pipeline's `noMistakesAgent` list.
 
 **OpenRouter** — [openrouter.ai/docs/api-reference/limits](https://openrouter.ai/docs/api-reference/limits),
 fetched 2026-09-10. `:free`-suffixed model variants: 20 req/min always; 50

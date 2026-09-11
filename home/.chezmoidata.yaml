@@ -97,7 +97,7 @@ agentClis:
 # thing. `driver` is T3's own driver id — claudeAgent and codex are absent
 # because T3 enables those by default.
 # `binaryPath` is the name the driver resolves on PATH, omitted for a driver
-# that talks to an API rather than spawning a CLI. `minVersion` holds a row
+# whose binary T3 installs and resolves itself. `minVersion` holds a row
 # back until the T3 runtime that will actually run is new enough to decode it.
 t3Providers:
   - driver: cursor
@@ -117,7 +117,7 @@ t3Providers:
 # upgrades, so script 54 rewrites this one key in place rather than chezmoi
 # managing the file. claude leads because it reviews best, then codex, then
 # grok. The list exists because a usage limit on one account was a stopped
-# pipeline, three runs in a row: claude's daily window, then the free-tier
+# pipeline, three runs in a row: claude's five-hour window, then the free-tier
 # codex quota behind it (weekly rolling reset per OpenAI, not monthly), then
 # grok's free Build quota. Failing over is worth having even when, as then,
 # every account behind the first is also free-tier.

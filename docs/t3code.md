@@ -135,8 +135,9 @@ daemon-reload && systemctl --user enable --now t3-session-expiry.timer`.
 
 ## Providers
 
-T3 Code drives each provider as a child process it spawns by bare binary name,
-except Antigravity, which it calls as an API. It sells nothing and stores no
+T3 Code drives each provider as a child process: every CLI below is spawned by
+bare binary name, except Antigravity's ACP server, which T3 downloads and runs
+from its own tools directory. It sells nothing and stores no
 credential of its own: every CLI below is installed and authenticated
 separately, and the harness only launches what is already working.
 

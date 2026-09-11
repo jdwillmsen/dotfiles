@@ -108,6 +108,35 @@ run_trigger "$h"
 [ "$rc" -eq 0 ] || fail "second run failed" "$out"
 echo "$out" | grep -q "already reconciled" || fail "trigger rewrote a file it had already reconciled" "$out"
 
+# ── Converged means the same JSON, not the same bytes ──
+# T3 serializes the file itself; a layout jq would not produce must not read as
+# a change, or every apply rewrites it and asks for a restart.
+jq -c . "$h/.t3/userdata/settings.json" >"$h/.t3/userdata/settings.compact"
+mv "$h/.t3/userdata/settings.compact" "$h/.t3/userdata/settings.json"
+compact="$(settings_of "$h")"
+run_trigger "$h"
+[ "$rc" -eq 0 ] || fail "run against a reformatted file failed" "$out"
+echo "$out" | grep -q "already reconciled" || fail "a formatting-only difference read as a change" "$out"
+[ "$(settings_of "$h")" = "$compact" ] || fail "a converged file was rewritten" "$(settings_of "$h")"
+
+# ── A settings file that is not a JSON object is left alone, not fatal ──
+# jq under errexit would otherwise abort the whole chezmoi apply over a file
+# T3 is part-way through writing.
+for bad in truncated empty array; do
+    h="$(new_home "0.0.38")"
+    case "$bad" in
+        truncated) printf '{"providers": {"cursor": ' ;;
+        empty) : ;;
+        array) printf '[]\n' ;;
+    esac >"$h/.t3/userdata/settings.json"
+    cp "$h/.t3/userdata/settings.json" "$tmp/bad-before"
+    run_trigger "$h"
+    [ "$rc" -eq 0 ] || fail "a $bad settings file aborted the apply" "$out"
+    echo "$out" | grep -qF "$h/.t3/userdata/settings.json is not a JSON object" \
+        || fail "a $bad settings file was not reported" "$out"
+    cmp -s "$tmp/bad-before" "$h/.t3/userdata/settings.json" || fail "a $bad settings file was modified"
+done
+
 # ── A newer runtime lets the gated provider through, with no binary path ──
 # T3 installs and resolves Antigravity's ACP server itself, and an empty
 # binaryPath is what selects that. Seeding one would pin a path T3 manages.
@@ -147,6 +176,36 @@ printf '[Service]\nEnvironment=PATH=/usr/bin\n' \
 run_trigger "$h"
 grep -qx -- "--user daemon-reload" "$call_log" \
     || fail "a deployed drop-in was never loaded into systemd" "$(cat "$call_log")"
+
+# ── Providers are checked against the service PATH, even on a converged run ──
+# A binary lost to a node upgrade shows up on an apply that changes nothing
+# else, and the apply shell's PATH is not the one the service spawns with.
+h="$(new_home "0.0.38")"
+echo '{}' >"$h/.t3/userdata/settings.json"
+mkdir -p "$h/.local/bin" "$h/npm-prefix/bin"
+cat >"$tmp/bin/npm" <<STUB
+#!/bin/sh
+[ "\$1" = prefix ] && { echo "$h/npm-prefix"; exit 0; }
+exit 0
+STUB
+chmod +x "$tmp/bin/npm"
+printf '[Service]\nEnvironment=PATH=%%h/.local/npm-bin:%%h/.local/bin\n' \
+    >"$h/.config/systemd/user/t3code.service.d/10-provider-path.conf"
+for b in cursor-agent grok opencode; do
+    printf '#!/bin/sh\n' >"$tmp/bin/$b"; chmod +x "$tmp/bin/$b"
+done
+printf '#!/bin/sh\n' >"$h/.local/bin/cursor-agent"
+printf '#!/bin/sh\n' >"$h/npm-prefix/bin/grok"
+chmod +x "$h/.local/bin/cursor-agent" "$h/npm-prefix/bin/grok"
+run_trigger "$h"
+run_trigger "$h"
+[ "$rc" -eq 0 ] || fail "converged run failed with a provider off the service PATH" "$out"
+echo "$out" | grep -q "already reconciled" || fail "PATH case did not reach a converged run" "$out"
+echo "$out" | grep -q "opencode is enabled but not on the service PATH" \
+    || fail "a provider only the apply shell can see was not reported" "$out"
+echo "$out" | grep -qE "(cursor-agent|grok) is enabled but not" \
+    && fail "a provider the service PATH reaches was reported missing" "$out"
+rm -f "$tmp/bin/cursor-agent" "$tmp/bin/grok" "$tmp/bin/opencode" "$tmp/bin/npm"
 
 # ── No user manager: no reload attempted, and the merge still happens ──
 h="$(new_home "0.0.38")"
@@ -206,14 +265,35 @@ case ":$path_line:" in
     *) fail "drop-in PATH misses the stable name for the npm prefix" "$path_line" ;;
 esac
 
-# The file must be static. Resolving the npm prefix at render time made its
-# content depend on the environment rendering it, so an apply and a verify
-# disagreed and CI failed on drift that was real.
-printf '%s' "$dropin_content" | grep -qF '{{' &&
-    fail "the drop-in carries template directives, so its content can vary by environment"
-case "$dropin" in
-    *.tmpl) fail "the drop-in is a template again; it must be a static file" ;;
-esac
+# ── The deployed drop-in does not depend on the environment rendering it ──
+# Resolving the npm prefix at render time made its content follow
+# npm_config_prefix, which tests/lib.sh pins for chez_apply and not for
+# chez_verify, so the two disagreed and CI failed on drift that was real. The
+# stub npm answers the way the real one does, from npm_config_prefix, so this
+# holds on a host with no node as well.
+repro_bin="$(mktemp -d "$tmp/reprobin.XXXXXX")"
+cat >"$repro_bin/npm" <<'STUB'
+#!/bin/sh
+[ "$1" = prefix ] && { echo "${npm_config_prefix:-/usr/local}"; exit 0; }
+exit 0
+STUB
+chmod +x "$repro_bin/npm"
+dropin_target=".config/systemd/user/t3code.service.d/10-provider-path.conf"
+repro_cfg="$tmp/repro/chezmoi.toml"
+env -u CI -u REMOTE_CONTAINERS -u CODESPACES chezmoi init --source "$here" \
+    --destination "$tmp/repro/dest" --config "$repro_cfg" \
+    --promptString machineRole=personal --promptBool installDevTooling=false --no-tty >/dev/null \
+    || fail "could not render a chezmoi config for the drop-in comparison"
+h="$(new_home "0.0.38")"
+HOME="$h" PATH="$repro_bin:$PATH" NO_MISTAKES_LINK_DIR="$h/.local/bin" npm_config_prefix="$h/.npm-global" \
+    chezmoi cat --source "$here" --config "$repro_cfg" --destination "$h" "$h/$dropin_target" \
+    >"$tmp/dropin-apply" || fail "the drop-in did not render in an apply-shaped environment"
+env -u npm_config_prefix -u NO_MISTAKES_LINK_DIR HOME="$h" PATH="$repro_bin:$PATH" \
+    chezmoi cat --source "$here" --config "$repro_cfg" --destination "$h" "$h/$dropin_target" \
+    >"$tmp/dropin-verify" || fail "the drop-in did not render in a verify-shaped environment"
+cmp -s "$tmp/dropin-apply" "$tmp/dropin-verify" \
+    || fail "the drop-in renders differently for an apply and a verify" \
+        "$(diff "$tmp/dropin-apply" "$tmp/dropin-verify" || true)"
 
 # ── The stable name is pointed at the real npm bin, and repointed after a move ──
 # That symlink is the whole reason the file above can be static.

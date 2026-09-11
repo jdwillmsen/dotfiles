@@ -67,6 +67,10 @@ if ! command -v jq >/dev/null 2>&1; then
     echo "t3 providers: jq not found — cannot merge $settings safely"
     exit 0
 fi
+if ! jq -e 'type == "object"' "$settings" >/dev/null 2>&1; then
+    echo "t3 providers: $settings is not a JSON object — left alone until T3 rewrites it"
+    exit 0
+fi
 
 active_version={{ $activeVersion | quote }}
 
@@ -112,7 +116,18 @@ for driver in ${skipped+"${skipped[@]}"}; do
     echo "t3 providers: $driver needs a newer T3 than ${active_version:-none} — left off until the runtime is upgraded"
 done
 
-if [ "$merged" = "$before" ]; then
+if [ -f "$dropin" ]; then
+    service_path="$(sed -n 's/^Environment=PATH=//p' "$dropin" | tail -n1)"
+    service_path="${service_path//%h/$HOME}"
+    for binary in {{ range $i, $p := .t3Providers }}{{ if hasKey $p "binaryPath" }}{{ $p.binaryPath | quote }} {{ end }}{{ end }}; do
+        (PATH="$service_path"; type -P "$binary") >/dev/null 2>&1 \
+            || echo "t3 providers: $binary is enabled but not on the service PATH — its sessions will fail to spawn"
+    done
+else
+    echo "t3 providers: $dropin is not deployed — provider binaries were not checked against the service PATH"
+fi
+
+if printf '%s' "$merged" | jq -e --argjson before "$before" '. == $before' >/dev/null; then
     echo "t3 providers: already reconciled — nothing to do"
     exit 0
 fi
@@ -128,7 +143,3 @@ echo "t3 providers: reconciled $settings"
 # this box, including the one that may be running this apply, so picking the
 # moment is the operator's call.
 echo "t3 providers: restart to pick them up when no session is mid-flight — systemctl --user restart t3code.service"
-
-for binary in {{ range $i, $p := .t3Providers }}{{ if hasKey $p "binaryPath" }}{{ $p.binaryPath | quote }} {{ end }}{{ end }}; do
-    command -v "$binary" >/dev/null 2>&1 || echo "t3 providers: $binary is enabled but not on PATH — its sessions will fail to spawn"
-done

@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 {{ $stateFile := joinPath .chezmoi.homeDir ".t3" "runtime" "service-state.json" -}}
-{{- $activeVersion := "" -}}
-{{- if stat $stateFile -}}
-{{-   $activeVersion = get (output "cat" $stateFile | fromJson) "activeVersion" -}}
-{{- end -}}
+{{/* Read through a command that cannot fail rather than parsing in the
+     template. T3 updates its runtime in place and activeVersion is the field
+     that moves during that update, so an apply rendering against a
+     half-written service-state.json would hit a template error — and a
+     template error aborts the entire apply, not just this script. jq exiting
+     non-zero, jq being absent, and the file not existing yet all land on the
+     same empty string, which runtime_at_least below already treats as "no
+     gated provider passes": the safe direction. Same idiom as the npm prefix
+     immediately after. */ -}}
+{{- $activeVersion := output "sh" "-c" (printf "jq -r '.activeVersion // empty' '%s' 2>/dev/null || true" $stateFile) | trim -}}
 {{- $npmPrefix := output "sh" "-c" "command -v npm >/dev/null 2>&1 && npm prefix -g 2>/dev/null || true" | trim -}}
 # T3 Code ships every provider below disabled and only ever writes
 # ~/.t3/userdata/settings.json itself — it is live application state, not

@@ -181,6 +181,11 @@ script leaves the row out entirely until `runtime/service-state.json` reports a
 runtime new enough to decode it — an older T3 meeting a driver its schema has
 never heard of risks the whole provider config. That version is rendered into
 the script, so the first apply after a T3 upgrade is what switches the row on.
+It is read through a command that cannot fail rather than parsed in the
+template: T3 rewrites `service-state.json` in place during its own update, and
+a template error there would abort the entire apply rather than skip one
+script. An unreadable file reads as no version, which holds every gated row
+back — the safe direction, and self-correcting on the next apply.
 
 Neither the script nor an apply restarts the service. `t3code.service` owns
 every agent session on this box, so a restart is deliberate:

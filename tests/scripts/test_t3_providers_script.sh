@@ -250,6 +250,35 @@ base="$(render "$h")"
 printf '{"protocol":2,"activeVersion":"0.0.40"}\n' >"$h/.t3/runtime/service-state.json"
 [ "$(render "$h")" != "$base" ] || fail "upgrading T3 does not change the trigger's re-run hash"
 
+# ── A half-written state file renders, rather than aborting the whole apply ──
+# T3 updates its runtime in place and activeVersion is the field that moves
+# during that update, so an apply can race it. Parsing in the template made
+# that a template error, and a template error takes down the entire apply
+# instead of skipping this one script. Empty is the safe reading: the gate
+# below stays shut.
+for broken in '{"protocol":2,"activeVer' '' 'not json at all' '[]'; do
+    h="$(new_home "0.0.40")"
+    printf '%s' "$broken" >"$h/.t3/runtime/service-state.json"
+    if ! rendered="$(render "$h" 2>&1)"; then
+        fail "a half-written service-state.json aborted the render" "$rendered"
+    fi
+    printf '%s\n' "$rendered" | grep -qx 'active_version=""' \
+        || fail "an unreadable state file did not resolve to an empty version" \
+            "$(printf '%s\n' "$rendered" | grep '^active_version=')"
+done
+
+# And an unreadable version must hold a gated provider back rather than let it
+# through, which is the consequence that actually matters.
+h="$(new_home "0.0.40")"
+printf '%s' '{"protocol":2,"activeVer' >"$h/.t3/runtime/service-state.json"
+echo '{}' >"$h/.t3/userdata/settings.json"
+run_trigger "$h"
+[ "$rc" -eq 0 ] || fail "trigger failed against an unreadable state file" "$out"
+[ "$(settings_of "$h" | jq -r '.providers.antigravity // "absent"')" = "absent" ] \
+    || fail "a gated provider was enabled on an unreadable runtime version" "$(settings_of "$h")"
+[ "$(settings_of "$h" | jq -r '.providers.grok.enabled')" = "true" ] \
+    || fail "an unreadable state file stopped the ungated providers" "$(settings_of "$h")"
+
 render_src="$(mktemp -d "$tmp/src.XXXXXX")"
 cp -a "$here/home" "$render_src/home"
 h="$(new_home "0.0.38")"

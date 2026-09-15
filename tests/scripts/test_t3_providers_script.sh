@@ -49,8 +49,9 @@ render() {  # $1 = sandbox home -> prints the rendered trigger
 render "$(mktemp -d "$tmp/lint.XXXXXX")" >"$tmp/lint.sh"
 shellcheck -s bash "$tmp/lint.sh" || fail "the rendered trigger does not pass shellcheck"
 
-new_home() {  # $1 = active T3 version, empty for no runtime at all
-    local h; h="$(mktemp -d "$tmp/home.XXXXXX")"
+new_home() {  # $1 = active T3 version, empty for none; $2 = explicit path, optional
+    local h; h="${2:-}"
+    [ -n "$h" ] || h="$(mktemp -d "$tmp/home.XXXXXX")"
     mkdir -p "$h/.t3/userdata" "$h/.config/systemd/user/t3code.service.d"
     if [ -n "$1" ]; then
         mkdir -p "$h/.t3/runtime"
@@ -278,6 +279,24 @@ run_trigger "$h"
     || fail "a gated provider was enabled on an unreadable runtime version" "$(settings_of "$h")"
 [ "$(settings_of "$h" | jq -r '.providers.grok.enabled')" = "true" ] \
     || fail "an unreadable state file stopped the ungated providers" "$(settings_of "$h")"
+
+# ── A quote in the home path must not change which file the version is read from ──
+# The state-file path reaches sh as an argument rather than spliced into the
+# script text, so no character in it parses as syntax. Spliced, the failure has
+# no error to notice: the version reads back empty and every gated provider is
+# held back with the same routine line a genuinely old runtime prints.
+h="$(new_home "0.0.40" "$tmp/o'brien")"
+echo '{}' >"$h/.t3/userdata/settings.json"
+if ! rendered="$(render "$h" 2>&1)"; then
+    fail "a quote in the home path aborted the render" "$rendered"
+fi
+printf '%s\n' "$rendered" | grep -qx 'active_version="0.0.40"' \
+    || fail "a quote in the home path changed the version read" \
+        "$(printf '%s\n' "$rendered" | grep '^active_version=')"
+run_trigger "$h"
+[ "$rc" -eq 0 ] || fail "trigger failed against a home path containing a quote" "$out"
+[ "$(settings_of "$h" | jq -r '.providers.antigravity.enabled')" = "true" ] \
+    || fail "a quote in the home path held the gated provider back" "$(settings_of "$h")"
 
 render_src="$(mktemp -d "$tmp/src.XXXXXX")"
 cp -a "$here/home" "$render_src/home"

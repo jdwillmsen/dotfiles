@@ -9,8 +9,10 @@ set -euo pipefail
      non-zero, jq being absent, and the file not existing yet all land on the
      same empty string, which runtime_at_least below already treats as "no
      gated provider passes": the safe direction. Same idiom as the npm prefix
-     immediately after. */ -}}
-{{- $activeVersion := output "sh" "-c" (printf "jq -r '.activeVersion // empty' '%s' 2>/dev/null || true" $stateFile) | trim -}}
+     immediately after. The path is passed as an argument rather than spliced
+     into the script text because a quote in the home directory would otherwise
+     reach sh as syntax and resolve the version wrongly. */ -}}
+{{- $activeVersion := output "sh" "-c" "jq -r '.activeVersion // empty' \"$1\" 2>/dev/null || true" "sh" $stateFile | trim -}}
 {{- $npmPrefix := output "sh" "-c" "command -v npm >/dev/null 2>&1 && npm prefix -g 2>/dev/null || true" | trim -}}
 # T3 Code ships every provider below disabled and only ever writes
 # ~/.t3/userdata/settings.json itself — it is live application state, not

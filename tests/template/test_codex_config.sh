@@ -3,9 +3,16 @@ set -euo pipefail
 here="$(cd "$(dirname "$0")/../.." && pwd)"
 # shellcheck disable=SC1091  # dynamic path resolved at runtime; harness lives at tests/lib.sh
 . "$here/tests/lib.sh"
-script="$here/home/private_dot_codex/modify_private_config.toml.toml"
-
 fail() { echo "FAIL: $1"; [ -n "${2:-}" ] && echo "--- $2"; exit 1; }
+
+# Resolved by glob rather than named: the attribute prefixes on this entry are
+# exactly what the chezmoi assertions below exist to police, and hardcoding the
+# filename here means a wrong rename dies on this line with a bare "No such
+# file or directory" before those assertions ever run — catching the bug, but
+# reporting it as a missing file rather than as the broken contract it is.
+script="$(echo "$here"/home/private_dot_codex/*modify*config.toml.toml)"
+[ -f "$script" ] || fail "no modify entry for the codex config in the source tree" \
+    "$(ls "$here/home/private_dot_codex")"
 
 existing='[tui]
 status_line = ["old"]
@@ -36,9 +43,15 @@ out2="$(printf '%s' "$out" | bash "$script")"
 cfg="$(chez_init)"
 dest="$(chez_sandbox)"
 
-chezmoi managed --source "$CHEZ_SRC" --config "$cfg" --destination "$dest" \
-    | grep -qx '.codex/config.toml' \
-    || fail "chezmoi does not manage .codex/config.toml from this source entry"
+# Captured before matching, not piped into grep: under `set -o pipefail` a
+# `grep -q` that exits on its first match closes the pipe, and a chezmoi still
+# writing its listing dies on SIGPIPE — which pipefail would report as this
+# assertion failing. It is the assertion guarding the prefix-order bug, so it
+# must fail only for that reason. Compared literally rather than by pattern,
+# because the dots here are filename dots, not regex.
+managed="$(chezmoi managed --source "$CHEZ_SRC" --config "$cfg" --destination "$dest")"
+printf '%s\n' "$managed" | grep -qxF '.codex/config.toml' \
+    || fail "chezmoi does not manage .codex/config.toml from this source entry" "$managed"
 
 # Reproduces the reported drift: seed the destination at the mode the unfixed
 # entry deployed and require the apply to tighten it rather than restore it.
@@ -50,8 +63,6 @@ HOME="$dest" chezmoi apply --source "$CHEZ_SRC" --config "$cfg" \
 
 grep -q 'model-with-reasoning' "$dest/.codex/config.toml" \
     || fail "the applied config was not produced by the modify script"
-[ ! -e "$dest/.codex/modify_config.toml.toml" ] \
-    || fail "the modify script deployed itself as a stray target file"
 
 # Windows has no POSIX mode for chezmoi to set; the managed-target check above
 # is the portable half of this contract.

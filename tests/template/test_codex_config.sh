@@ -58,6 +58,14 @@ printf '%s\n' "$managed" | grep -qxF '.codex/config.toml' \
 mkdir -p "$dest/.codex"
 printf '[other]\nx = 1\n' >"$dest/.codex/config.toml"
 chmod 664 "$dest/.codex/config.toml"
+# The trailing target argument is what contains this apply, and it is why this
+# is the one place in tests/ that calls `chezmoi apply` raw instead of going
+# through chez_apply: a single-target apply deploys that target alone and runs
+# no run_before_ or run_once_ entry, so chez_apply's failing-sudo guard,
+# npm_config_prefix pin and NO_MISTAKES_LINK_DIR pin buy nothing here, and no
+# age key needs decrypting. Drop the target and this becomes a full unguarded
+# apply that installs into the machine's real global npm prefix and escalates
+# to sudo.
 HOME="$dest" chezmoi apply --source "$CHEZ_SRC" --config "$cfg" \
     --destination "$dest" --force "$dest/.codex/config.toml"
 

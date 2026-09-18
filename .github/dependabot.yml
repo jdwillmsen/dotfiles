@@ -1,0 +1,13 @@
+version: 2
+
+# Without this file nothing updates the pinned action SHAs and versions in
+# .github/workflows. GitHub's automated security fixes react to published
+# advisories only, so an action simply stops moving until one is filed.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']

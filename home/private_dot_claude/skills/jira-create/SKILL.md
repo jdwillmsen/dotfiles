@@ -21,14 +21,14 @@ Determine from conversation context:
 
 | Decision | How |
 |----------|-----|
-| **Issue type** | Bug = broken thing; Story = new capability; Task = concrete work item; Epic = multi-issue goal |
+| **Issue type** | Bug = broken thing; Task = concrete work item; Spike = time-boxed investigation that ends in a decision or tickets, not a merge; Epic = multi-issue goal. JDWLABS has no Story type — file new capability as a Task |
 | **Project** | Default `JDWLABS`. If context implies another project, ask. |
 | **Priority** | Derive from impact: P1=cluster down/data loss, P2=degraded service, P3=improvement, P4=low-impact cleanup |
 | **Summary draft** | `<Action verb> <specific noun> <context>` — ≤80 chars, no filler words |
 
 Call `getAccessibleAtlassianResources` to get `cloudId`. Cache it for all subsequent calls.
 
-Call `getJiraProjectIssueTypesMetadata` to discover available issue types + any custom fields for the project.
+Call `listJiraProjectIssueTypesMetadata` (via `executeRead`) to confirm the project's issue types; on JDWLABS they are Epic, Task, Bug, Spike and Subtask. If the type you picked is not listed, stop and ask — do not silently file it as a Task with a prefix like `Bug:`.
 
 ---
 
@@ -54,9 +54,9 @@ Call `getJiraProjectIssueTypesMetadata` to discover available issue types + any 
 - Then continue with child issue creation, linking to that Epic as parent
 
 **Linking child to parent:**
-- For Stories/Tasks under an Epic: use `parent` field with Epic key
-- For sub-tasks under a Story: use `parent` field with Story key
-- Always also call `createIssueLink` after creation for extra traceability. This instance has no "is part of" type — call `getIssueLinkTypes` once per session and cache the result if unsure; on this instance the only types are `Blocks`, `Cloners`, `Duplicate`, `Problem/Incident`, `Relates` — use `Relates` for parent/child traceability (the `parent` field already carries the real hierarchy, this link is belt-and-suspenders)
+- For Tasks, Bugs and Spikes under an Epic: use `parent` field with Epic key
+- For subtasks under a Task, Bug or Spike: use `parent` field with that issue's key
+- Always also call `createJiraIssueLink` after creation for extra traceability. This instance has no "is part of" type — call `listJiraIssueLinkTypes` once per session and cache the result if unsure; on this instance the only types are `Blocks`, `Cloners`, `Duplicate`, `Problem/Incident`, `Relates` — use `Relates` for parent/child traceability (the `parent` field already carries the real hierarchy, this link is belt-and-suspenders)
 
 ---
 
@@ -112,18 +112,14 @@ Build the complete issue draft. Use the typed template for the issue type. Fill 
 
 **Compose the draft's `Definition of Done` from `## Reference: Definition of Done` below** (universal core + type block + work-surface block — delete only lines that genuinely cannot apply). **Then self-check the draft against `## Reference: Definition of Ready`** — a draft that fails DoR is not ready to present at CONFIRM; fix it first.
 
-**Draft in Markdown, ship in ADF.** The templates below are Markdown for readability while drafting and for the CONFIRM preview. The MCP's `contentFormat: "markdown"` path does not reliably convert GFM task-list syntax (`- [ ]`) — it round-trips as literal escaped text (`\[ \]`) instead of Jira's native checkbox node, which is exactly the "placeholder-looking" broken rendering this note exists to prevent. Before Phase 6, convert the finished Markdown draft to a real ADF document (see `## Reference: ADF Conversion` below) and create/comment with `contentFormat: "adf"`, passing the ADF `doc` object directly as `description` — never pass raw Markdown checklist syntax to `createJiraIssue` or `addCommentToJiraIssue`.
+**Markdown with plain bullets.** Draft and ship the description as Markdown; `createJiraIssue` converts it to Jira's format server-side. That tool accepts only `markdown` or `html`, with no ADF input, and its Markdown path does not convert GFM task lists: `- [ ]` lands as literal escaped `\[ \]` text. So every list in the description, including Deliverables and Definition of Done, is a plain `- ` bullet. Headings, numbered lists, `**bold**`, inline code and fenced code blocks all convert cleanly.
 
 #### Bug Template
+Environment goes in the Bug's **Environment field**, not the description (see Full Field Set). Affects versions is not available: JDWLABS is a team-managed project and Jira does not offer that field on team-managed issue types.
+
 ```markdown
 ## Problem
 [Single sentence. What is broken — describe the system state, not the user experience.]
-
-## Environment
-- **Cluster/Namespace:** [value]
-- **Component/Version:** [chart version, image tag, app version]
-- **Detected:** [timestamp or "first observed YYYY-MM-DD HH:MM UTC"]
-- **Reproducible:** [always / intermittent / once]
 
 ## Steps to Reproduce
 1. [Precise step]
@@ -143,7 +139,7 @@ Build the complete issue draft. Use the typed template for the issue type. Fill 
 [Who/what is affected. Quantify: N pods down, X% error rate, Y users impacted, data loss risk Y/N.]
 
 ## Evidence
-[Paste kubectl output, logs, error strings, screenshots as inline images or code blocks]
+[Paste kubectl output, logs, error strings as code blocks]
 
 ## Fix / Mitigation
 [Immediate workaround if known. Link to fix PR if exists.]
@@ -156,27 +152,33 @@ Build the complete issue draft. Use the typed template for the issue type. Fill 
 [Compose from ## Reference: Definition of Done — universal core + Bug block + applicable work-surface block(s)]
 ```
 
-#### Story / Feature Template
+#### Spike Template
+The time-box is the **Due date** field, which JDWLABS makes required on Spikes: the create call is rejected without it. The exit condition has no field, so it lives in the description and is mandatory.
+
 ```markdown
-## User Story
-As a **[role]**, I want **[specific goal]** so that **[measurable benefit]**.
+## Question
+[The decision or unknown this spike resolves, in one sentence.]
+
+## Time-box
+[Effort cap, e.g. "4 focus-hours". Due date field carries the calendar stop. When either runs out, stop and report what is known.]
+
+## Exit Condition
+[The observable state that ends the spike early, e.g. "a reproduction exists" or "options A and B compared on cost and risk".]
+
+## Questions to Answer
+- [Specific question]
+- [Specific question]
 
 ## Context
-[Why now. What triggered this request. What breaks or degrades without it.]
+[Why this is unknown now, and what is blocked on the answer.]
 
-## Acceptance Criteria
-- [ ] [Specific, testable criterion]
-- [ ] [Specific, testable criterion]
-- [ ] [Given/When/Then format where applicable]
-
-## Technical Notes
-[Architecture decisions, implementation constraints, known risks, dependencies.]
-
-## Out of Scope
-[Explicit exclusions. Prevents scope creep. At least one entry.]
+## Outputs
+- Findings posted as a comment on this ticket, with evidence
+- Decision recorded, with its owner
+- Follow-up Tasks or Bugs filed and linked, or "none needed" stated
 
 ## Definition of Done
-[Compose from ## Reference: Definition of Done — universal core + Story block + applicable work-surface block]
+[Compose from ## Reference: Definition of Done — universal core + Spike block]
 ```
 
 #### Task Template
@@ -185,11 +187,11 @@ As a **[role]**, I want **[specific goal]** so that **[measurable benefit]**.
 [Single sentence. Concrete, observable deliverable.]
 
 ## Deliverables
-- [ ] [Specific output or artifact]
-- [ ] [...]
+- [Specific output or artifact]
+- [...]
 
 ## Context & Motivation
-[Why this task exists. What fails or degrades without it. Link to parent Story/Epic for context.]
+[Why this task exists. What fails or degrades without it. Link to parent Epic for context.]
 
 ## Technical Approach
 [How to do this. Not a novel — 3-5 bullet points max.]
@@ -199,8 +201,8 @@ As a **[role]**, I want **[specific goal]** so that **[measurable benefit]**.
 - **Blocked by:** [JDWLABS-XX or "none"]
 
 ## Definition of Done
-- [ ] [Verifiable completion criterion]
-- [ ] [...]
+- [Verifiable completion criterion]
+- [...]
 ```
 
 #### Epic Template
@@ -212,8 +214,8 @@ As a **[role]**, I want **[specific goal]** so that **[measurable benefit]**.
 [Current pain. Quantify where possible: X failures/week, Y hours manual effort, Z% error rate.]
 
 ## Success Metrics
-- [ ] [Measurable metric]
-- [ ] [Measurable metric]
+- [Measurable metric]
+- [Measurable metric]
 
 ## Scope
 **In:** [What this Epic covers]
@@ -239,12 +241,13 @@ As a **[role]**, I want **[specific goal]** so that **[measurable benefit]**.
 |-------|---------------|
 | `summary` | ≤80 chars, action verb start, specific |
 | `description` | Typed template, no empty sections |
-| `issuetype` | Bug / Story / Task / Epic |
-| `priority` | Use the instance's actual priority names from project metadata (this instance: Highest/High/Medium/Low). The P1–P4 impact classes from Phase 1 map onto them; keep the class rationale in Impact/Context, not the field name |
+| `issuetype` | Bug / Task / Spike / Epic |
+| `priority` | Use the instance's actual priority names from project metadata (this instance: Highest/High/Medium/Low/Lowest). The P1–P4 impact classes from Phase 1 map onto them; keep the class rationale in Impact/Context, not the field name |
 | `parent` | Epic key (confirmed in Phase 2) |
 | `labels` | ≥2 from taxonomy below |
 | `assignee` | Default: self (jdwillmsen@gmail.com → look up account ID via `lookupJiraAccountId`) |
-| `environment` | For Bugs: paste cluster/version/namespace string |
+| `environment` | Bugs only: cluster/namespace, component + version (chart, image tag, app version), first detected (UTC), reproducible (always / intermittent / once). Set it with `editJiraIssue` `fields: {"environment": "<markdown>"}` right after create — `createJiraIssue` `additional_fields` rejects it as invalid ADF whatever shape you pass |
+| `duedate` | Spikes only, and required: the time-box stop date, `YYYY-MM-DD` in `additional_fields` |
 | `components` | From project metadata if available |
 
 #### Label Taxonomy
@@ -253,7 +256,7 @@ Use labels from this set (combine as needed):
 platform    tenant      infra       storage     networking
 security    ci          monitoring  database    vault
 argocd      cert        arc-runner  longhorn    cnpg
-fix         upgrade     debt        spike       investigation
+fix         upgrade     debt        investigation
 ux          api         auth        config      performance
 ```
 
@@ -270,7 +273,7 @@ Present the full draft as a formatted preview:
 JIRA DRAFT — [ISSUE TYPE] — [PROJECT]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Summary:     [summary text]
-Type:        [Bug / Story / Task / Epic]
+Type:        [Bug / Task / Spike / Epic]
 Priority:    [P1-P4 + name]
 Parent:      [JDWLABS-XX — Epic summary]
 Assignee:    [name]
@@ -298,7 +301,8 @@ On "cancel": stop, do not create.
 - [ ] ≥1 evidence artifact (screenshot, log, code, error string)
 - [ ] **Full DoR pass** (`## Reference: Definition of Ready`) — every universal + type-specific item
 - [ ] DoD composed from `## Reference: Definition of Done`, every line verifiable
-- [ ] Draft converted to ADF (`## Reference: ADF Conversion`) — Deliverables/DoD are `taskList`, not Markdown `- [ ]`
+- [ ] Description lists are plain `- ` bullets — no `- [ ]` task-list syntax
+- [ ] Bug: Environment text ready for the post-create edit. Spike: Due date set, exit condition in the body
 
 If any gate fails, fix it before creating — do not ask user to overlook it.
 
@@ -310,29 +314,28 @@ Execute in this exact order:
 
 1. **Create the issue**
    ```
-   createJiraIssue(cloudId, projectKey, issueTypeName, summary,
-     description=<ADF doc object, per ## Reference: ADF Conversion>,
-     contentFormat="adf",
-     ...other fields)
+   createJiraIssue(cloudId, projectKey, issueType, summary,
+     description=<markdown draft>,
+     contentFormat="markdown",
+     parent=<epic key>, priority, labels, assignee,
+     additional_fields={"duedate": "YYYY-MM-DD"}   # Spike only
+   )
    ```
    Capture the returned issue key (e.g., `JDWLABS-42`).
 
+   **Bug only:** then set Environment with `editJiraIssue(cloudId, issueIdOrKey, fields={"environment": "<markdown>"})`.
+
 2. **Add issue link to parent**
-   Params are flat strings, not nested objects — `type` is a link-type *name* string (`Blocks`/`Cloners`/`Duplicate`/`Problem/Incident`/`Relates` on this instance), `inwardIssue`/`outwardIssue` are bare issue keys:
+   Via `executeWrite` with `name="createJiraIssueLink"`. Params are flat strings — `linkType` is a link-type *name* (`Blocks`/`Cloners`/`Duplicate`/`Problem/Incident`/`Relates` on this instance), `inwardIssue`/`outwardIssue` are bare issue keys:
    ```
-   createIssueLink(cloudId,
-     inwardIssue="<new key>",
-     outwardIssue="<parent epic key>",
-     type="Relates")
+   executeWrite(name="createJiraIssueLink", cloudId,
+     inputs={inwardIssue: "<new key>", outwardIssue: "<parent epic key>", linkType: "Relates"})
    ```
-   A `{"name": "..."}`-shaped `type` or `{"key": "..."}`-shaped issue fields will 404 with "No issue link type found" — the API wants plain strings.
 
 3. **Add evidence comment**
-   If there are code blocks, kubectl output, or long artifacts that didn't fit cleanly in the description, add them as a comment — same ADF rule applies, `contentFormat: "adf"`, no raw Markdown checklists:
+   If there are code blocks, kubectl output, or long artifacts that didn't fit cleanly in the description, add them as a comment — Markdown, plain bullets:
    ```
-   addCommentToJiraIssue(cloudId, issueIdOrKey,
-     commentBody=<ADF doc object, per ## Reference: ADF Conversion>,
-     contentFormat="adf")
+   addOrEditJiraIssueComment(cloudId, issueIdOrKey, commentBody=<markdown>)
    ```
 
 4. **Report result**
@@ -368,7 +371,7 @@ A ticket is Ready when a competent contributor — human or agent — could star
 | Type | Additional readiness bar |
 |---|---|
 | **Bug** | Repro steps precise enough to replay, or "intermittent" + observed frequency; exact error quoted; env/component/version captured; impact quantified |
-| **Story** | Role is a real persona (never "as a user"); benefit measurable; Out of Scope has ≥1 real entry |
+| **Spike** | Question is one sentence; time-box stated in effort and Due date set; exit condition observable; questions to answer listed; outputs name the decision owner |
 | **Task** | Single concrete deliverable; Technical Approach ≤5 bullets; not secretly three tasks |
 | **Epic** | Success metrics measurable (numbers, not vibes); delivery phases named; In/Out scope explicit; expected child issues sketched |
 
@@ -376,7 +379,7 @@ A ticket is Ready when a competent contributor — human or agent — could star
 
 | Smell | Fix |
 |---|---|
-| "Investigate X" with no exit condition | Deliverable = the specific questions the investigation must answer |
+| "Investigate X" with no exit condition | File it as a Spike: Due date set, exit condition and the specific questions it must answer in the body |
 | Acceptance criteria restate the summary | Rewrite as observable checks with concrete commands/URLs |
 | "TBD", "etc.", "and so on" in any section | Resolve it now or delete the section honestly |
 | Evidence is a paraphrase ("the pod was crashing") | Paste the exact output/error verbatim |
@@ -387,48 +390,48 @@ A ticket is Ready when a competent contributor — human or agent — could star
 
 ## Reference: Definition of Done (DoD)
 
-Compose each ticket's DoD from three parts: **universal core + type block + work-surface block(s)**. Delete only lines that genuinely cannot apply — never leave a line that can't be verified with evidence.
+Compose each ticket's DoD from three parts: **universal core + type block + work-surface block(s)**. Delete only lines that genuinely cannot apply — never leave a line that can't be verified with evidence. Lines are plain bullets because they are pasted into the description as-is.
 
 Org standards source of truth: `jdwlabs/.github` → `docs/code-standards.md` (linters/CI implement it; DoD items below assume it).
 
 ### Universal core (every ticket)
 
-- [ ] Every deliverable checkbox verified, with evidence (command output, screenshot, PR/CI link) attached as a ticket comment
-- [ ] Change merged to `main` via PR with green CI — never a direct push
-- [ ] Every review thread and bot/security finding fixed or explicitly justified in the PR
-- [ ] Org code standards met: lint/format/test gates green; comments explain *why*; **no ticket IDs in code or manifest comments** (traceability = commit/PR)
-- [ ] Docs updated where behavior or structure changed (README structure sections, runbooks, agent docs)
-- [ ] Conventional commits; PR description links this ticket
+- Every deliverable verified, with evidence (command output, screenshot, PR/CI link) attached as a ticket comment
+- Change merged to `main` via PR with green CI — never a direct push
+- Every review thread and bot/security finding fixed or explicitly justified in the PR
+- Org code standards met: lint/format/test gates green; comments explain *why*; **no ticket IDs in code or manifest comments** (traceability = commit/PR)
+- Docs updated where behavior or structure changed (README structure sections, runbooks, agent docs)
+- Conventional commits; PR description links this ticket
 
 ### Work-surface blocks (add all that apply)
 
 **GitOps / platform / deployments change**
-- [ ] ArgoCD Application(s) Synced + Healthy after merge — verified against live cluster, not assumed
-- [ ] Live state verified with `platformctl`/`kubectl` read evidence; zero manual mutations (`kubectl apply/edit`, `argocd app sync`)
-- [ ] New workloads have resources + probes set (no BestEffort; startupProbe for slow-boot services)
+- ArgoCD Application(s) Synced + Healthy after merge — verified against live cluster, not assumed
+- Live state verified with `platformctl`/`kubectl` read evidence; zero manual mutations (`kubectl apply/edit`, `argocd app sync`)
+- New workloads have resources + probes set (no BestEffort; startupProbe for slow-boot services)
 
 **Go CLI / tooling**
-- [ ] `go test -race ./...` green; `golangci-lint` clean
-- [ ] Agent-facing commands follow AXI (structured output, exit codes 0/1, no interactive prompts in CI paths)
+- `go test -race ./...` green; `golangci-lint` clean
+- Agent-facing commands follow AXI (structured output, exit codes 0/1, no interactive prompts in CI paths)
 
 **Frontend / Nx**
-- [ ] `nx affected -t lint test build` green; module boundaries respected
-- [ ] E2E updated/passing where user-facing behavior changed
+- `nx affected -t lint test build` green; module boundaries respected
+- E2E updated/passing where user-facing behavior changed
 
 **Terraform / Talos**
-- [ ] `fmt` + `validate` green; plan reviewed by a human before apply — never autonomous apply
-- [ ] Repo version pins match the running cluster after the change
+- `fmt` + `validate` green; plan reviewed by a human before apply — never autonomous apply
+- Repo version pins match the running cluster after the change
 
 **Incident / operations**
-- [ ] Runbook created or updated (`scenarios/`, `OPERATIONS.md`) with symptom → fix
-- [ ] Alert/monitor confirmed resolved or added to cover the failure mode
+- Runbook created or updated (`scenarios/`, `OPERATIONS.md`) with symptom → fix
+- Alert/monitor confirmed resolved or added to cover the failure mode
 
 ### Type-specific blocks
 
 | Type | Done additionally means |
 |---|---|
 | **Bug** | Root cause documented in the ticket (not just the fix); regression test added where a test surface exists; fix verified in the affected environment |
-| **Story** | Every acceptance criterion demonstrably true; demo evidence (screenshot/URL) on the ticket |
+| **Spike** | Findings comment posted with evidence; decision recorded; follow-up tickets filed and linked, or "none needed" stated. A Spike merges no code — the universal PR lines do not apply |
 | **Task** | All deliverables checked with evidence; follow-up work ticketed, not left implicit |
 | **Epic** | All children Done; each success metric measured and recorded in a closing epic comment |
 
@@ -443,59 +446,20 @@ Org standards source of truth: `jdwlabs/.github` → `docs/code-standards.md` (l
 
 ---
 
-## Reference: ADF Conversion
-
-Convert the Markdown draft to Atlassian Document Format before Phase 6. Every `createJiraIssue`/`addCommentToJiraIssue` call passes `contentFormat: "adf"` and a `description`/`commentBody` that is a real ADF `doc` object — never a Markdown string with `- [ ]` in it.
-
-Node mapping:
-
-| Markdown | ADF node |
-|---|---|
-| `## Heading` | `heading` (`attrs.level: 2`) |
-| `- item` | `bulletList` > `listItem` > `paragraph` |
-| `1. item` | `orderedList` > `listItem` > `paragraph` |
-| `- [ ] item` | `taskList` > `taskItem` (`attrs.state: "TODO"`, `attrs.localId`: any unique string) — **never** render checklists as bullet text; this is the one substitution that must not be skipped |
-| `` `code` `` | `text` mark `{ type: "code" }` |
-| ` ```lang\n...\n``` ` | `codeBlock` (`attrs.language`) |
-| plain paragraph | `paragraph` |
-| `**bold**` | `text` mark `{ type: "strong" }` |
-
-Minimal skeleton for a Task-style description (trim/extend per section):
-
-```json
-{
-  "type": "doc",
-  "version": 1,
-  "content": [
-    { "type": "heading", "attrs": { "level": 2 }, "content": [{ "type": "text", "text": "Objective" }] },
-    { "type": "paragraph", "content": [{ "type": "text", "text": "..." }] },
-    { "type": "heading", "attrs": { "level": 2 }, "content": [{ "type": "text", "text": "Deliverables" }] },
-    { "type": "taskList", "attrs": { "localId": "deliverables" }, "content": [
-      { "type": "taskItem", "attrs": { "localId": "d1", "state": "TODO" }, "content": [{ "type": "text", "text": "First deliverable" }] },
-      { "type": "taskItem", "attrs": { "localId": "d2", "state": "TODO" }, "content": [{ "type": "text", "text": "Second deliverable" }] }
-    ]},
-    { "type": "codeBlock", "attrs": { "language": "bash" }, "content": [{ "type": "text", "text": "$ command\noutput" }] }
-  ]
-}
-```
-
-`localId` values only need to be unique within the document — a short per-section prefix + index is fine. Every `## Deliverables` and `## Definition of Done` section in the typed templates uses `taskList`/`taskItem`; every other bulleted section (`Dependencies`, `Scope`, etc.) uses plain `bulletList` since those aren't meant to be checked off.
-
----
-
 ## Reference: Atlassian Tools
 
 | Tool | When |
 |------|------|
 | `getAccessibleAtlassianResources` | Phase 1 — get cloudId |
-| `getJiraProjectIssueTypesMetadata` | Phase 1 — discover issue types + custom fields |
+| `listJiraProjectIssueTypesMetadata` | Phase 1 — confirm issue types (via `executeRead`) |
 | `search` | Phase 2 — find parent Epics |
 | `searchJiraIssuesUsingJql` | Phase 2 — precise Epic search |
-| `lookupJiraAccountId` | Phase 4 — resolve assignee email → accountId |
+| `lookupJiraAccountId` | Phase 4 — resolve assignee email → accountId (via `executeRead`; `atlassianUserInfo` for self) |
 | `createJiraIssue` | Phase 6 — create the issue |
-| `getIssueLinkTypes` | Phase 6 — confirm valid link type names before linking (cache per session) |
-| `createIssueLink` | Phase 6 — link child to parent; flat string params, see Phase 6 note |
-| `addCommentToJiraIssue` | Phase 6 — attach overflow evidence |
+| `editJiraIssue` | Phase 6 — set a Bug's Environment field after create |
+| `listJiraIssueLinkTypes` | Phase 6 — confirm valid link type names before linking (via `executeRead`, cache per session) |
+| `createJiraIssueLink` | Phase 6 — link child to parent (via `executeWrite`); flat string params, see Phase 6 note |
+| `addOrEditJiraIssueComment` | Phase 6 — attach overflow evidence |
 | `getJiraIssue` | Any — verify created issue or look up parent details |
 
 ## Reference: Evidence Tools

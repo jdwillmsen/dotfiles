@@ -35,6 +35,11 @@ touched block; never comment out dead code. Match surrounding density.
   line-by-line; rationale recorded in the description.
 - Preferred ship path: `/no-mistakes` pipeline (intent → rebase → review →
   test+evidence → docs → lint → push → PR → CI babysit).
+- **Rebase merge, always** — every repo is configured rebase-only (squash and
+  merge commits disabled on the GitHub side). Each commit reaching `main`
+  stands alone, so `git blame` and `git log -S` land on the commit that
+  explains the line instead of a squashed blob. Tidy a messy branch locally
+  before merging; that cleanup is the author's job, not the merge button's.
 
 ## Git — Worktrees + Main Hygiene (MANDATORY)
 
@@ -53,7 +58,7 @@ touched block; never comment out dead code. Match surrounding density.
 - **Refresh main immediately after every merge**: `git pull --ff-only`. If it
   fails, commits leaked onto local main — rescue, never push:
   `git branch fix/rescued-work && git reset --hard origin/main`, then PR them.
-- Squash merges rewrite SHAs: verify merged by tree diff
+- Merging rewrites SHAs (rebase replays commits): verify merged by tree diff
   (`git diff HEAD origin/main --stat` empty), not `git branch --contains`.
 - Never nest worktrees; never `git checkout main` from a worktree.
 - **Parallel agents on git work = separate worktrees, no exceptions.** Any

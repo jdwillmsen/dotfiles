@@ -8,6 +8,13 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # Majors are excluded from every group so they arrive as their own pull
+    # request. dependabot/fetch-metadata reports a grouped PR's update-type as
+    # major if *any* member is a major, and the auto-merge workflow refuses
+    # majors -- so a single major in a group silently blocks the whole batch,
+    # including the security patches travelling with it. Observed directly: a
+    # 43-package development group held for days behind one Angular major.
     groups:
       actions:
         patterns: ['*']
+        update-types: ['minor', 'patch']

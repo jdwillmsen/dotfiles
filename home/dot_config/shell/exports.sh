@@ -32,5 +32,9 @@ export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
 # Kubernetes
 export KUBECONFIG="$HOME/.kube/config"
 
+# Vault — the cluster's instance, published through the gateway. The address
+# only: a token comes from `vault login` into ~/.vault-token, never from here.
+export VAULT_ADDR="https://vault.jdwlabs.com"
+
 # Docker BuildKit for better build output
 export DOCKER_BUILDKIT=1

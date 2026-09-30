@@ -9,9 +9,9 @@
 
 ## Git
 
-- Always work in a git worktree on a dedicated feature branch for any non-trivial change. Never commit directly to `main` or a repo's default branch.
+- Work in a git worktree on a dedicated feature branch before touching code. Never commit directly to `main` or a repo's default branch.
 - When asked to commit, use Conventional Commit messages: `type(scope): description`.
-- Keep commits atomic. Each commit should represent one logical change and be reviewable on its own.
+- Keep commits atomic: one logical change, reviewable on its own. Repos merge rebase-only, so every commit lands on `main` as-is; resolve conflicts with `git rebase origin/main`, never a merge commit.
 - Split unrelated formatting, refactors, dependency updates, and behavior changes into separate commits.
 - Stage only the files that belong to the logical change being committed.
 - AI attribution in commits is mandatory. Every commit Codex (or any AI agent) contributed to names the exact agent and model in trailers, so provenance stays queryable in `git log`:
@@ -25,3 +25,8 @@
 - Title: `type(scope): short description`, under 70 chars.
 - Body is for the reviewer, ~150 words max, only sections with content: **Why** (1–3 sentences), **Needs attention** (risky or non-obvious spots as `file:line`, and the feedback wanted), **Risk / rollout** (only if any), **Verified** (commands actually run, one line each).
 - No file-by-file lists, restated diff, pasted prompts, logs or unticked checkboxes. Every claim must match the final diff; rewrite the body after the last push.
+
+## Devbox
+
+- Never run a command that mints, prints or exchanges a credential (tokens, auth codes, QR codes, API keys) through your shell — the output persists in logs. Prepare everything, then hand the human the exact command to run in a separate terminal.
+- Dotfiles are chezmoi-managed: edit `~/.local/share/chezmoi`, never the deployed file. Devbox layout: `~/AGENTS.md`.

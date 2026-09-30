@@ -8,6 +8,10 @@
 
 <!-- Risky or non-obvious spots as `path:line`, and the feedback you want. -->
 
+## Risk / rollout
+
+<!-- Only if any: breaking changes, manual steps after `chezmoi apply`. -->
+
 ## Verified
 
 <!-- Commands actually run, one line each: `bash tests/smoke.sh`, `chezmoi apply` on a clean HOME, … -->

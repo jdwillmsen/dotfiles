@@ -30,3 +30,4 @@
 
 - Never run a command that mints, prints or exchanges a credential (tokens, auth codes, QR codes, API keys) through your shell — the output persists in logs. Prepare everything, then hand the human the exact command to run in a separate terminal.
 - Dotfiles are chezmoi-managed: edit `~/.local/share/chezmoi`, never the deployed file. Devbox layout: `~/AGENTS.md`.
+- Before trusting a clean-looking result from `rtk`, `gh`, `kubectl` or Windows `curl`, read `~/.local/share/chezmoi/docs/agent-tooling-traps.md` — those tools have printed success, stale state or truncated output here.

@@ -14,10 +14,8 @@ with the `dotfiles` alias (`cd "$(chezmoi source-path)"`).
   (`~/.config/...`, `~/.claude/...`, etc.) — `chezmoi apply` overwrites the
   target from source on every run, so direct edits there silently vanish.
 - After editing source: `chezmoi apply -v` to deploy and see the diff.
-- `docs/agentic-workflow.md` and `docs/shell-helpers.md` in this repo are the
-  full reference for the captain workflow model and the `gwt`/`gwta`/`wtd`
-  worktree commands — `~/.claude/CLAUDE.md` enforces the summary, don't
-  duplicate the detail here.
+- Reference docs live in its `docs/` (workflow, shell helpers, provisioning,
+  services, secrets); rules stay in `~/.claude/CLAUDE.md`, not here.
 - No standalone `~/dotfiles` clone exists or should be made — it drifts from
   this source and has caused confusion before.
 - **Standing rule:** any devbox config change — shell, tmux, SSH-into-devbox
@@ -38,17 +36,14 @@ Flat, one directory per top-level project, no nested grouping folder.
 ## Worktrees — `~/worktrees/<project>/<branch>`
 
 `WT_BASE` (default `~/worktrees`) may not exist until the first `gwta` run —
-its absence is not an error. Full command reference: `docs/shell-helpers.md`
-in the dotfiles repo (see above).
+its absence is not an error.
 
 ## Ticket-aware Claude launch — `cj`
 
-`cj` (defined in `home/dot_config/shell/functions.sh` in the dotfiles repo)
-wraps `claude` to auto-resolve the Jira key from the current worktree/branch
-and launch with `-n <KEY>`, so `/resume` and the tab title are scannable.
-Deliberately not named `claude` — shadowing the real binary breaks
-`claude agents --json`. Prefer `cj` over bare `claude` when inside a
-ticket-named worktree.
+Prefer `cj` over bare `claude` inside a ticket-named worktree: it launches
+with `-n <KEY>` resolved from the branch, so `/resume` and the tab title are
+scannable. Defined in dotfiles `home/dot_config/shell/functions.sh`; never
+rename it to `claude` — shadowing the binary breaks `claude agents --json`.
 
 ## Credential-minting commands — human's terminal, not an agent's
 

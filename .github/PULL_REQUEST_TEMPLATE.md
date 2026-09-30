@@ -1,32 +1,15 @@
-## Summary
+<!-- ~150 words. Keep only sections with content. No AI footer — attribution goes in commit trailers. -->
 
-<!-- What does this PR do and why? -->
+## Why
 
-## Type of Change
+<!-- 1–3 sentences: the problem and why this approach. -->
 
-- [ ] `feat` — new alias, function, or shell feature
-- [ ] `fix` — bug fix or broken config
-- [ ] `chore` — maintenance / deps / tooling
-- [ ] `docs` — documentation only
-- [ ] `refactor` — no behavior change
-- [ ] `perf` — performance improvement
-- [ ] `ci` — CI/CD pipeline
+## Needs attention
 
-## Testing
+<!-- Risky or non-obvious spots as `path:line`, and the feedback you want. -->
 
-<!-- How was this tested? -->
+## Verified
 
-- [ ] Sourced in zsh (`source ~/.zshrc`)
-- [ ] Sourced in bash (`source ~/.bashrc`)
-- [ ] Ran `chezmoi apply` on a clean HOME (or `bash tests/smoke.sh`)
-- [ ] Manually tested the new alias/function
-
-## Related Issues
+<!-- Commands actually run, one line each: `bash tests/smoke.sh`, `chezmoi apply` on a clean HOME, … -->
 
 <!-- Closes #123 -->
-
-## Checklist
-
-- [ ] Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/)
-- [ ] CI passes
-- [ ] No secrets, tokens, or personal paths hardcoded

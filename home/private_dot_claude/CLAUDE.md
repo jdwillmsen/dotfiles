@@ -40,6 +40,21 @@ touched block; never comment out dead code. Match surrounding density.
   stands alone, so `git blame` and `git log -S` land on the commit that
   explains the line instead of a squashed blob. Tidy a messy branch locally
   before merging; that cleanup is the author's job, not the merge button's.
+- **AI attribution: mandatory in commits, never in PR text.** Every
+  AI-assisted commit names the exact agent and model in trailers —
+  `Co-Authored-By: <Model> <email>` plus `Assisted-by: <agent>:<model-id>`
+  (e.g. `Assisted-by: Claude Code:claude-opus-5-5`); a subagent on another
+  model adds its own line.
+  Trailers survive rebase merge and stay queryable in `git log`; a PR footer
+  does neither. PR titles, bodies and comments carry no "Generated with"
+  footer, robot emoji or attribution line.
+- **PR body is for the reviewer, ~150 words max**: *Why* (1–3 sentences);
+  *Needs attention* — the risky or non-obvious spots (`file:line`) and the
+  feedback wanted; *Risk/rollout* only if there is any; *Verified* — what
+  was actually run, one line each. No file-by-file lists, restated diff,
+  pasted prompts, logs or unticked template checkboxes. Every claim must
+  match the final diff — rewrite the body after the last push, including
+  the long body `/no-mistakes` generates (`gh pr edit --body-file`).
 
 ## Git — Worktrees + Main Hygiene (MANDATORY)
 

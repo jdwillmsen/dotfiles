@@ -79,7 +79,8 @@ echo '{"model":{"id":"claude-sonnet-4-6","display_name":"Sonnet 4.6"},"cost":{"t
 - Keep PRs focused — one concern per PR
 - Link the relevant issue if one exists
 - Ensure CI passes before requesting review
-- Use the PR template and fill it out completely
+- Use the PR template: keep only the sections that have content, ~150 words
+- AI-assisted commits carry `Co-Authored-By` and `Assisted-by: <agent>:<model-id>` trailers; PR text carries no AI footer
 
 ## Reporting Issues
 

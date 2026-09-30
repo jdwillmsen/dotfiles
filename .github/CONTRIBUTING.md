@@ -47,7 +47,7 @@ chore/upgrade-go-module
 
 - **Aliases** go in `home/dot_config/shell/aliases.sh` — group them with the related block (git, docker, kubectl, system)
 - **Functions** go in `home/dot_config/shell/functions.sh` — keep each function focused and self-contained
-- **Env vars / PATH changes** go in `home/dot_config/shell/exports.sh`
+- **Env vars / PATH changes** go in `home/dot_config/shell/exports.sh`, which the rc files source before nvm; a PATH change that must see nvm's result goes in `home/dot_config/shell/node-fallback.sh` (see `docs/provisioning.md`)
 
 Test locally before opening a PR:
 

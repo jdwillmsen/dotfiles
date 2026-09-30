@@ -247,6 +247,33 @@ on the same grounds — a Docker daemon and a cluster CLI are dead weight in a C
 container. The runtime guards remain
 for anyone running a script directly.
 
+### Node on PATH without nvm's aliases
+
+nvm's `default` alias is `lts/*`, and nvm rewrites its `lts/*` aliases to the
+newest upstream release whenever it fetches the remote list (`nvm ls-remote`,
+`nvm install`). From then until that exact release is installed, `default`
+resolves to `N/A`, sourcing `nvm.sh` falls back to `system`, and no shell has
+`node` or `npx`. Agent sessions inherit the PATH of the shell that launched
+them, so every npx-launched MCP server (Playwright's, for one) fails with
+`Executable not found in $PATH: npx` — the symptom shows up there, not in the
+shell.
+
+`node-fallback.sh`, which bashrc and zshrc source right after nvm, therefore
+prepends the bin directory of the newest *installed* node, but only when nvm
+left no `npx` on PATH. The guard is `npx`, not `node`: Ubuntu's `nodejs`
+package installs `/usr/bin/node` without npm, which is exactly what this box
+had, so a `node` on PATH does not mean npx resolves. It must run after nvm
+rather than before: nvm keeps any nvm node it finds already on PATH and reads
+its `default` alias only when there is none, so an earlier prepend would
+override an explicit `nvm alias default`.
+Running after, a resolvable default always wins. To bring the alias itself back
+in line, run `nvm install --lts`.
+
+Only shells that source the rc files get this: interactive bash (tmux panes,
+SSH logins) and zsh. `bash -c` and other non-interactive children inherit it.
+A process started with a scrubbed environment (`env -i`, a systemd unit) does
+not; those name their PATH explicitly, as the t3code drop-in does.
+
 ## Agent CLI versions
 
 `43` installs the CLIs the agent skills drive, from the `agentClis` table in

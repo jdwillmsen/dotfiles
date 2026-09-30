@@ -1,7 +1,6 @@
 # Global Claude Instructions
 
-This file loads every session — keep it small. Conditional knowledge belongs in
-skills (progressive disclosure), reference tables in repo docs.
+Loads every session — keep it small; detail goes in skills or dotfiles `docs/`.
 
 ## Working Principles — captain model
 
@@ -35,11 +34,10 @@ touched block; never comment out dead code. Match surrounding density.
   line-by-line; rationale recorded in the description.
 - Preferred ship path: `/no-mistakes` pipeline (intent → rebase → review →
   test+evidence → docs → lint → push → PR → CI babysit).
-- **Rebase merge, always** — every repo is configured rebase-only (squash and
-  merge commits disabled on the GitHub side). Each commit reaching `main`
-  stands alone, so `git blame` and `git log -S` land on the commit that
-  explains the line instead of a squashed blob. Tidy a messy branch locally
-  before merging; that cleanup is the author's job, not the merge button's.
+- **Rebase merge, always** — every repo is rebase-only, so each commit lands
+  on `main` as-is and must stand alone. Tidy a messy branch locally before
+  merging; resolve conflicts with `git rebase origin/main`, never a merge
+  commit (rebase-merge drops it and the conflict returns).
 - **AI attribution: mandatory in commits, never in PR text.** Every
   AI-assisted commit names the exact agent and model in trailers —
   `Co-Authored-By: <Model> <email>` plus `Assisted-by: <agent>:<model-id>`
@@ -56,15 +54,13 @@ touched block; never comment out dead code. Match surrounding density.
   match the final diff — rewrite the body after the last push, including
   the long body `/no-mistakes` generates (`gh pr edit --body-file`).
 
-## Git — Worktrees + Main Hygiene (MANDATORY)
+## Git — Worktrees + Main Hygiene
 
 - **NEVER work on `main`/`master`.** Before touching code check
   `git branch --show-current`; if on main, create a worktree first
   (`superpowers:using-git-worktrees` skill).
-- Agent sessions: native `EnterWorktree` (by default branches fresh from
-  origin under `.claude/worktrees/`). Terminal: `gwta <name>` / `wtd` /
-  `wtclean` — full command reference in `docs/shell-helpers.md` (dotfiles
-  repo).
+- Agent sessions: native `EnterWorktree` (branches fresh from origin).
+  Terminal: `gwta` / `wtd` / `wtclean` (dotfiles `docs/shell-helpers.md`).
 - Branch names: `feat/`, `fix/`, `chore/`, `docs/`, `refactor/` + ticket key +
   kebab-case — `feat/JDWLABS-123-fix-login-retry`. The key is what the
   statusline and `cj` resolve; omit it only for work with no ticket.
@@ -76,23 +72,20 @@ touched block; never comment out dead code. Match surrounding density.
 - Merging rewrites SHAs (rebase replays commits): verify merged by tree diff
   (`git diff HEAD origin/main --stat` empty), not `git branch --contains`.
 - Never nest worktrees; never `git checkout main` from a worktree.
-- **Parallel agents on git work = separate worktrees, no exceptions.** Any
-  time 2+ agents touch git state concurrently (parallel `Agent`/`Workflow`
-  dispatch, subagent-driven dev, worktree-per-task fanout), each gets its own
-  worktree (`isolation: "worktree"` / `EnterWorktree`). Never share one
-  working tree across concurrent agents — same rule as solo work above, just
-  enforced per-agent instead of per-session.
+- **One worktree + branch per agent task.** 2+ agents touching git state
+  concurrently each get their own (`isolation: "worktree"` / `EnterWorktree`);
+  never share one, never reuse one for a second unrelated task. Re-fetch
+  `origin/main` before rebasing or pushing — another session may have pushed.
 - **Branch a fan-out from what is landing, not from `origin/main`.** If any
-  dispatched agent's work depends on an open PR's content, every worktree must
-  start from that PR's branch; the routes above take no start point, so
-  arrange that base deliberately. A stale base has agents assert what the open
-  PR falsifies — claims true when written, wrong on merge, invisible to review
-  because each diff reads fine alone. Always tell every dispatched agent which
-  base it has and what is pending in it.
+  dispatched agent's work depends on an open PR, start every worktree from
+  that PR's branch (the routes above take no start point) and tell each agent
+  its base and what is pending in it. A stale base yields claims the open PR
+  falsifies, invisible in review because each diff reads fine alone.
 
 ## Shell
 
-Git Bash primary. Prefer bash commands/paths (`/c/Users/...`) over PowerShell.
+On Windows, Git Bash is primary: prefer bash commands and `/c/Users/...` paths
+over PowerShell.
 
 ## Agent-Facing CLIs
 

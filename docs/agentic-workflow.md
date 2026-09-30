@@ -38,6 +38,7 @@ manual step on a new machine.
 | **whisper-local** | Local voice input. The highest-leverage single change — dictation is roughly 3× typing throughput. | `run_onchange_after_50-install-whisper-local.sh.tmpl` |
 | **mattpocock/skills** | General engineering skills (tdd, diagnosing-bugs, code-review, …). | `claudePlugins` marketplace install; loads namespaced as `mattpocock-skills:*` |
 | **caveman** | Token-efficient output mode. | `claudePlugins` marketplace install |
+| **RTK** | Hook-rewritten command proxy that compresses shell output 60–90%. `rtk gain [--history]` shows savings, `rtk discover` finds missed commands, `rtk proxy <cmd>` bypasses filtering. If `rtk gain` fails, `which rtk` may be reachingforthejack/rtk (Rust Type Kit), a name collision. | `run_once_40-install-rtk.sh`; `rtk hook claude` PreToolUse hook in `modify_settings.json.json.tmpl`; agent-facing summary in `private_dot_claude/RTK.md` |
 
 ### Deliberately skipped
 
@@ -46,7 +47,7 @@ manual step on a new machine.
 - **firstmate** (orchestrator agent driving tmux tabs) — the tmux dependency is
   high-friction on Windows, and the `Agent` tool already covers parallel work.
 
-## Two rules that are not obvious
+## Rules that are not obvious
 
 **Skills are code, and they run with full agent permissions.** Do not install
 skills casually off the internet. Two independent failure modes: credential
@@ -55,11 +56,25 @@ benchmarked as using ~5% more tokens for worse results. Star count says nothing
 about whether a skill helps. Every entry in `agentSkills` should be there
 because it was read, not because it was popular.
 
+**Rebase merge only.** Every repo has squash and merge commits disabled on the
+GitHub side. Each commit reaching `main` stands alone, so `git blame` and
+`git log -S` land on the commit that explains the line instead of a squashed
+blob — which is why tidying a messy branch is the author's job before merging,
+not the merge button's.
+
 **Keep the global `CLAUDE.md` small.** It loads on every single session, so
 every line is a permanent tax. Conditional knowledge belongs in skills, which
 load only when relevant (progressive disclosure); reference tables belong in
 `docs/`. Grow *project* memory by correcting the agent and having it record the
 correction, not by writing speculative rules up front.
+
+Instruction files stack: `~/.claude/CLAUDE.md` (+ `RTK.md`) and `~/AGENTS.md`
+load for every Claude session under `$HOME`, then the repo's own `AGENTS.md`.
+Cross-repo rules belong in the global file only; repo files state repo facts.
+Codex reads `~/.codex/AGENTS.md` plus `AGENTS.md` files from the git root down
+to the working directory, so inside a repo it never sees `~/AGENTS.md`; its
+global file therefore carries its own copy of the security-relevant devbox
+rules.
 
 ## Skill provisioning: three mechanisms, one source of truth
 

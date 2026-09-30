@@ -41,6 +41,7 @@ fi
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ]          && \. "$NVM_DIR/nvm.sh"
 [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
+[ -r "$HOME/.config/shell/node-fallback.sh" ] && source "$HOME/.config/shell/node-fallback.sh"
 
 # pyenv
 if command -v pyenv &>/dev/null; then eval "$(pyenv init -)"; fi

@@ -20,11 +20,15 @@ collected.
 4. Searches GitHub (`gh search prs` and `gh search commits`) across the
    `jdwillmsen` and `jdwlabs` owners for PR body length, "Generated with"
    footers, and AI-co-authored default-branch commits missing an
-   `Assisted-by:` trailer. GitHub search returns at most 1000 results and does
-   not say when it stops. A date range that comes back full is therefore split
-   in half, repeatedly, until each piece holds fewer than 1000. A quiet
-   quarter still takes one call. If a single day is still full, the report
-   marks the counts as truncated.
+   `Assisted-by:` trailer. GitHub search returns at most 1000 results and
+   does not say when it stops. A one-request count therefore comes first. Any
+   range over 1000 is halved, on counts alone, until every piece fits, and
+   only then fetched. If a single day is still over 1000, the report marks the
+   counts as truncated. Search allows 30 requests a minute, and `gh` spends
+   one request per 100 results, so requests are spaced per page. If GitHub
+   still answers 403/429, the run waits for the search reset, up to 5 minutes
+   in total. A section that still fails is marked **Errored** and is never
+   shown as zero. A real quarterly dry run took 5 minutes.
 5. Makes **one** `claude -p` call (Sonnet, no tools, `--max-turns 1`,
    `--max-budget-usd 0.50`, 240 s timeout, no session persistence) that reads
    the metrics JSON and returns at most 250 words of trends, anomalies and

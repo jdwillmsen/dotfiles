@@ -12,3 +12,7 @@
 # instead. This is the target it left behind on machines that applied the old
 # dotfiles.
 .asoundrc
+
+# The context7-mcp user skill duplicated the context7 plugin, which already
+# registers the same MCP server and carries its own usage instructions.
+.claude/skills/context7-mcp

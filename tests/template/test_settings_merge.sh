@@ -39,3 +39,28 @@ out="$(printf '%s' "$existing" | bash "$here/home/private_dot_claude/modify_sett
 echo "$out" | "$PY" -c 'import json,sys; d=json.load(sys.stdin); \
  assert d["statusLine"]["command"]=="my-status", "user statusLine command overwritten"; \
  assert d["statusLine"]["refreshInterval"]==10, "refreshInterval not merged into existing statusLine"; print("PASS")'
+
+# enabledPlugins and skillOverrides keys the template lists override existing
+# values (a `false` default must flip an on-disk `true`), while keys the
+# template does not list survive untouched.
+existing='{"enabledPlugins":{"ralph-loop@claude-plugins-official":true,"my-plugin@mine":true,"superpowers@claude-plugins-official":false},"skillOverrides":{"tdd":"on","my-skill":"name-only"}}'
+out="$(printf '%s' "$existing" | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
+echo "$out" | "$PY" -c 'import json,sys; d=json.load(sys.stdin); p=d["enabledPlugins"]; s=d["skillOverrides"]; \
+ assert p["ralph-loop@claude-plugins-official"] is False, "listed plugin not forced off"; \
+ assert p["remember@claude-plugins-official"] is False, "listed plugin missing"; \
+ assert p["my-plugin@mine"] is True, "unlisted plugin lost"; \
+ assert p["superpowers@claude-plugins-official"] is False, "unlisted plugin toggle overwritten"; \
+ assert s["tdd"]=="off", "listed skillOverride not enforced"; \
+ assert s["my-skill"]=="name-only", "unlisted skillOverride lost"; \
+ assert s["lavish"]=="off", "listed skillOverride missing"; print("PASS")'
+
+# deniedMcpServers is a union: the template's connectors are added, a server
+# the user denied locally survives, and re-running does not duplicate entries.
+existing='{"deniedMcpServers":[{"serverName":"claude.ai Slack"},{"serverName":"claude.ai Gmail"}]}'
+out="$(printf '%s' "$existing" | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
+out="$(printf '%s' "$out" | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
+echo "$out" | "$PY" -c 'import json,sys; d=json.load(sys.stdin); names=[e["serverName"] for e in d["deniedMcpServers"]]; \
+ assert "claude.ai Slack" in names, "locally denied server dropped"; \
+ assert "claude.ai Atlassian Rovo" in names, "template-denied server missing"; \
+ assert names.count("claude.ai Gmail")==1, "deny entries duplicated"; \
+ assert not any("Claude Docs" in n or "Google Drive" in n for n in names), "kept connector denied"; print("PASS")'

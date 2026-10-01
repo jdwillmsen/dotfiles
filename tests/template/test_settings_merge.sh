@@ -43,16 +43,15 @@ echo "$out" | "$PY" -c 'import json,sys; d=json.load(sys.stdin); \
 # enabledPlugins and skillOverrides keys the template lists override existing
 # values (a `false` default must flip an on-disk `true`), while keys the
 # template does not list survive untouched.
-existing='{"enabledPlugins":{"ralph-loop@claude-plugins-official":true,"my-plugin@mine":true,"superpowers@claude-plugins-official":false},"skillOverrides":{"tdd":"on","my-skill":"name-only"}}'
+existing='{"enabledPlugins":{"ralph-loop@claude-plugins-official":true,"my-plugin@mine":true,"superpowers@claude-plugins-official":false},"skillOverrides":{"lavish":"on","my-skill":"name-only"}}'
 out="$(printf '%s' "$existing" | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
 echo "$out" | "$PY" -c 'import json,sys; d=json.load(sys.stdin); p=d["enabledPlugins"]; s=d["skillOverrides"]; \
  assert p["ralph-loop@claude-plugins-official"] is False, "listed plugin not forced off"; \
  assert p["remember@claude-plugins-official"] is False, "listed plugin missing"; \
  assert p["my-plugin@mine"] is True, "unlisted plugin lost"; \
  assert p["superpowers@claude-plugins-official"] is False, "unlisted plugin toggle overwritten"; \
- assert s["tdd"]=="off", "listed skillOverride not enforced"; \
  assert s["my-skill"]=="name-only", "unlisted skillOverride lost"; \
- assert s["lavish"]=="off", "listed skillOverride missing"; print("PASS")'
+ assert s["lavish"]=="off", "listed skillOverride not enforced"; print("PASS")'
 
 # deniedMcpServers is a union: the template's connectors are added, a server
 # the user denied locally survives, and re-running does not duplicate entries.

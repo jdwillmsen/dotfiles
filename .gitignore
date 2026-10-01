@@ -12,3 +12,6 @@ scripts/claude-status/claude-status.exe
 .claude/worktrees/
 worktrees/
 .worktrees/
+
+# Byte-compiled Python from running or linting scripts in place.
+__pycache__/

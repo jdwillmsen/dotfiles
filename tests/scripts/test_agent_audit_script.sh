@@ -178,7 +178,7 @@ run() {  # args → sets $out, $rc
         STUB_LOG="$log" STUB_GH="${STUB_GH:-ok}" STUB_CLAUDE="${STUB_CLAUDE:-ok}" \
         AGENT_AUDIT_INSIGHTS_TIMEOUT="${AGENT_AUDIT_INSIGHTS_TIMEOUT:-30}" \
         AGENT_AUDIT_JIRA_TIMEOUT="${AGENT_AUDIT_JIRA_TIMEOUT:-30}" AGENT_AUDIT_LOCK_WAIT="${AGENT_AUDIT_LOCK_WAIT:-30}" \
-        AGENT_AUDIT_GH_GAP="${AGENT_AUDIT_GH_GAP:-0}" AGENT_AUDIT_GH_MAX_WAIT="${AGENT_AUDIT_GH_MAX_WAIT:-30}" \
+        AGENT_AUDIT_JIRA_POLL="${AGENT_AUDIT_JIRA_POLL:-0.1,0.1}" AGENT_AUDIT_GH_GAP="${AGENT_AUDIT_GH_GAP:-0}" AGENT_AUDIT_GH_MAX_WAIT="${AGENT_AUDIT_GH_MAX_WAIT:-30}" \
         JIRA_URL="${JIRA_URL:-}" JIRA_USERNAME="${JIRA_USERNAME:-}" JIRA_API_TOKEN="${JIRA_API_TOKEN:-}" \
         python3 "$audit" "$@" 2>"$tmp/stderr")"
     rc=$?
@@ -357,7 +357,10 @@ class H(http.server.BaseHTTPRequestHandler):
             f.write(json.dumps({"path": self.path, "auth": self.headers.get("Authorization"), "body": body}) + "\n")
         if self.path.startswith("/rest/api/3/search/jql"):
             want = "Epic" if "issuetype = Epic" in body["jql"] else "Task"
-            resp = {"issues": [{"key": k, "fields": {"summary": sm}} for k, t, sm in issues if t == want]}
+            # jira.hide simulates search lagging behind a create.
+            hidden = want == "Task" and os.path.exists(os.path.join(os.path.dirname(log), "jira.hide"))
+            resp = {"issues": [] if hidden else
+                    [{"key": k, "fields": {"summary": sm}} for k, t, sm in issues if t == want]}
         else:
             n["issue"] += 1
             kind = body["fields"]["issuetype"]["name"]
@@ -416,6 +419,23 @@ grep -q "^jira: TASK-4 created under EPIC-1$" <<<"$out" || fail "timed-out creat
 [ "$(grep '"path": "/rest/api/3/issue"' "$tmp/jira.log" | grep -c 'monthly ending 2026-08-31"')" -eq 1 ] \
     || fail "timed-out create was retried into a duplicate"
 grep -q 'created >= -15m' "$tmp/jira.log" || fail "dedup search should be limited to recent issues"
+
+# A timed-out create that search cannot see yet is not re-POSTed; the run
+# stops with the report saved, and the re-run finds the issue first.
+echo slow-once >"$tmp/jira.mode"
+touch "$tmp/jira.hide"
+AGENT_AUDIT_JIRA_TIMEOUT=1 run --window monthly --end 2026-07-01 --no-insights
+[ "$rc" -eq 1 ] && grep -q "^jira: create timed out; re-run to file" <<<"$out" || fail "invisible timed-out create should stop" "$out"
+june="$fx/.local/share/agent-audit/reports/2026-06-30-monthly.json"
+[ "$(jget "$june" 'j.get("jira_pending"), j.get("jira_key")')" = "(True, None)" ] || fail "pending create not recorded"
+creates() { grep '"path": "/rest/api/3/issue"' "$tmp/jira.log" | grep -c 'monthly ending 2026-06-30"'; }
+[ "$(creates)" -eq 1 ] || fail "timed-out create was re-POSTed"
+[ "$(grep -c 'created >= -15m' "$tmp/jira.log")" -ge 3 ] || fail "search should be polled with backoff"
+rm "$tmp/jira.hide"
+run --window monthly --end 2026-07-01 --no-insights
+[ "$rc" -eq 0 ] || fail "re-run after a pending create failed" "$out"
+[ "$(creates)" -eq 1 ] || fail "re-run filed a duplicate instead of finding the landed issue"
+[ "$(jget "$june" 'j.get("jira_pending"), j["jira_key"]')" = "(None, 'TASK-5')" ] || fail "re-run should adopt the landed issue"
 
 # A non-JSON reply is a structured failure, not a traceback.
 echo nonjson >"$tmp/jira.mode"

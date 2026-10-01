@@ -58,6 +58,9 @@ GH_RETRIES = 3
 GH_RATE_LIMITED = re.compile(r"rate limit|HTTP 403|HTTP 429|secondary", re.I)
 LOCK_WAIT_S = int(os.environ.get("AGENT_AUDIT_LOCK_WAIT", "600"))
 JIRA_TIMEOUT_S = int(os.environ.get("AGENT_AUDIT_JIRA_TIMEOUT", "30"))
+# Jira search is eventually consistent, so an issue created by a timed-out
+# POST may take a while to show up; these are the waits (s) between looks.
+JIRA_FIND_BACKOFF_S = [float(x) for x in os.environ.get("AGENT_AUDIT_JIRA_POLL", "2,4,8,16,30").split(",")]
 # Fortnights are counted from this fixed Monday.
 FORTNIGHT_ANCHOR = dt.date(1970, 1, 5)
 
@@ -1126,6 +1129,10 @@ class JiraUnreachable(RuntimeError):
     """The request may or may not have reached Jira."""
 
 
+class JiraCreateTimedOut(RuntimeError):
+    """A create timed out and the issue has not (yet) appeared in search."""
+
+
 class Jira:
     """Credentials live only on this object for the life of the process."""
 
@@ -1171,8 +1178,9 @@ class Jira:
         except OSError as e:
             raise RuntimeError(f"Jira {method} {path.split('?')[0]} failed: {e.strerror or type(e).__name__}") from None
 
-    def find_recent(self, summary):
-        jql = (f'project = {JIRA_PROJECT} AND labels = {JIRA_LABEL} AND created >= -15m '
+    def find_recent(self, summary, within="-15m"):
+        since = f"AND created >= {within} " if within else ""
+        jql = (f'project = {JIRA_PROJECT} AND labels = {JIRA_LABEL} {since}'
                f'AND summary ~ "\\"{summary}\\"" ORDER BY created DESC')
         r = self.call("POST", "/rest/api/3/search/jql", {"jql": jql, "fields": ["summary"], "maxResults": 10})
         hits = [i["key"] for i in r.get("issues", []) if (i.get("fields") or {}).get("summary") == summary]
@@ -1182,10 +1190,17 @@ class Jira:
         try:
             return self.call("POST", "/rest/api/3/issue", payload)["key"]
         except JiraUnreachable:
-            # A timed-out POST may still have created the issue; look before
-            # the one retry so a slow Jira cannot file the report twice.
-            found = self.find_recent(payload["fields"]["summary"])
-            return found or self.call("POST", "/rest/api/3/issue", payload)["key"]
+            pass
+        # The timed-out POST may still have created the issue. Never re-POST:
+        # look for it with backoff, and if it stays invisible leave the
+        # decision to the next run, which searches again before creating.
+        summary = payload["fields"]["summary"]
+        for wait in JIRA_FIND_BACKOFF_S:
+            time.sleep(wait)
+            found = self.find_recent(summary)
+            if found:
+                return found
+        raise JiraCreateTimedOut(f"create timed out and '{summary}' is not in Jira search yet")
 
     def ensure_epic(self):
         if EPIC_FILE.is_file():
@@ -1379,12 +1394,23 @@ def main(argv):
         try:
             jira = Jira()
             epic, created = jira.ensure_epic()
-            key = jira.create_issue(issue_payload(summary_title, jira_description(md, md_path), epic))
+            # A previous run's create timed out unseen; it may have landed since.
+            key = jira.find_recent(summary_title, within=None) if (prior or {}).get("jira_pending") else None
+            if not key:
+                key = jira.create_issue(issue_payload(summary_title, jira_description(md, md_path), epic))
+            metrics.pop("jira_pending", None)
             metrics["jira_key"] = key
             metrics["jira_epic"] = epic
             json_path.write_text(json.dumps(metrics, indent=1, default=list))
             result["jira"] = f"{key} created under {epic}" + (" (epic created)" if created else "")
             result["jira_url"] = f"{jira.base}/browse/{key}"
+        except JiraCreateTimedOut:
+            metrics["jira_pending"] = True
+            json_path.write_text(json.dumps(metrics, indent=1, default=list))
+            result["jira"] = "create timed out; re-run to file (the re-run looks for the issue before creating one)"
+            result["help"] = [f"Re-run `agent-audit --window {window}"
+                              + (f" --end {opts['end']}" if opts["end"] else "") + " --no-insights` in a few minutes"]
+            rc = 1
         except (RuntimeError, KeyError, ValueError, OSError, subprocess.TimeoutExpired) as e:
             result["jira"] = f"failed: {e}"
             result["help"] = [f"Report is saved; re-run `agent-audit --window {window}"

@@ -44,9 +44,11 @@ collected.
 key in its JSON is a no-op on re-run, and `--force` files it again. Runs of
 the same window take a lock. A second run waits up to 10 minutes for the first
 to finish, then checks again, so a timer firing during a manual run ends as a
-no-op instead of a duplicate. If a Jira create times out, the script searches
-for an issue with the same summary created in the last 15 minutes before it
-retries once. A `--no-insights` retry keeps the commentary already saved in
+no-op instead of a duplicate. A Jira create that times out is never sent
+again. Jira search can lag behind a create, so the script looks for the issue
+by summary for about a minute, with growing waits between tries. If the issue
+still does not appear, the run stops with the report saved and marked
+pending. The next run then searches for the issue before it creates one. A `--no-insights` retry keeps the commentary already saved in
 the stored JSON.
 
 ## Windows
@@ -151,5 +153,5 @@ Each run makes at most one model call, capped by turns, dollars and wall
 time. The service's `TimeoutStartSec=20min` bounds the whole run, and it runs
 with `NoNewPrivileges=yes` and `PrivateTmp=yes`. The only repetition is
 bounded: the GitHub range split stops at single days, and a timed-out Jira
-create gets one retry. The weekly scan of about 600 transcript files took
+create is never re-sent; the run only polls search for it. The weekly scan of about 600 transcript files took
 under 30 s on the devbox, most of it in the GitHub searches.

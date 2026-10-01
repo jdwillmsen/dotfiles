@@ -1,0 +1,17 @@
+[Unit]
+Description=Agent usage audit (%i window)
+Documentation=file://%h/.local/share/chezmoi/docs/agent-audit.md
+
+[Service]
+Type=oneshot
+# --scheduled gates the biweekly instance to even ISO weeks; the other
+# windows ignore it.
+ExecStart=%h/.local/bin/agent-audit --window %i --scheduled
+# A user manager starts with a bare PATH; claude lives in ~/.local/bin, and gh
+# and kubectl in /usr/bin.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Bounds the whole run: a quarterly transcript scan, two GitHub searches per
+# window, the insights call (itself capped at 240s) and the Jira calls.
+TimeoutStartSec=20min
+Nice=10
+IOSchedulingClass=idle

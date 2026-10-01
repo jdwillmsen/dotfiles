@@ -37,7 +37,7 @@ manual step on a new machine.
 | **gnhf** | Long-running unattended loop with hard token/iteration caps. Built for overnight runs. | CLI via `agentClis`, pinned to a version declared there |
 | **whisper-local** | Local voice input. The highest-leverage single change — dictation is roughly 3× typing throughput. | `run_onchange_after_50-install-whisper-local.sh.tmpl` |
 | **mattpocock/skills** | General engineering skills (tdd, diagnosing-bugs, code-review, …). | `claudePlugins` marketplace install; loads namespaced as `mattpocock-skills:*` |
-| **caveman** | Token-efficient output mode. | `claudePlugins` marketplace install |
+| **caveman** | Token-efficient output mode, off by default; `/caveman` turns it on for a session. | `claudePlugins` marketplace install; default mode `off` in `dot_config/caveman/config.json` (and the `AppData/Roaming` copy on Windows) |
 | **RTK** | Hook-rewritten command proxy that compresses shell output 60–90%. `rtk gain [--history]` shows savings, `rtk discover` finds missed commands, `rtk proxy <cmd>` bypasses filtering. If `rtk gain` fails, `which rtk` may be reachingforthejack/rtk (Rust Type Kit), a name collision. | `run_once_40-install-rtk.sh`; `rtk hook claude` PreToolUse hook in `modify_settings.json.json.tmpl`; agent-facing summary in `private_dot_claude/RTK.md` |
 
 ### Deliberately skipped
@@ -46,6 +46,41 @@ manual step on a new machine.
   shell helpers already cover this. See `docs/shell-helpers.md`.
 - **firstmate** (orchestrator agent driving tmux tabs) — the tmux dependency is
   high-friction on Windows, and the `Agent` tool already covers parallel work.
+
+### Installed but disabled
+
+These plugins stay in `claudePlugins.install`, so re-enabling one is a
+one-line flip, but `modify_settings.json.json.tmpl` forces them to `false` in
+`enabledPlugins`. Each loaded skills or agents into every session's context.
+Usage figures are from a 30-day transcript review.
+
+- **learning-output-style** — 0 uses; its output style conflicts with the
+  global CLAUDE.md.
+- **pr-review-toolkit** — 9 uses for 6.6 KB of always-loaded agent
+  descriptions; overlaps the built-in `/code-review`.
+- **ralph-loop** — 0 uses; replaced by the built-in `/loop`.
+- **remember** — duplicates the built-in auto-memory. Its `~/.remember` data
+  stays on disk.
+- **gopls-lsp**, **typescript-lsp** — 0 LSP calls.
+- **claude-code-setup**, **commit-commands**, **frontend-design** — 0 skill
+  invocations.
+
+`skillOverrides` cannot trim inside a plugin: Claude Code ignores it for plugin
+skills under any key spelling (`tdd`, `mattpocock-skills:tdd`, …), so the only
+lever for an unwanted plugin skill is disabling its whole plugin.
+
+**caveman** stays enabled so `/caveman` and the cavecrew agents work, but its
+default mode is `off`. Measured net cost was about −$9 to −$13/month: Opus
+ignores the rules (article rate 9.9 per 100 words against an 8.85
+uncompressed baseline), and prose is only 4–6% of output tokens, so the
+always-loaded ruleset cost more than it saved.
+
+### claude.ai connectors denied in Claude Code
+
+`deniedMcpServers` in the settings template blocks **claude.ai Gmail** and
+**claude.ai Atlassian Rovo** (the latter duplicates the `atlassian` plugin's
+MCP server). They stay connected on claude.ai; only Claude Code stops loading
+them. Claude Docs and Google Drive stay enabled.
 
 ## Rules that are not obvious
 

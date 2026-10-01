@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Defaults contributed by dotfiles; existing on-disk (runtime) values always win.
+# Defaults contributed by dotfiles; existing on-disk (runtime) values win over
+# them, except for the ENFORCED keys below.
 # env is sized for a 1M-context model: MCP results can be twice the stock 25k
 # budget before truncation, and bash gets past the 2min default that long
 # builds were clipping. Auto-compact is deliberately left at its ~90% default.
@@ -40,6 +41,35 @@ DEFAULTS='{
         ]
       }
     ]
+  }
+}'
+# ENFORCED keys are the opposite of DEFAULTS: for every sub-key listed here
+# the template wins over the on-disk value, so turning a plugin off here
+# flips an existing `true` instead of being shadowed by it. Sub-keys not
+# listed (plugins installed by hand, the user's own skill overrides) are left
+# as they are. Lists are unioned rather than replaced, so a server denied
+# locally stays denied. Plugin skills ignore skillOverrides under any key
+# spelling, so hiding one means disabling its whole plugin in enabledPlugins.
+#
+# deniedMcpServers, not disabledMcpServers: the latter is the per-project
+# /mcp toggle state Claude Code keeps in ~/.claude.json and is not read from
+# settings files. A deny here stops only Claude Code loading the connector;
+# it stays connected on claude.ai.
+ENFORCED='{
+  "deniedMcpServers": [
+    { "serverName": "claude.ai Gmail" },
+    { "serverName": "claude.ai Atlassian Rovo" }
+  ],
+  "enabledPlugins": {
+    "claude-code-setup@claude-plugins-official": false,
+    "commit-commands@claude-plugins-official": false,
+    "frontend-design@claude-plugins-official": false,
+    "gopls-lsp@claude-plugins-official": false,
+    "learning-output-style@claude-plugins-official": false,
+    "pr-review-toolkit@claude-plugins-official": false,
+    "ralph-loop@claude-plugins-official": false,
+    "remember@claude-plugins-official": false,
+    "typescript-lsp@claude-plugins-official": false
   },
   "skillOverrides": {
     "tdd": "off",
@@ -59,7 +89,7 @@ DEFAULTS='{
 # chezmoi feeds the current file on our stdin. That stdin is captured here
 # (not left connected to python3) because a `python3 - <<PYEOF` heredoc would
 # itself occupy stdin as the script source, leaving nothing for the process
-# to read the existing file from. Passing both blobs as argv sidesteps that.
+# to read the existing file from. Passing the blobs as argv sidesteps that.
 EXISTING="$(cat)"
 # Windows ships a python3 Store-stub that fails on exec; probe for a real one.
 PY=python3
@@ -67,18 +97,21 @@ PY=python3
 "$PY" -c '
 import json, sys
 defaults = json.loads(sys.argv[1])
+enforced = json.loads(sys.argv[3])
 raw = sys.argv[2].strip()
 existing = json.loads(raw) if raw else {}
-def merge(base, override):
+def merge(base, override, union_lists=False):
     out = dict(base)
     for k, v in override.items():
         if isinstance(out.get(k), dict) and isinstance(v, dict):
-            out[k] = merge(out[k], v)
+            out[k] = merge(out[k], v, union_lists)
+        elif union_lists and isinstance(out.get(k), list) and isinstance(v, list):
+            out[k] = out[k] + [x for x in v if x not in out[k]]
         else:
             out[k] = v
     return out
-# base=defaults, override=existing -> existing keys win, defaults fill gaps
-merged = merge(defaults, existing)
+# existing wins over defaults; enforced wins over both
+merged = merge(merge(defaults, existing), enforced, union_lists=True)
 json.dump(merged, sys.stdout, indent=2)
 sys.stdout.write("\n")
-' "$DEFAULTS" "$EXISTING"
+' "$DEFAULTS" "$EXISTING" "$ENFORCED"

@@ -1,0 +1,1271 @@
+#!/usr/bin/env python3
+"""agent-audit — recurring usage audit of this box's coding agents.
+
+Reads Claude Code transcripts, settings, plugin manifests and GitHub, then
+writes a markdown report plus a metrics JSON per window, optionally asks one
+capped `claude -p` call for commentary, and files the report as a Jira task.
+Agent-facing: stdout is TOON, diagnostics go to stderr.
+"""
+import base64
+import bisect
+import datetime as dt
+import fcntl
+import glob
+import json
+import os
+import re
+import shutil
+import statistics
+import subprocess
+import sys
+import tempfile
+import urllib.error
+import urllib.request
+from collections import Counter, defaultdict
+from pathlib import Path
+
+VERSION = "1.0.0"
+
+# Fast path before any real work: harnesses probe --version constantly.
+if len(sys.argv) == 2 and sys.argv[1] in ("-v", "-V", "--version"):
+    print(VERSION)
+    sys.exit(0)
+
+WINDOWS = ("weekly", "biweekly", "monthly", "quarterly")
+FLAGS_BOOL = {"--dry-run", "--no-jira", "--no-insights", "--scheduled", "--force", "--help", "-h"}
+FLAGS_VALUE = {"--window", "--end"}
+
+JIRA_PROJECT = "JDWLABS"
+JIRA_LABEL = "agent-audit"
+EPIC_SUMMARY = "Agent tooling usage audits"
+# Jira Cloud rejects a description over 32767 characters of serialized ADF.
+JIRA_DESC_LIMIT = 30000
+
+INSIGHTS_MODEL = "sonnet"
+INSIGHTS_BUDGET_USD = "0.50"
+INSIGHTS_WORDS = 250
+INSIGHTS_TIMEOUT_S = int(os.environ.get("AGENT_AUDIT_INSIGHTS_TIMEOUT", "240"))
+GH_TIMEOUT_S = 90
+
+# API list prices in USD per million tokens: (input, output, cache read).
+# Cache writes are priced from input: 1.25x for the 5-minute TTL, 2x for 1-hour.
+# Prices as of 2026-10-01. Longest prefix wins, so dated ids resolve too.
+PRICING = {
+    "claude-fable-5-1": (10.0, 50.0, 0.25),
+    "claude-fable-5": (10.0, 50.0, 1.0),
+    "claude-mythos-5-1": (10.0, 50.0, 0.25),
+    "claude-opus-5-5": (4.0, 20.0, 0.20),
+    "claude-opus-5": (5.0, 25.0, 0.50),
+    "claude-opus-4": (5.0, 25.0, 0.50),
+    "claude-sonnet-5-5": (2.0, 10.0, 0.20),
+    "claude-sonnet-5": (2.0, 10.0, 0.20),
+    "claude-sonnet-4": (3.0, 15.0, 0.30),
+    "claude-haiku-4": (1.0, 5.0, 0.10),
+}
+CACHE_W5M, CACHE_W1H = 1.25, 2.0
+
+# Dependency bots open PRs under these logins; their bodies say nothing about
+# how the humans and agents here write PRs, so they would only dilute it.
+BOT_AUTHORS = re.compile(r"renovate|dependabot|github-actions|release-please", re.I)
+AI_COAUTHOR = re.compile(r"^co-authored-by:.*(claude|anthropic|codex|openai|copilot|gemini)", re.I | re.M)
+ASSISTED_BY = re.compile(r"^assisted-by:", re.I | re.M)
+GENERATED_WITH = re.compile(r"generated with", re.I)
+
+INSTR_MAX_LINES = 200
+INSTR_MAX_COMBINED = 32 * 1024
+
+HOME = Path.home()
+CLAUDE_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR", HOME / ".claude"))
+DATA_DIR = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / "agent-audit"
+REPORTS_DIR = DATA_DIR / "reports"
+EPIC_FILE = DATA_DIR / "epic-key"
+
+
+def log(msg):
+    print(f"agent-audit: {msg}", file=sys.stderr)
+
+
+# ── TOON output ──────────────────────────────────────────────────────────────
+
+def toon_scalar(v):
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    s = str(v)
+    if s == "" or s != s.strip() or re.search(r'[,:"\\\n\[\]{}]', s) or s in ("true", "false", "null") \
+            or re.fullmatch(r"-?\d+(\.\d+)?", s):
+        return json.dumps(s, ensure_ascii=False)
+    return s
+
+
+def toon(obj, indent=0):
+    pad = "  " * indent
+    out = []
+    for k, v in obj.items():
+        if isinstance(v, dict):
+            out.append(f"{pad}{k}:")
+            out.append(toon(v, indent + 1))
+        elif isinstance(v, list) and v and all(isinstance(x, dict) for x in v):
+            keys = list(v[0].keys())
+            out.append(f"{pad}{k}[{len(v)}]{{{','.join(keys)}}}:")
+            for row in v:
+                out.append(pad + "  " + ",".join(toon_scalar(row.get(c)) for c in keys))
+        elif isinstance(v, list):
+            out.append(f"{pad}{k}[{len(v)}]:")
+            for x in v:
+                out.append(pad + "  " + toon_scalar(x))
+        else:
+            out.append(f"{pad}{k}: {toon_scalar(v)}")
+    return "\n".join(out)
+
+
+def emit(obj):
+    print(toon(obj))
+
+
+def usage_error(msg, help_line=None):
+    emit({"error": msg, "help": help_line or USAGE_SHORT})
+    sys.exit(2)
+
+
+USAGE_SHORT = "agent-audit --window weekly|biweekly|monthly|quarterly [--dry-run] [--no-jira] [--no-insights]"
+HELP = f"""usage: {USAGE_SHORT}
+       [--end YYYY-MM-DD] [--scheduled] [--force]
+
+Audit agent usage for one window and the equal window before it; write a
+markdown report and metrics JSON, add optional model commentary, file a Jira task.
+
+flags:
+  --window W      required: weekly (last full Mon-Sun week), biweekly (last two
+                  full weeks), monthly (last full month), quarterly (last full quarter)
+  --end DATE      audit the window ending before DATE, local time (default:
+                  today); snaps back to a Monday / month start / quarter start
+  --dry-run       write nothing persistent: report, JSON and the would-be Jira
+                  payload go to a temp dir, no Jira calls
+  --no-jira       skip the Jira task
+  --no-insights   skip the single capped `claude -p` commentary call
+  --scheduled     timer mode: biweekly runs only on even ISO weeks
+  --force         re-run a window that was already filed (files a new task)
+
+state: {DATA_DIR}/reports/<date>-<window>.md|.json, epic key in {EPIC_FILE.name}
+
+examples:
+  agent-audit --window weekly --dry-run --no-jira
+  agent-audit --window monthly --no-insights
+  agent-audit --window quarterly --end 2026-10-01"""
+
+
+def parse_args(argv):
+    opts = {"window": None, "end": None}
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        key, _, inline = a.partition("=")
+        if key in FLAGS_VALUE:
+            if inline:
+                val = inline
+            else:
+                i += 1
+                if i >= len(argv):
+                    usage_error(f"{key} needs a value")
+                val = argv[i]
+            opts[key[2:]] = val
+        elif a in FLAGS_BOOL:
+            opts[a.lstrip("-").replace("-", "_")] = True
+        else:
+            usage_error(f"unknown argument {a}",
+                        "valid flags: --window, --end, --dry-run, --no-jira, --no-insights, --scheduled, --force, --help")
+        i += 1
+    return opts
+
+
+# ── Windows ──────────────────────────────────────────────────────────────────
+
+def month_start(d, back=0):
+    m = d.year * 12 + d.month - 1 - back
+    return dt.date(m // 12, m % 12 + 1, 1)
+
+
+def compute_windows(window, end):
+    """Return ((start, end), (prev_start, prev_end)) as dates, end exclusive."""
+    # Weekly windows are whole ISO weeks (Mon..Sun), so a catch-up run on a
+    # Tuesday audits the same week the missed Monday run would have.
+    monday = end - dt.timedelta(days=end.weekday())
+    if window == "weekly":
+        e = monday
+        s = e - dt.timedelta(days=7)
+        return (s, e), (s - dt.timedelta(days=7), s)
+    if window == "biweekly":
+        e = monday
+        s = e - dt.timedelta(days=14)
+        return (s, e), (s - dt.timedelta(days=14), s)
+    if window == "monthly":
+        e = month_start(end)
+        s = month_start(e, 1)
+        return (s, e), (month_start(e, 2), s)
+    q = month_start(end, (end.month - 1) % 3)
+    s = month_start(q, 3)
+    return (s, q), (month_start(q, 6), s)
+
+
+def to_epoch(d):
+    return dt.datetime(d.year, d.month, d.day).astimezone().timestamp()
+
+
+def parse_ts(s):
+    try:
+        return dt.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+    except (ValueError, AttributeError):
+        return None
+
+
+# ── Pricing ──────────────────────────────────────────────────────────────────
+
+_PRICE_KEYS = sorted(PRICING, key=len, reverse=True)
+
+
+def price_for(model):
+    for k in _PRICE_KEYS:
+        if model.startswith(k):
+            return PRICING[k]
+    return None
+
+
+def cost_of(model, u):
+    p = price_for(model)
+    if not p:
+        return None
+    i, o, cr = p
+    return (u["input"] * i + u["output"] * o + u["cache_read"] * cr
+            + u["cache_write_5m"] * i * CACHE_W5M + u["cache_write_1h"] * i * CACHE_W1H) / 1e6
+
+
+# ── Inventory: plugins, skills, MCP servers, hooks ───────────────────────────
+
+def load_json(path, default=None):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def frontmatter_name(path):
+    try:
+        head = Path(path).read_text(errors="ignore")[:2000]
+    except OSError:
+        return None
+    m = re.match(r"^---\n(.*?)\n---", head, re.S)
+    if m:
+        n = re.search(r"^name:\s*(.+)$", m.group(1), re.M)
+        if n:
+            return n.group(1).strip().strip("'\"")
+    return None
+
+
+def norm_server(name):
+    return re.sub(r"[^A-Za-z0-9_-]", "_", name)
+
+
+def inventory():
+    settings = load_json(CLAUDE_DIR / "settings.json", {}) or {}
+    enabled = [k for k, v in (settings.get("enabledPlugins") or {}).items() if v]
+    overrides = {k for k, v in (settings.get("skillOverrides") or {}).items() if v == "off"}
+    installed = (load_json(CLAUDE_DIR / "plugins/installed_plugins.json", {}) or {}).get("plugins", {})
+
+    plugins = {}
+    hook_map = {}
+    for full in enabled:
+        short = full.split("@")[0]
+        entries = installed.get(full) or []
+        root = Path(entries[0]["installPath"]) if entries and entries[0].get("installPath") else None
+        info = {"full": full, "skills": [], "commands": [], "agents": [], "mcp": [], "hooks": 0}
+        if root and root.is_dir():
+            for p in glob.glob(str(root / "skills/*/SKILL.md")):
+                info["skills"].append(frontmatter_name(p) or Path(p).parent.name)
+            for p in glob.glob(str(root / "commands/*.md")):
+                info["commands"].append(Path(p).stem)
+            for p in glob.glob(str(root / "agents/*.md")):
+                info["agents"].append(frontmatter_name(p) or Path(p).stem)
+            mcp = load_json(root / ".mcp.json", {}) or {}
+            servers = mcp.get("mcpServers", mcp) if isinstance(mcp, dict) else {}
+            for s in servers:
+                info["mcp"].append(norm_server(f"plugin_{short}_{s}"))
+            hook_sources = [load_json(root / "hooks/hooks.json", {}) or {},
+                            load_json(root / ".claude-plugin/plugin.json", {}) or {}]
+            for src in hook_sources:
+                hooks = src.get("hooks") if isinstance(src.get("hooks"), dict) else {}
+                for groups in hooks.values():
+                    for g in groups or []:
+                        for h in g.get("hooks", []):
+                            info["hooks"] += 1
+                            # Transcripts record either the command or, when
+                            # one is set, the hook's statusMessage.
+                            for key in ("command", "statusMessage"):
+                                if h.get(key):
+                                    hook_map[h[key]] = short
+        plugins[short] = info
+
+    for groups in (settings.get("hooks") or {}).values():
+        for g in groups or []:
+            for h in g.get("hooks", []):
+                if h.get("command"):
+                    hook_map.setdefault(h["command"], "settings.json")
+
+    user_skills = [frontmatter_name(p) or Path(p).parent.name
+                   for p in glob.glob(str(CLAUDE_DIR / "skills/*/SKILL.md"))]
+    user_commands = [Path(p).stem for p in glob.glob(str(CLAUDE_DIR / "commands/*.md"))]
+
+    mcp_servers = set()
+    cj = load_json(HOME / ".claude.json", {}) or {}
+    for s in (cj.get("mcpServers") or {}):
+        mcp_servers.add(norm_server(s))
+    for proj in (cj.get("projects") or {}).values():
+        for s in ((proj or {}).get("mcpServers") or {}):
+            mcp_servers.add(norm_server(s))
+    for info in plugins.values():
+        mcp_servers.update(info["mcp"])
+
+    return {
+        "settings": settings, "plugins": plugins, "hook_map": hook_map, "overrides": overrides,
+        "user_skills": user_skills, "user_commands": user_commands, "mcp_servers": mcp_servers,
+    }
+
+
+# ── Transcript scan ──────────────────────────────────────────────────────────
+
+def new_bucket():
+    return {
+        "sessions": set(), "subagent_runs": set(), "entrypoints": Counter(), "human_prompts": 0,
+        "calls_main": 0, "calls_sub": 0,
+        "usage": defaultdict(lambda: {"input": 0, "output": 0, "cache_read": 0,
+                                      "cache_write_5m": 0, "cache_write_1h": 0, "calls": 0}),
+        "text_chars": Counter(), "tool_chars": Counter(),
+        "tools": Counter(), "skills": Counter(), "agents": Counter(), "commands": Counter(),
+        "mcp": Counter(), "mcp_available": set(),
+        "hook_fires": Counter(), "hook_bytes": Counter(), "hook_sessions": defaultdict(set),
+    }
+
+
+def hook_text(att):
+    """Context a hook_success actually injected, or '' when it injected none."""
+    out = att.get("stdout") or ""
+    if not out.strip():
+        return ""
+    try:
+        j = json.loads(out)
+    except ValueError:
+        # Plain stdout is injected only for these two events.
+        return out if att.get("hookEvent") in ("SessionStart", "UserPromptSubmit") else ""
+    if not isinstance(j, dict):
+        return ""
+    hso = j.get("hookSpecificOutput") or {}
+    return hso.get("additionalContext") or j.get("additionalContext") or ""
+
+
+def user_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [x.get("text", "") for x in content if isinstance(x, dict) and x.get("type") == "text"]
+        if len(parts) == len(content):
+            return " ".join(parts)
+    return None
+
+
+def scan(windows, inv):
+    """Stream every transcript touched since the earliest window start."""
+    (cs, ce), (ps, pe) = windows
+    bounds = [to_epoch(ps), to_epoch(pe), to_epoch(ce)]
+    buckets = {"current": new_bucket(), "previous": new_bucket()}
+    names = ("previous", "current")
+
+    def which(ts):
+        t = parse_ts(ts) if ts else None
+        if t is None or t < bounds[0] or t >= bounds[2]:
+            return None
+        return names[bisect.bisect_right(bounds, t) - 1]
+
+    root = CLAUDE_DIR / "projects"
+    files = glob.glob(str(root / "*/*.jsonl")) + glob.glob(str(root / "*/*/subagents/**/*.jsonl"), recursive=True)
+    stats = {"files_total": len(files), "files_scanned": 0, "lines": 0, "bad_lines": 0, "unpriced_models": Counter()}
+    owner = {}          # message id -> file that first claimed it
+    msgs = {}           # message id -> (bucket, model, is_sub, usage maxima)
+    hook_map = inv["hook_map"]
+
+    for path in files:
+        try:
+            if os.path.getmtime(path) < bounds[0]:
+                continue
+        except OSError:
+            continue
+        stats["files_scanned"] += 1
+        is_sub = "/subagents/" in path
+        sess_key = path if is_sub else Path(path).stem
+        injected = {"previous": [], "current": []}   # (plugin, event, text) from hook_success
+        extra = {"previous": [], "current": []}      # (event, text) from hook_additional_context
+        try:
+            fh = open(path, errors="replace")
+        except OSError:
+            continue
+        with fh:
+            for line in fh:
+                stats["lines"] += 1
+                # Cheap substring gates before json.loads; deliberately loose
+                # about whitespace so a formatting change upstream cannot
+                # silently zero the audit.
+                is_asst = '"assistant"' in line
+                is_hook = '"hook_' in line
+                is_deferred = '"deferred_tools_delta"' in line
+                is_cmd = "<command-name>" in line
+                is_user = not is_sub and '"user"' in line and '"tool_use_id"' not in line
+                if not (is_asst or is_hook or is_deferred or is_cmd or is_user):
+                    continue
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    stats["bad_lines"] += 1
+                    continue
+                w = which(d.get("timestamp"))
+                if w is None:
+                    continue
+                b = buckets[w]
+                t = d.get("type")
+                if t == "assistant":
+                    m = d.get("message") or {}
+                    model = m.get("model") or ""
+                    mid = m.get("id") or d.get("uuid")
+                    if not mid or model.startswith("<"):
+                        continue
+                    if owner.setdefault(mid, path) != path:
+                        continue
+                    if mid not in msgs:
+                        msgs[mid] = [w, model, is_sub, Counter()]
+                        b["sessions" if not is_sub else "subagent_runs"].add(sess_key)
+                        if d.get("entrypoint") and not is_sub:
+                            b["entrypoints"][(sess_key, d["entrypoint"])] = 1
+                    u = m.get("usage") or {}
+                    cc = u.get("cache_creation") or {}
+                    w1h = cc.get("ephemeral_1h_input_tokens")
+                    cw = u.get("cache_creation_input_tokens") or 0
+                    got = {"input": u.get("input_tokens") or 0, "output": u.get("output_tokens") or 0,
+                           "cache_read": u.get("cache_read_input_tokens") or 0,
+                           "cache_write_1h": w1h or 0,
+                           "cache_write_5m": (cc.get("ephemeral_5m_input_tokens") or 0) if w1h is not None else cw}
+                    mx = msgs[mid][3]
+                    for k, v in got.items():
+                        if v > mx[k]:
+                            mx[k] = v
+                    for blk in m.get("content") or []:
+                        if not isinstance(blk, dict):
+                            continue
+                        bt = blk.get("type")
+                        if bt == "text":
+                            b["text_chars"][model] += len(blk.get("text") or "")
+                        elif bt == "tool_use":
+                            name = blk.get("name") or "?"
+                            inp = blk.get("input") or {}
+                            b["tool_chars"][model] += len(json.dumps(inp))
+                            b["tools"][name] += 1
+                            if name == "Skill":
+                                b["skills"][str(inp.get("skill") or "?")] += 1
+                            elif name in ("Agent", "Task"):
+                                b["agents"][str(inp.get("subagent_type") or "general-purpose")] += 1
+                            elif name.startswith("mcp__"):
+                                b["mcp"][name.split("__")[1]] += 1
+                elif t == "attachment":
+                    a = d.get("attachment") or {}
+                    at = str(a.get("type") or "")
+                    if at == "deferred_tools_delta":
+                        for n in a.get("addedNames") or []:
+                            if n.startswith("mcp__"):
+                                b["mcp_available"].add(n.split("__")[1])
+                    elif at == "hook_additional_context":
+                        c = a.get("content")
+                        for txt in (c if isinstance(c, list) else [c]):
+                            if txt:
+                                extra[w].append((a.get("hookEvent") or "?", str(txt)))
+                    elif at.startswith("hook_"):
+                        cmd = a.get("command") or ""
+                        plugin = hook_map.get(cmd, "unmapped")
+                        ev = a.get("hookEvent") or "?"
+                        b["hook_fires"][(plugin, ev)] += 1
+                        txt = hook_text(a) if at == "hook_success" else ""
+                        if txt:
+                            injected[w].append((plugin, ev, txt))
+                elif t == "user":
+                    if d.get("isMeta") or d.get("isCompactSummary"):
+                        continue
+                    txt = user_text((d.get("message") or {}).get("content"))
+                    if txt is None:
+                        continue
+                    cmds = re.findall(r"<command-name>/?([^<]+)</command-name>", txt)
+                    for c in cmds:
+                        b["commands"][c.strip()] += 1
+                    if not is_sub and (cmds or not txt.lstrip().startswith("<")):
+                        b["human_prompts"] += 1
+
+        # The additional-context record repeats what a hook_success already
+        # carried; only text no hook_success claims is attributed separately.
+        for w in names:
+            b = buckets[w]
+            claimed = Counter(txt for _, _, txt in injected[w])
+            for plugin, ev, txt in injected[w]:
+                b["hook_bytes"][(plugin, ev)] += len(txt.encode())
+                b["hook_sessions"][(plugin, ev)].add(sess_key)
+            for ev, txt in extra[w]:
+                if claimed[txt] > 0:
+                    claimed[txt] -= 1
+                    continue
+                label = "unattributed: " + re.sub(r"\s+", " ", txt)[:40]
+                b["hook_bytes"][(label, ev)] += len(txt.encode())
+                b["hook_fires"][(label, ev)] += 1
+                b["hook_sessions"][(label, ev)].add(sess_key)
+
+    for w, model, is_sub, mx in msgs.values():
+        b = buckets[w]
+        u = b["usage"][model]
+        for k in ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h"):
+            u[k] += mx[k]
+        u["calls"] += 1
+        b["calls_sub" if is_sub else "calls_main"] += 1
+        if not price_for(model):
+            stats["unpriced_models"][model] += 1
+    return buckets, stats
+
+
+def summarize(b, inv):
+    models = []
+    tot = {"input": 0, "output": 0, "cache_read": 0, "cache_write_5m": 0, "cache_write_1h": 0}
+    cost = 0.0
+    for model, u in sorted(b["usage"].items(), key=lambda kv: -kv[1]["output"]):
+        c = cost_of(model, u)
+        cost += c or 0
+        for k in tot:
+            tot[k] += u[k]
+        text_tok = b["text_chars"][model] // 4
+        tool_tok = b["tool_chars"][model] // 4
+        models.append({
+            "model": model, "calls": u["calls"], "input": u["input"], "cache_write": u["cache_write_5m"] + u["cache_write_1h"],
+            "cache_read": u["cache_read"], "output": u["output"],
+            "cost_usd": round(c, 6) if c is not None else None,
+            "out_text_est": text_tok, "out_tool_json_est": tool_tok,
+            "out_thinking_other_est": max(0, u["output"] - text_tok - tool_tok),
+        })
+    sessions = len(b["sessions"])
+    hooks = []
+    for key in set(b["hook_fires"]) | set(b["hook_bytes"]):
+        plugin, ev = key
+        fires = b["hook_fires"][key]
+        byt = b["hook_bytes"][key]
+        hooks.append({"plugin": plugin, "event": ev, "fires": fires, "bytes": byt,
+                      "bytes_per_fire": byt // fires if fires else 0,
+                      "bytes_per_session": byt // max(1, len(b["hook_sessions"][key])) if byt else 0})
+    hooks.sort(key=lambda h: (-h["bytes"], -h["fires"]))
+    ep = Counter(e for (_, e) in b["entrypoints"])
+    return {
+        "sessions": sessions, "subagent_runs": len(b["subagent_runs"]), "human_prompts": b["human_prompts"],
+        "entrypoints": dict(ep),
+        "calls_main": b["calls_main"], "calls_subagent": b["calls_sub"],
+        "tokens": {"input": tot["input"], "cache_write": tot["cache_write_5m"] + tot["cache_write_1h"],
+                   "cache_write_1h": tot["cache_write_1h"], "cache_read": tot["cache_read"], "output": tot["output"]},
+        "cost_usd": round(cost, 2),
+        "cost_per_session_usd": round(cost / sessions, 2) if sessions else 0,
+        "models": models,
+        "skills": dict(b["skills"].most_common()), "agents": dict(b["agents"].most_common()),
+        "commands": dict(b["commands"].most_common()), "mcp": dict(b["mcp"].most_common()),
+        "lsp_calls": b["tools"].get("LSP", 0),
+        "mcp_available": sorted(b["mcp_available"]),
+        "hooks": hooks,
+    }
+
+
+def disable_candidates(cur, inv):
+    used_skills = set(cur["skills"]) | set(cur["commands"])
+    used_agents = set(cur["agents"])
+    used_mcp = set(cur["mcp"])
+    hook_bytes = Counter()
+    for h in cur["hooks"]:
+        hook_bytes[h["plugin"]] += h["bytes"]
+
+    plugins = []
+    for short, info in sorted(inv["plugins"].items()):
+        n = 0
+        n += sum(v for k, v in cur["skills"].items() if k.startswith(short + ":"))
+        n += sum(v for k, v in cur["commands"].items() if k.startswith(short + ":"))
+        n += sum(v for k, v in cur["agents"].items() if k.startswith(short + ":"))
+        n += sum(cur["mcp"].get(s, 0) for s in info["mcp"])
+        if n == 0:
+            kinds = [k for k in ("skills", "commands", "agents", "mcp") if info[k]]
+            if info["hooks"]:
+                kinds.append("hooks")
+            plugins.append({"plugin": short, "provides": "+".join(kinds) or "lsp/other",
+                            "hook_bytes": hook_bytes.get(short, 0)})
+
+    skills = []
+    for short, info in inv["plugins"].items():
+        for s in info["skills"] + info["commands"]:
+            full = f"{short}:{s}"
+            if full in used_skills or s in used_skills or s in inv["overrides"] or full in inv["overrides"]:
+                continue
+            skills.append(full)
+    for s in inv["user_skills"] + inv["user_commands"]:
+        if s not in used_skills and s not in inv["overrides"]:
+            skills.append(s)
+
+    available = set(inv["mcp_servers"]) | set(cur["mcp_available"])
+    mcp = sorted(s for s in available if s not in used_mcp)
+    agents = sorted(f"{short}:{a}" for short, info in inv["plugins"].items()
+                    for a in info["agents"] if f"{short}:{a}" not in used_agents)
+    return {"plugins": plugins, "skills": sorted(set(skills)), "mcp_servers": mcp, "agents": agents}
+
+
+# ── Instruction-file health ──────────────────────────────────────────────────
+
+def file_stat(p):
+    try:
+        data = Path(p).read_bytes()
+    except OSError:
+        return None
+    return {"path": str(p).replace(str(HOME), "~", 1), "lines": data.count(b"\n"), "bytes": len(data)}
+
+
+def with_imports(p, seen=None):
+    """A Claude instruction file plus everything its @imports pull in."""
+    seen = seen if seen is not None else []
+    p = Path(p)
+    if p in seen or not p.is_file():
+        return seen
+    seen.append(p)
+    for m in re.finditer(r"^@(\S+)\s*$", p.read_text(errors="ignore"), re.M):
+        target = Path(os.path.expanduser(m.group(1)))
+        with_imports(target if target.is_absolute() else p.parent / target, seen)
+    return seen
+
+
+def instruction_health():
+    claude_chain = with_imports(CLAUDE_DIR / "CLAUDE.md")
+    home_chain = with_imports(HOME / "CLAUDE.md")
+    if not home_chain and (HOME / "AGENTS.md").is_file():
+        home_chain = [HOME / "AGENTS.md"]
+    codex_global = HOME / ".codex/AGENTS.md"
+    memories = sorted(Path(p) for p in glob.glob(str(CLAUDE_DIR / "projects/*/memory/MEMORY.md")))
+    repos = sorted(Path(p) for p in glob.glob(str(HOME / "projects/jdwlabs/*/AGENTS.md")))
+
+    files, seen = [], set()
+    for p in claude_chain + home_chain + [codex_global] + memories + repos:
+        if p in seen:
+            continue
+        seen.add(p)
+        s = file_stat(p)
+        if s:
+            s["flag"] = "over_200_lines" if s["lines"] > INSTR_MAX_LINES else ""
+            files.append(s)
+
+    def total(ps):
+        return sum((file_stat(p) or {"bytes": 0})["bytes"] for p in ps)
+
+    # What each agent actually loads together at session start.
+    combined = [{"set": "claude_global (user CLAUDE.md + ~/CLAUDE.md, with imports)",
+                 "bytes": total(list(dict.fromkeys(claude_chain + home_chain)))}]
+    for r in repos:
+        combined.append({"set": f"codex in {r.parent.name} (~/.codex + ~/AGENTS.md + repo)",
+                         "bytes": total([codex_global, HOME / "AGENTS.md", r])})
+    for c in combined:
+        c["flag"] = "over_32KiB" if c["bytes"] > INSTR_MAX_COMBINED else ""
+    return {"files": files, "combined": combined}
+
+
+# ── PR hygiene (GitHub) ──────────────────────────────────────────────────────
+
+def gh_json(args):
+    if not shutil.which("gh"):
+        raise RuntimeError("gh not installed")
+    r = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=GH_TIMEOUT_S,
+                       env={**os.environ, "GH_PROMPT_DISABLED": "1", "NO_COLOR": "1"})
+    if r.returncode != 0:
+        first = (r.stderr.strip().splitlines() or ["unknown error"])[0]
+        raise RuntimeError(f"GitHub search failed: {first[:160]}")
+    return json.loads(r.stdout or "[]")
+
+
+def pct(xs, q):
+    if not xs:
+        return 0
+    xs = sorted(xs)
+    return xs[min(len(xs) - 1, int(q * len(xs)))]
+
+
+def pr_hygiene(start, end):
+    rng = f"{start.isoformat()}..{(end - dt.timedelta(days=1)).isoformat()}"
+    owners = ["--owner", "jdwillmsen", "--owner", "jdwlabs"]
+    try:
+        prs = gh_json(["search", "prs", *owners, "--created", rng, "--limit", "1000",
+                       "--json", "number,repository,author,body,url"])
+        commits = gh_json(["search", "commits", *owners, "--committer-date", rng, "--limit", "1000",
+                           "--json", "sha,commit,repository"])
+    except (RuntimeError, subprocess.TimeoutExpired, ValueError) as e:
+        return {"available": False, "reason": str(e)[:200]}
+    prs = [p for p in prs if not BOT_AUTHORS.search(((p.get("author") or {}).get("login")) or "")]
+    words = [len((p.get("body") or "").split()) for p in prs]
+    footer = [p.get("url") for p in prs if GENERATED_WITH.search(p.get("body") or "")]
+    ai, missing = 0, []
+    for c in commits:
+        msg = (c.get("commit") or {}).get("message") or ""
+        if AI_COAUTHOR.search(msg):
+            ai += 1
+            if not ASSISTED_BY.search(msg):
+                r = c.get("repository") or {}
+                repo = r.get("fullName") or r.get("nameWithOwner") or "?"
+                missing.append(f"{repo}@{(c.get('sha') or '')[:7]}")
+    return {
+        "available": True, "prs": len(prs),
+        "body_words_median": int(statistics.median(words)) if words else 0,
+        "body_words_p90": pct(words, 0.9),
+        "generated_with_footer": len(footer), "generated_with_urls": footer[:10],
+        "default_branch_commits": len(commits), "ai_coauthored_commits": ai,
+        "missing_assisted_by": len(missing), "missing_assisted_by_examples": missing[:10],
+    }
+
+
+# ── History ──────────────────────────────────────────────────────────────────
+
+def history(window):
+    rows = []
+    for p in sorted(REPORTS_DIR.glob(f"*-{window}.json")):
+        j = load_json(p)
+        if j and j.get("window") == window:
+            rows.append(j)
+    return rows
+
+
+def report_paths(window, label_date, root):
+    stem = f"{label_date.isoformat()}-{window}"
+    return root / f"{stem}.md", root / f"{stem}.json"
+
+
+# ── Insights (one capped model call) ─────────────────────────────────────────
+
+INSIGHTS_PROMPT = """You audit one developer's AI coding-agent usage. Below is a metrics JSON
+for the current window and the previous equal window (plus earlier history when
+present). Write at most {words} words of markdown with three short bullet groups:
+**Trends**, **Anomalies**, **Suggested cuts/changes**. Be concrete: name the
+plugin, skill, MCP server, model or file, and quantify with the numbers given.
+Prefer cuts that save the most tokens or dollars. No preamble, no closing line.
+
+METRICS:
+"""
+
+
+def insights_input(metrics):
+    slim = json.loads(json.dumps(metrics))
+    for w in ("current", "previous"):
+        if isinstance(slim.get(w), dict):
+            slim[w].pop("mcp_available", None)
+    dc = slim.get("disable_candidates") or {}
+    for k in ("skills", "agents"):
+        if isinstance(dc.get(k), list) and len(dc[k]) > 40:
+            dc[k] = dc[k][:40] + [f"... {len(dc[k]) - 40} more"]
+    return json.dumps(slim, separators=(",", ":"))
+
+
+def run_insights(metrics):
+    claude = shutil.which("claude") or str(HOME / ".local/bin/claude")
+    if not os.access(claude, os.X_OK):
+        return None, "claude CLI not found"
+    # Empty working dir + project-only settings: no user plugins, hooks or MCP
+    # servers load, so the call costs what its prompt costs and nothing more.
+    # No session persistence keeps this call out of the next audit's numbers.
+    cmd = [claude, "-p", "--model", INSIGHTS_MODEL, "--tools", "", "--strict-mcp-config",
+           "--setting-sources", "project", "--max-turns", "1", "--max-budget-usd", INSIGHTS_BUDGET_USD,
+           "--no-session-persistence", "--output-format", "json"]
+    prompt = INSIGHTS_PROMPT.format(words=INSIGHTS_WORDS) + insights_input(metrics)
+    with tempfile.TemporaryDirectory(prefix="agent-audit-insights-") as cwd:
+        try:
+            r = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
+                               timeout=INSIGHTS_TIMEOUT_S, cwd=cwd)
+        except subprocess.TimeoutExpired:
+            return None, f"timed out after {INSIGHTS_TIMEOUT_S}s"
+        except OSError as e:
+            return None, f"could not start claude: {e.strerror}"
+    if r.returncode != 0:
+        return None, f"claude exited {r.returncode}"
+    try:
+        j = json.loads(r.stdout)
+    except ValueError:
+        return None, "claude returned non-JSON output"
+    if j.get("is_error") or not j.get("result"):
+        return None, f"claude reported an error ({j.get('subtype') or j.get('terminal_reason') or 'no result'})"
+    words = j["result"].split(" ")
+    text = j["result"] if len(words) <= INSIGHTS_WORDS + 20 else " ".join(words[:INSIGHTS_WORDS]) + " …"
+    return {"text": text.strip(), "cost_usd": round(float(j.get("total_cost_usd") or 0), 4)}, None
+
+
+# ── Markdown report ──────────────────────────────────────────────────────────
+
+def fmt_n(n):
+    if n is None:
+        return "–"
+    if isinstance(n, float):
+        return f"{n:,.2f}"
+    return f"{n:,}"
+
+
+def delta(cur, prev):
+    if prev in (None, 0) or cur is None:
+        return "new" if cur else "–"
+    d = (cur - prev) / prev * 100
+    return f"{d:+.0f}%"
+
+
+def table(headers, rows):
+    out = ["| " + " | ".join(headers) + " |", "|" + "---|" * len(headers)]
+    for r in rows:
+        out.append("| " + " | ".join(str(c).replace("|", "/") for c in r) + " |")
+    return out
+
+
+def top_rows(cur, prev, limit=15):
+    keys = sorted(set(cur) | set(prev), key=lambda k: (-cur.get(k, 0), -prev.get(k, 0), k))
+    return [(f"`{k}`", cur.get(k, 0), prev.get(k, 0)) for k in keys[:limit]], max(0, len(keys) - limit)
+
+
+def render(m):
+    cur, prev = m["current"], m["previous"]
+    w = m["window_range"]
+    L = [f"# Agent usage audit — {m['window']} ending {m['label_date']}", ""]
+    L.append(f"Window {w['start']} → {w['end_inclusive']}, compared with {w['prev_start']} → "
+             f"{w['prev_end_inclusive']} (previous from {m['previous_source']}). Generated {m['generated_at']}.")
+    L.append("")
+    ins = m.get("insights") or {}
+    L.append("## Insights")
+    L.append("")
+    if ins.get("text"):
+        L += [ins["text"], ""]
+    else:
+        L += [f"Insights unavailable: {ins.get('skipped') or 'not requested'}.", ""]
+
+    L += ["## Headline", ""]
+    rows = []
+    for label, key in [("Sessions (main)", "sessions"), ("Subagent runs", "subagent_runs"),
+                       ("User prompts (main)", "human_prompts"), ("API calls, main", "calls_main"),
+                       ("API calls, subagent", "calls_subagent")]:
+        rows.append((label, fmt_n(cur[key]), fmt_n(prev.get(key)), delta(cur[key], prev.get(key))))
+    for label, key in [("Input tokens", "input"), ("Cache write tokens", "cache_write"),
+                       ("Cache read tokens", "cache_read"), ("Output tokens", "output")]:
+        c, p = cur["tokens"][key], (prev.get("tokens") or {}).get(key)
+        rows.append((label, fmt_n(c), fmt_n(p), delta(c, p)))
+    rows.append(("Est. cost at API rates (USD)", fmt_n(float(cur["cost_usd"])),
+                 fmt_n(float(prev.get("cost_usd") or 0)), delta(cur["cost_usd"], prev.get("cost_usd"))))
+    rows.append(("Est. cost per session (USD)", fmt_n(float(cur["cost_per_session_usd"])),
+                 fmt_n(float(prev.get("cost_per_session_usd") or 0)),
+                 delta(cur["cost_per_session_usd"], prev.get("cost_per_session_usd"))))
+    L += table(["Metric", "Current", "Previous", "Δ"], rows) + [""]
+    if m["trend"]:
+        L += ["Trend (earlier runs of this window, oldest first): " +
+              ", ".join(f"{t['label_date']} ${t['cost_usd']:,.0f} / {t['sessions']} sessions" for t in m["trend"]), ""]
+    if cur["entrypoints"]:
+        L += ["Sessions by entrypoint: " + ", ".join(f"`{k}` {v}" for k, v in sorted(cur["entrypoints"].items())), ""]
+
+    L += ["## Models and output split", ""]
+    tot_out = sum(x["output"] for x in cur["models"]) or 1
+    L += table(["Model", "Calls", "Output tok", "Share", "Cost USD", "Visible text ~tok", "Tool JSON ~tok", "Thinking/other ~tok"],
+               [(f"`{x['model']}`", fmt_n(x["calls"]), fmt_n(x["output"]), f"{x['output'] / tot_out * 100:.0f}%",
+                 fmt_n(x["cost_usd"]), fmt_n(x["out_text_est"]), fmt_n(x["out_tool_json_est"]),
+                 fmt_n(x["out_thinking_other_est"])) for x in cur["models"]])
+    L += ["", "Text and tool-JSON tokens are estimated at 4 characters per token; thinking text is not "
+          "stored in transcripts, so it is the remainder.", ""]
+
+    L += ["## Usage", ""]
+    for title, key in [("Skills (Skill tool)", "skills"), ("Subagent types", "agents"),
+                       ("Slash commands", "commands"), ("MCP calls per server", "mcp")]:
+        rows, more = top_rows(cur[key], prev.get(key) or {})
+        L += [f"### {title}", ""]
+        if rows:
+            L += table(["Name", "Current", "Previous"], rows)
+            if more:
+                L.append(f"\n{more} more in the metrics JSON.")
+        else:
+            L.append(f"None used in either window.")
+        L.append("")
+    if cur["lsp_calls"]:
+        L += [f"LSP tool calls: {cur['lsp_calls']}.", ""]
+
+    L += ["## Hooks and injected context", ""]
+    if cur["hooks"]:
+        L += table(["Source", "Event", "Fires", "Injected KiB", "Bytes/fire", "Bytes/session"],
+                   [(h["plugin"], h["event"], fmt_n(h["fires"]), f"{h['bytes'] / 1024:,.1f}",
+                     fmt_n(h["bytes_per_fire"]), fmt_n(h["bytes_per_session"])) for h in cur["hooks"][:20]])
+    else:
+        L.append("No hook activity recorded.")
+    L.append("")
+
+    dc = m["disable_candidates"]
+    L += ["## Disable candidates (zero use this window)", ""]
+    if dc["plugins"]:
+        L += table(["Plugin", "Provides", "Hook context injected (KiB)"],
+                   [(f"`{p['plugin']}`", p["provides"], f"{p['hook_bytes'] / 1024:,.1f}") for p in dc["plugins"]])
+    else:
+        L.append("Every enabled plugin was used.")
+    L.append("")
+    for title, key in [("MCP servers", "mcp_servers"), ("Plugin agents", "agents"), ("Skills and commands", "skills")]:
+        items = dc[key]
+        shown = ", ".join(f"`{x}`" for x in items[:30])
+        more = f" and {len(items) - 30} more" if len(items) > 30 else ""
+        L += [f"- **{title}** ({len(items)}): {shown or 'none'}{more}"]
+    L.append("")
+
+    ih = m["instructions"]
+    L += ["## Instruction files", ""]
+    L += table(["File", "Lines", "KiB", "Flag"],
+               [(f"`{f['path']}`", f["lines"], f"{f['bytes'] / 1024:.1f}", f["flag"] or "ok") for f in ih["files"]])
+    L.append("")
+    L += table(["Loaded together", "KiB", "Flag"],
+               [(c["set"], f"{c['bytes'] / 1024:.1f}", c["flag"] or "ok") for c in ih["combined"]])
+    L.append("")
+
+    L += ["## PR hygiene (jdwillmsen, jdwlabs)", ""]
+    pc, pp = m["prs"]["current"], m["prs"]["previous"]
+    if not pc.get("available"):
+        L += [f"Unavailable: {pc.get('reason')}.", ""]
+    else:
+        def pv(k):
+            return pp.get(k) if pp.get("available") else None
+        rows = [(label, fmt_n(pc[k]), fmt_n(pv(k)), delta(pc[k], pv(k))) for label, k in [
+            ("PRs created", "prs"), ("Body words, median", "body_words_median"), ("Body words, p90", "body_words_p90"),
+            ("PRs with a \"Generated with\" footer", "generated_with_footer"),
+            ("Default-branch commits", "default_branch_commits"),
+            ("AI co-authored commits", "ai_coauthored_commits"),
+            ("…of which missing Assisted-by", "missing_assisted_by")]]
+        L += table(["Metric", "Current", "Previous", "Δ"], rows) + [""]
+        if pc["missing_assisted_by_examples"]:
+            L += ["Missing Assisted-by: " + ", ".join(f"`{x}`" for x in pc["missing_assisted_by_examples"]), ""]
+        if pc["generated_with_urls"]:
+            L += ["Footer found in: " + ", ".join(pc["generated_with_urls"]), ""]
+
+    s = m["coverage"]
+    L += ["## Coverage", ""]
+    L.append(f"- Transcript files: {s['files_scanned']} scanned of {s['files_total']}; {s['lines']:,} lines, "
+             f"{s['bad_lines']} unparseable.")
+    L.append(f"- Transcript retention: cleanupPeriodDays = {s['retention_days']}; "
+             + ("the previous window predates it, so its numbers are partial unless taken from history."
+                if s["previous_partial"] else "both windows are inside it."))
+    if s["unpriced_models"]:
+        L.append("- Unpriced models (excluded from cost): " + ", ".join(f"`{k}` ({v} calls)" for k, v in s["unpriced_models"].items()))
+    L.append(f"- Pricing table dated {s['pricing_date']}; cost is an API-rate estimate, not a bill.")
+    L.append("")
+    return "\n".join(L)
+
+
+# ── Jira ─────────────────────────────────────────────────────────────────────
+
+def adf_inline(text):
+    nodes = []
+    for part in re.split(r"(`[^`]+`|\*\*[^*]+\*\*)", text):
+        if not part:
+            continue
+        if part.startswith("`") and part.endswith("`") and len(part) > 1:
+            nodes.append({"type": "text", "text": part[1:-1], "marks": [{"type": "code"}]})
+        elif part.startswith("**") and part.endswith("**") and len(part) > 3:
+            nodes.append({"type": "text", "text": part[2:-2], "marks": [{"type": "strong"}]})
+        else:
+            nodes.append({"type": "text", "text": part})
+    return nodes or [{"type": "text", "text": " "}]
+
+
+def md_to_adf(md):
+    """Convert the report's own markdown subset: headings, bullets, tables, paragraphs."""
+    content, lines, i = [], md.splitlines(), 0
+    while i < len(lines):
+        line = lines[i]
+        if not line.strip():
+            i += 1
+            continue
+        h = re.match(r"^(#{1,6}) (.*)", line)
+        if h:
+            content.append({"type": "heading", "attrs": {"level": len(h.group(1))}, "content": adf_inline(h.group(2))})
+            i += 1
+        elif line.startswith("|"):
+            rows = []
+            while i < len(lines) and lines[i].startswith("|"):
+                cells = [c.strip() for c in lines[i].strip().strip("|").split("|")]
+                if not all(re.fullmatch(r"-+", c) for c in cells):
+                    rows.append(cells)
+                i += 1
+            trs = []
+            for n, cells in enumerate(rows):
+                kind = "tableHeader" if n == 0 else "tableCell"
+                trs.append({"type": "tableRow", "content": [
+                    {"type": kind, "content": [{"type": "paragraph", "content": adf_inline(c)}]} for c in cells]})
+            content.append({"type": "table", "content": trs})
+        elif line.startswith("- "):
+            items = []
+            while i < len(lines) and lines[i].startswith("- "):
+                items.append({"type": "listItem", "content": [{"type": "paragraph", "content": adf_inline(lines[i][2:])}]})
+                i += 1
+            content.append({"type": "bulletList", "content": items})
+        else:
+            para = []
+            while i < len(lines) and lines[i].strip() and not re.match(r"^(#{1,6} |\||- )", lines[i]):
+                para.append(lines[i])
+                i += 1
+            content.append({"type": "paragraph", "content": adf_inline(" ".join(para))})
+    return {"type": "doc", "version": 1, "content": content}
+
+
+def jira_description(md, report_path):
+    adf = md_to_adf(md)
+    if len(json.dumps(adf)) <= JIRA_DESC_LIMIT:
+        return adf
+    note = {"type": "paragraph", "content": adf_inline(f"Truncated to fit Jira; full report: `{report_path}`")}
+    blocks = adf["content"]
+    while blocks and len(json.dumps({"type": "doc", "version": 1, "content": blocks + [note]})) > JIRA_DESC_LIMIT:
+        blocks = blocks[:-1]
+    return {"type": "doc", "version": 1, "content": blocks + [note]}
+
+
+def issue_payload(summary, adf, epic_key):
+    fields = {"project": {"key": JIRA_PROJECT}, "issuetype": {"name": "Task"}, "summary": summary,
+              "labels": [JIRA_LABEL], "description": adf}
+    if epic_key:
+        fields["parent"] = {"key": epic_key}
+    return {"fields": fields}
+
+
+class Jira:
+    """Credentials live only on this object for the life of the process."""
+
+    def __init__(self):
+        url, user, token = (os.environ.get(k) for k in ("JIRA_URL", "JIRA_USERNAME", "JIRA_API_TOKEN"))
+        if not (url and user and token):
+            url, user, token = (self._secret(k) for k in ("JIRA_URL", "JIRA_USERNAME", "JIRA_API_TOKEN"))
+        self.base = url.rstrip("/")
+        self._auth = "Basic " + base64.b64encode(f"{user}:{token}".encode()).decode()
+
+    @staticmethod
+    def _secret(key):
+        if not shutil.which("kubectl"):
+            raise RuntimeError("no Jira credentials: JIRA_* unset and kubectl missing")
+        r = subprocess.run(["kubectl", "-n", "ai-sre", "get", "secret", "ai-sre-relay", "-o",
+                            "go-template={{index .data \"%s\"}}" % key],
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode != 0 or not r.stdout.strip():
+            raise RuntimeError(f"could not read {key} from the cluster secret")
+        return base64.b64decode(r.stdout.strip()).decode().strip()
+
+    def call(self, method, path, body=None):
+        req = urllib.request.Request(self.base + path, method=method,
+                                     data=json.dumps(body).encode() if body is not None else None,
+                                     headers={"Authorization": self._auth, "Accept": "application/json",
+                                              "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return json.loads(r.read() or b"{}")
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="replace")[:300]
+            raise RuntimeError(f"Jira {method} {path.split('?')[0]} -> HTTP {e.code}: {detail}") from None
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"Jira unreachable: {e.reason}") from None
+
+    def ensure_epic(self):
+        if EPIC_FILE.is_file():
+            key = EPIC_FILE.read_text().strip()
+            if key:
+                return key, False
+        jql = f'project = {JIRA_PROJECT} AND issuetype = Epic AND summary ~ "\\"{EPIC_SUMMARY}\\"" ORDER BY created ASC'
+        r = self.call("POST", "/rest/api/3/search/jql", {"jql": jql, "fields": ["summary"], "maxResults": 10})
+        hits = [i["key"] for i in r.get("issues", []) if (i.get("fields") or {}).get("summary") == EPIC_SUMMARY]
+        created = False
+        if hits:
+            key = hits[0]
+        else:
+            body = {"fields": {"project": {"key": JIRA_PROJECT}, "issuetype": {"name": "Epic"},
+                               "summary": EPIC_SUMMARY, "labels": [JIRA_LABEL],
+                               "description": md_to_adf("Parent for the recurring agent usage audit reports "
+                                                        "filed by `agent-audit` from the devbox timers.")}}
+            key = self.call("POST", "/rest/api/3/issue", body)["key"]
+            created = True
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        EPIC_FILE.write_text(key + "\n")
+        return key, created
+
+
+# ── Home view ────────────────────────────────────────────────────────────────
+
+def home_view():
+    rows = []
+    for p in sorted(REPORTS_DIR.glob("*.json"), reverse=True):
+        j = load_json(p)
+        if j and j.get("window"):
+            rows.append({"date": j.get("label_date"), "window": j["window"],
+                         "cost_usd": (j.get("current") or {}).get("cost_usd"),
+                         "jira": j.get("jira_key") or "-"})
+    total = len(rows)
+    out = {"bin": str(Path(sys.argv[0]).resolve()).replace(str(HOME), "~", 1),
+           "description": "Audit agent usage per window: tokens, cost, plugin/skill/MCP use, instruction-file size, PR hygiene; files a Jira task",
+           "reports_dir": str(REPORTS_DIR).replace(str(HOME), "~", 1),
+           "epic": EPIC_FILE.read_text().strip() if EPIC_FILE.is_file() else "none yet (created on first filed run)"}
+    if rows:
+        out["count"] = f"{min(total, 8)} of {total} reports"
+        out["reports"] = rows[:8]
+    else:
+        out["reports"] = "0 reports yet"
+    out["help"] = ["Run `agent-audit --window weekly --dry-run --no-jira` to preview a report",
+                   "Run `agent-audit --window monthly` to write and file one",
+                   "Run `agent-audit --help` for all flags"]
+    emit(out)
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+def main(argv):
+    if not argv:
+        home_view()
+        return 0
+    opts = parse_args(argv)
+    if opts.get("help") or opts.get("h"):
+        print(HELP)
+        return 0
+    window = opts["window"]
+    if window not in WINDOWS:
+        usage_error(f"--window must be one of {', '.join(WINDOWS)}" + (f", got {window}" if window else " (required)"))
+    try:
+        end = dt.date.fromisoformat(opts["end"]) if opts["end"] else dt.date.today()
+    except ValueError:
+        usage_error(f"--end must be YYYY-MM-DD, got {opts['end']}")
+
+    week = end.isocalendar().week
+    if opts.get("scheduled") and window == "biweekly" and week % 2:
+        emit({"skipped": f"biweekly runs on even ISO weeks; week {week} is odd (no-op)"})
+        return 0
+
+    (cs, ce), (ps, pe) = compute_windows(window, end)
+    label = ce - dt.timedelta(days=1)
+    dry = bool(opts.get("dry_run"))
+    out_dir = Path(tempfile.mkdtemp(prefix="agent-audit-")) if dry else REPORTS_DIR
+    md_path, json_path = report_paths(window, label, out_dir)
+
+    existing = load_json(report_paths(window, label, REPORTS_DIR)[1]) if not dry else None
+    if existing and existing.get("jira_key") and not opts.get("force"):
+        emit({"report": str(report_paths(window, label, REPORTS_DIR)[0]),
+              "jira": f"{existing['jira_key']} already filed for {window} ending {label} (no-op)",
+              "help": [f"Run `agent-audit --window {window} --end {opts['end'] or end} --force` to file again"]})
+        return 0
+
+    lock_fh = None
+    if not dry:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        lock_fh = open(DATA_DIR / f".{window}.lock", "w")
+        try:
+            fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            emit({"error": f"another {window} run is in progress", "help": "wait for it to finish, then re-run"})
+            return 1
+
+    log(f"scanning transcripts for {cs}..{ce} and {ps}..{pe}")
+    inv = inventory()
+    buckets, stats = scan(((cs, ce), (ps, pe)), inv)
+    cur = summarize(buckets["current"], inv)
+    prev = summarize(buckets["previous"], inv)
+    retention = int(inv["settings"].get("cleanupPeriodDays") or 30)
+    prev_partial = to_epoch(ps) < dt.datetime.now().timestamp() - retention * 86400
+
+    hist = history(window)
+    prev_source = "transcripts"
+    for h in hist:
+        if h.get("window_range", {}).get("start") == ps.isoformat() and h.get("current"):
+            prev = h["current"]
+            prev_source = f"history ({h.get('label_date')})"
+            break
+
+    log("querying GitHub for PR hygiene")
+    prs = {"current": pr_hygiene(cs, ce), "previous": pr_hygiene(ps, pe)}
+
+    metrics = {
+        "schema": 1, "tool_version": VERSION, "window": window, "label_date": label.isoformat(),
+        "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "window_range": {"start": cs.isoformat(), "end": ce.isoformat(), "end_inclusive": label.isoformat(),
+                         "prev_start": ps.isoformat(), "prev_end": pe.isoformat(),
+                         "prev_end_inclusive": (pe - dt.timedelta(days=1)).isoformat()},
+        "previous_source": prev_source,
+        "current": cur, "previous": prev,
+        "trend": [{"label_date": h.get("label_date"), "cost_usd": (h.get("current") or {}).get("cost_usd", 0),
+                   "sessions": (h.get("current") or {}).get("sessions", 0)}
+                  for h in hist if h.get("label_date") != label.isoformat()][-6:],
+        "disable_candidates": disable_candidates(cur, inv),
+        "instructions": instruction_health(),
+        "prs": prs,
+        "coverage": {**{k: v for k, v in stats.items() if k != "unpriced_models"},
+                     "unpriced_models": dict(stats["unpriced_models"]), "retention_days": retention,
+                     "previous_partial": prev_partial and prev_source == "transcripts",
+                     "pricing_date": "2026-10-01"},
+    }
+
+    if opts.get("no_insights"):
+        metrics["insights"] = {"skipped": "--no-insights"}
+    else:
+        log("requesting insights (one capped claude call)")
+        ins, why = run_insights(metrics)
+        metrics["insights"] = ins or {"skipped": why}
+        if why:
+            log(f"insights skipped: {why}")
+
+    md = render(metrics)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    md_path.write_text(md)
+    json_path.write_text(json.dumps(metrics, indent=1, default=list))
+
+    summary_title = f"Agent usage audit — {window} ending {label.isoformat()}"
+    result = {"report": str(md_path), "metrics": str(json_path),
+              "window": f"{cs} → {label} (prev {ps} → {pe - dt.timedelta(days=1)}, from {prev_source})",
+              "sessions": f"{cur['sessions']} (prev {prev.get('sessions', 0)})",
+              "cost_usd": f"{cur['cost_usd']} (prev {prev.get('cost_usd', 0)}, {delta(cur['cost_usd'], prev.get('cost_usd'))})",
+              "output_tokens": cur["tokens"]["output"],
+              "disable_candidates": f"{len(metrics['disable_candidates']['plugins'])} plugins, "
+                                    f"{len(metrics['disable_candidates']['mcp_servers'])} MCP servers, "
+                                    f"{len(metrics['disable_candidates']['skills'])} skills",
+              "insights": "included" if metrics["insights"].get("text") else f"skipped: {metrics['insights'].get('skipped')}"}
+    rc = 0
+
+    if opts.get("no_jira"):
+        result["jira"] = "skipped (--no-jira)"
+    elif dry:
+        epic = EPIC_FILE.read_text().strip() if EPIC_FILE.is_file() else None
+        payload = issue_payload(summary_title, jira_description(md, md_path), epic or "<epic: found or created on a real run>")
+        payload_path = out_dir / "jira-payload.json"
+        payload_path.write_text(json.dumps(payload, indent=1))
+        result["jira"] = f"dry run: would create Task in {JIRA_PROJECT} under {epic or 'epic ' + repr(EPIC_SUMMARY)}"
+        result["jira_payload"] = str(payload_path)
+    else:
+        try:
+            jira = Jira()
+            epic, created = jira.ensure_epic()
+            r = jira.call("POST", "/rest/api/3/issue",
+                          issue_payload(summary_title, jira_description(md, md_path), epic))
+            metrics["jira_key"] = r["key"]
+            metrics["jira_epic"] = epic
+            json_path.write_text(json.dumps(metrics, indent=1, default=list))
+            result["jira"] = f"{r['key']} created under {epic}" + (" (epic created)" if created else "")
+            result["jira_url"] = f"{jira.base}/browse/{r['key']}"
+        except (RuntimeError, KeyError, subprocess.TimeoutExpired) as e:
+            result["jira"] = f"failed: {e}"
+            result["help"] = [f"Report is saved; re-run `agent-audit --window {window}"
+                              + (f" --end {opts['end']}" if opts["end"] else "") + " --no-insights` to retry filing"]
+            rc = 1
+
+    if dry and "help" not in result:
+        result["help"] = [f"Run `agent-audit --window {window}` to persist the report and file it"]
+    emit(result)
+    if lock_fh:
+        lock_fh.close()
+    return rc
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)

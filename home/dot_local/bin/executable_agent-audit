@@ -15,10 +15,12 @@ import json
 import os
 import re
 import shutil
+import socket
 import statistics
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from collections import Counter, defaultdict
@@ -32,7 +34,7 @@ if len(sys.argv) == 2 and sys.argv[1] in ("-v", "-V", "--version"):
     sys.exit(0)
 
 WINDOWS = ("weekly", "biweekly", "monthly", "quarterly")
-FLAGS_BOOL = {"--dry-run", "--no-jira", "--no-insights", "--scheduled", "--force", "--help", "-h"}
+FLAGS_BOOL = {"--dry-run", "--no-jira", "--no-insights", "--force", "--help", "-h"}
 FLAGS_VALUE = {"--window", "--end"}
 
 JIRA_PROJECT = "JDWLABS"
@@ -46,6 +48,15 @@ INSIGHTS_BUDGET_USD = "0.50"
 INSIGHTS_WORDS = 250
 INSIGHTS_TIMEOUT_S = int(os.environ.get("AGENT_AUDIT_INSIGHTS_TIMEOUT", "240"))
 GH_TIMEOUT_S = 90
+GH_SEARCH_CAP = 1000
+LOCK_WAIT_S = int(os.environ.get("AGENT_AUDIT_LOCK_WAIT", "600"))
+JIRA_TIMEOUT_S = int(os.environ.get("AGENT_AUDIT_JIRA_TIMEOUT", "30"))
+# Fortnights are counted from this fixed Monday.
+FORTNIGHT_ANCHOR = dt.date(1970, 1, 5)
+
+# Children get the environment minus anything credential-shaped, so a Jira
+# token handed to this process never reaches gh or the model call.
+CRED_ENV = re.compile(r"^JIRA_|TOKEN|SECRET|PASSW|API_KEY|PRIVATE_KEY|CREDENTIAL", re.I)
 
 # API list prices in USD per million tokens: (input, output, cache read).
 # Cache writes are priced from input: 1.25x for the 5-minute TTL, 2x for 1-hour.
@@ -83,6 +94,12 @@ EPIC_FILE = DATA_DIR / "epic-key"
 
 def log(msg):
     print(f"agent-audit: {msg}", file=sys.stderr)
+
+
+def child_env(keep=(), **extra):
+    env = {k: v for k, v in os.environ.items() if k in keep or not CRED_ENV.search(k)}
+    env.update(extra)
+    return env
 
 
 # ── TOON output ──────────────────────────────────────────────────────────────
@@ -133,21 +150,21 @@ def usage_error(msg, help_line=None):
 
 USAGE_SHORT = "agent-audit --window weekly|biweekly|monthly|quarterly [--dry-run] [--no-jira] [--no-insights]"
 HELP = f"""usage: {USAGE_SHORT}
-       [--end YYYY-MM-DD] [--scheduled] [--force]
+       [--end YYYY-MM-DD] [--force]
 
 Audit agent usage for one window and the equal window before it; write a
 markdown report and metrics JSON, add optional model commentary, file a Jira task.
 
 flags:
-  --window W      required: weekly (last full Mon-Sun week), biweekly (last two
-                  full weeks), monthly (last full month), quarterly (last full quarter)
+  --window W      required: weekly (last full Mon-Sun week), biweekly (last full
+                  fortnight on a fixed two-week grid), monthly (last full month),
+                  quarterly (last full quarter)
   --end DATE      audit the window ending before DATE, local time (default:
                   today); snaps back to a Monday / month start / quarter start
   --dry-run       write nothing persistent: report, JSON and the would-be Jira
                   payload go to a temp dir, no Jira calls
   --no-jira       skip the Jira task
   --no-insights   skip the single capped `claude -p` commentary call
-  --scheduled     timer mode: biweekly runs only on even ISO weeks
   --force         re-run a window that was already filed (files a new task)
 
 state: {DATA_DIR}/reports/<date>-<window>.md|.json, epic key in {EPIC_FILE.name}
@@ -177,7 +194,7 @@ def parse_args(argv):
             opts[a.lstrip("-").replace("-", "_")] = True
         else:
             usage_error(f"unknown argument {a}",
-                        "valid flags: --window, --end, --dry-run, --no-jira, --no-insights, --scheduled, --force, --help")
+                        "valid flags: --window, --end, --dry-run, --no-jira, --no-insights, --force, --help")
         i += 1
     return opts
 
@@ -199,7 +216,12 @@ def compute_windows(window, end):
         s = e - dt.timedelta(days=7)
         return (s, e), (s - dt.timedelta(days=7), s)
     if window == "biweekly":
-        e = monday
+        # A fixed fortnight grid, not ISO-week parity: a 53-week year puts two
+        # odd weeks back to back and parity would skip a fortnight. Snapping
+        # back to the last grid Monday also means a catch-up run that lands in
+        # an off week audits the fortnight it missed; an already filed one
+        # is a no-op.
+        e = monday - dt.timedelta(days=7 * (((monday - FORTNIGHT_ANCHOR).days // 7) % 2))
         s = e - dt.timedelta(days=14)
         return (s, e), (s - dt.timedelta(days=14), s)
     if window == "monthly":
@@ -685,7 +707,8 @@ def gh_json(args):
     if not shutil.which("gh"):
         raise RuntimeError("gh not installed")
     r = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=GH_TIMEOUT_S,
-                       env={**os.environ, "GH_PROMPT_DISABLED": "1", "NO_COLOR": "1"})
+                       env=child_env(("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"),
+                                     GH_PROMPT_DISABLED="1", NO_COLOR="1"))
     if r.returncode != 0:
         first = (r.stderr.strip().splitlines() or ["unknown error"])[0]
         raise RuntimeError(f"GitHub search failed: {first[:160]}")
@@ -699,14 +722,32 @@ def pct(xs, q):
     return xs[min(len(xs) - 1, int(q * len(xs)))]
 
 
-def pr_hygiene(start, end):
+def gh_search(kind, date_flag, fields, start, end):
+    """Search [start, end), halving the range until each slice is under the cap.
+
+    GitHub search returns at most 1000 results and says nothing when it
+    stops. Splitting only where a slice is full keeps a quiet quarter to a
+    single call, which matters under the 30-requests-a-minute search limit.
+    Returns (rows, truncated): truncated means a single day still hit the cap.
+    """
     rng = f"{start.isoformat()}..{(end - dt.timedelta(days=1)).isoformat()}"
-    owners = ["--owner", "jdwillmsen", "--owner", "jdwlabs"]
+    rows = gh_json(["search", kind, "--owner", "jdwillmsen", "--owner", "jdwlabs", date_flag, rng,
+                    "--limit", str(GH_SEARCH_CAP), "--json", fields])
+    days = (end - start).days
+    if len(rows) < GH_SEARCH_CAP:
+        return rows, False
+    if days <= 1:
+        return rows, True
+    mid = start + dt.timedelta(days=days // 2)
+    a, ta = gh_search(kind, date_flag, fields, start, mid)
+    b, tb = gh_search(kind, date_flag, fields, mid, end)
+    return a + b, ta or tb
+
+
+def pr_hygiene(start, end):
     try:
-        prs = gh_json(["search", "prs", *owners, "--created", rng, "--limit", "1000",
-                       "--json", "number,repository,author,body,url"])
-        commits = gh_json(["search", "commits", *owners, "--committer-date", rng, "--limit", "1000",
-                           "--json", "sha,commit,repository"])
+        prs, t1 = gh_search("prs", "--created", "number,repository,author,body,url", start, end)
+        commits, t2 = gh_search("commits", "--committer-date", "sha,commit,repository", start, end)
     except (RuntimeError, subprocess.TimeoutExpired, ValueError) as e:
         return {"available": False, "reason": str(e)[:200]}
     prs = [p for p in prs if not BOT_AUTHORS.search(((p.get("author") or {}).get("login")) or "")]
@@ -722,7 +763,7 @@ def pr_hygiene(start, end):
                 repo = r.get("fullName") or r.get("nameWithOwner") or "?"
                 missing.append(f"{repo}@{(c.get('sha') or '')[:7]}")
     return {
-        "available": True, "prs": len(prs),
+        "available": True, "truncated": t1 or t2, "prs": len(prs),
         "body_words_median": int(statistics.median(words)) if words else 0,
         "body_words_p90": pct(words, 0.9),
         "generated_with_footer": len(footer), "generated_with_urls": footer[:10],
@@ -786,7 +827,8 @@ def run_insights(metrics):
     with tempfile.TemporaryDirectory(prefix="agent-audit-insights-") as cwd:
         try:
             r = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
-                               timeout=INSIGHTS_TIMEOUT_S, cwd=cwd)
+                               timeout=INSIGHTS_TIMEOUT_S, cwd=cwd,
+                               env=child_env(("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")))
         except subprocess.TimeoutExpired:
             return None, f"timed out after {INSIGHTS_TIMEOUT_S}s"
         except OSError as e:
@@ -941,6 +983,8 @@ def render(m):
             ("AI co-authored commits", "ai_coauthored_commits"),
             ("…of which missing Assisted-by", "missing_assisted_by")]]
         L += table(["Metric", "Current", "Previous", "Δ"], rows) + [""]
+        if pc.get("truncated") or pp.get("truncated"):
+            L += ["**Truncated:** a single day hit GitHub's 1000-result search cap, so these counts are a lower bound.", ""]
         if pc["missing_assisted_by_examples"]:
             L += ["Missing Assisted-by: " + ", ".join(f"`{x}`" for x in pc["missing_assisted_by_examples"]), ""]
         if pc["generated_with_urls"]:
@@ -1035,6 +1079,10 @@ def issue_payload(summary, adf, epic_key):
     return {"fields": fields}
 
 
+class JiraUnreachable(RuntimeError):
+    """The request may or may not have reached Jira."""
+
+
 class Jira:
     """Credentials live only on this object for the life of the process."""
 
@@ -1051,7 +1099,7 @@ class Jira:
             raise RuntimeError("no Jira credentials: JIRA_* unset and kubectl missing")
         r = subprocess.run(["kubectl", "-n", "ai-sre", "get", "secret", "ai-sre-relay", "-o",
                             "go-template={{index .data \"%s\"}}" % key],
-                           capture_output=True, text=True, timeout=30)
+                           capture_output=True, text=True, timeout=30, env=child_env())
         if r.returncode != 0 or not r.stdout.strip():
             raise RuntimeError(f"could not read {key} from the cluster secret")
         return base64.b64decode(r.stdout.strip()).decode().strip()
@@ -1062,13 +1110,31 @@ class Jira:
                                      headers={"Authorization": self._auth, "Accept": "application/json",
                                               "Content-Type": "application/json"})
         try:
-            with urllib.request.urlopen(req, timeout=30) as r:
+            with urllib.request.urlopen(req, timeout=JIRA_TIMEOUT_S) as r:
                 return json.loads(r.read() or b"{}")
         except urllib.error.HTTPError as e:
             detail = e.read().decode(errors="replace")[:300]
             raise RuntimeError(f"Jira {method} {path.split('?')[0]} -> HTTP {e.code}: {detail}") from None
         except urllib.error.URLError as e:
-            raise RuntimeError(f"Jira unreachable: {e.reason}") from None
+            raise JiraUnreachable(f"Jira unreachable: {e.reason}") from None
+        except (TimeoutError, socket.timeout, ConnectionError) as e:
+            raise JiraUnreachable(f"Jira unreachable: {e}") from None
+
+    def find_recent(self, summary):
+        jql = (f'project = {JIRA_PROJECT} AND labels = {JIRA_LABEL} AND created >= -15m '
+               f'AND summary ~ "\\"{summary}\\"" ORDER BY created DESC')
+        r = self.call("POST", "/rest/api/3/search/jql", {"jql": jql, "fields": ["summary"], "maxResults": 10})
+        hits = [i["key"] for i in r.get("issues", []) if (i.get("fields") or {}).get("summary") == summary]
+        return hits[0] if hits else None
+
+    def create_issue(self, payload):
+        try:
+            return self.call("POST", "/rest/api/3/issue", payload)["key"]
+        except JiraUnreachable:
+            # A timed-out POST may still have created the issue; look before
+            # the one retry so a slow Jira cannot file the report twice.
+            found = self.find_recent(payload["fields"]["summary"])
+            return found or self.call("POST", "/rest/api/3/issue", payload)["key"]
 
     def ensure_epic(self):
         if EPIC_FILE.is_file():
@@ -1086,7 +1152,7 @@ class Jira:
                                "summary": EPIC_SUMMARY, "labels": [JIRA_LABEL],
                                "description": md_to_adf("Parent for the recurring agent usage audit reports "
                                                         "filed by `agent-audit` from the devbox timers.")}}
-            key = self.call("POST", "/rest/api/3/issue", body)["key"]
+            key = self.create_issue(body)
             created = True
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         EPIC_FILE.write_text(key + "\n")
@@ -1137,33 +1203,46 @@ def main(argv):
     except ValueError:
         usage_error(f"--end must be YYYY-MM-DD, got {opts['end']}")
 
-    week = end.isocalendar().week
-    if opts.get("scheduled") and window == "biweekly" and week % 2:
-        emit({"skipped": f"biweekly runs on even ISO weeks; week {week} is odd (no-op)"})
-        return 0
-
     (cs, ce), (ps, pe) = compute_windows(window, end)
     label = ce - dt.timedelta(days=1)
     dry = bool(opts.get("dry_run"))
     out_dir = Path(tempfile.mkdtemp(prefix="agent-audit-")) if dry else REPORTS_DIR
     md_path, json_path = report_paths(window, label, out_dir)
 
-    existing = load_json(report_paths(window, label, REPORTS_DIR)[1]) if not dry else None
-    if existing and existing.get("jira_key") and not opts.get("force"):
-        emit({"report": str(report_paths(window, label, REPORTS_DIR)[0]),
-              "jira": f"{existing['jira_key']} already filed for {window} ending {label} (no-op)",
-              "help": [f"Run `agent-audit --window {window} --end {opts['end'] or end} --force` to file again"]})
-        return 0
+    stored_json = report_paths(window, label, REPORTS_DIR)[1]
 
+    def already_filed():
+        existing = load_json(stored_json) if not dry else None
+        if existing and existing.get("jira_key") and not opts.get("force"):
+            emit({"report": str(report_paths(window, label, REPORTS_DIR)[0]),
+                  "jira": f"{existing['jira_key']} already filed for {window} ending {label} (no-op)",
+                  "help": [f"Run `agent-audit --window {window} --end {opts['end'] or end} --force` to file again"]})
+            return True
+        return False
+
+    if already_filed():
+        return 0
     lock_fh = None
     if not dry:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
         lock_fh = open(DATA_DIR / f".{window}.lock", "w")
-        try:
-            fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            emit({"error": f"another {window} run is in progress", "help": "wait for it to finish, then re-run"})
-            return 1
+        # Bounded wait rather than fail-fast: a timer firing during a manual
+        # run of the same window should finish as a no-op, not an error.
+        deadline = time.monotonic() + LOCK_WAIT_S
+        while True:
+            try:
+                fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    emit({"error": f"another {window} run still holds the lock after {LOCK_WAIT_S}s",
+                          "help": "wait for it to finish, then re-run"})
+                    return 1
+                time.sleep(1)
+        # A run holding the lock may have filed this window between the first
+        # check and acquiring it.
+        if already_filed():
+            return 0
 
     log(f"scanning transcripts for {cs}..{ce} and {ps}..{pe}")
     inv = inventory()
@@ -1204,8 +1283,12 @@ def main(argv):
                      "pricing_date": "2026-10-01"},
     }
 
+    prior = load_json(stored_json) if not dry else None
     if opts.get("no_insights"):
-        metrics["insights"] = {"skipped": "--no-insights"}
+        # A --no-insights retry of a failed filing keeps the commentary the
+        # first attempt already paid for.
+        prior_ins = (prior or {}).get("insights") or {}
+        metrics["insights"] = prior_ins if prior_ins.get("text") else {"skipped": "--no-insights"}
     else:
         log("requesting insights (one capped claude call)")
         ins, why = run_insights(metrics)
@@ -1243,13 +1326,12 @@ def main(argv):
         try:
             jira = Jira()
             epic, created = jira.ensure_epic()
-            r = jira.call("POST", "/rest/api/3/issue",
-                          issue_payload(summary_title, jira_description(md, md_path), epic))
-            metrics["jira_key"] = r["key"]
+            key = jira.create_issue(issue_payload(summary_title, jira_description(md, md_path), epic))
+            metrics["jira_key"] = key
             metrics["jira_epic"] = epic
             json_path.write_text(json.dumps(metrics, indent=1, default=list))
-            result["jira"] = f"{r['key']} created under {epic}" + (" (epic created)" if created else "")
-            result["jira_url"] = f"{jira.base}/browse/{r['key']}"
+            result["jira"] = f"{key} created under {epic}" + (" (epic created)" if created else "")
+            result["jira_url"] = f"{jira.base}/browse/{key}"
         except (RuntimeError, KeyError, subprocess.TimeoutExpired) as e:
             result["jira"] = f"failed: {e}"
             result["help"] = [f"Report is saved; re-run `agent-audit --window {window}"

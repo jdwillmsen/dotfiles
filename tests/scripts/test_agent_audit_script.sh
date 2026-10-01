@@ -355,6 +355,10 @@ class H(http.server.BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         with open(log, "a") as f:
             f.write(json.dumps({"path": self.path, "auth": self.headers.get("Authorization"), "body": body}) + "\n")
+        if self.path.startswith("/rest/api/3/search/jql") and \
+                os.path.exists(os.path.join(os.path.dirname(log), "jira.search-fail")):
+            self.send_response(503); self.send_header("Content-Length", "0"); self.end_headers()
+            return
         if self.path.startswith("/rest/api/3/search/jql"):
             want = "Epic" if "issuetype = Epic" in body["jql"] else "Task"
             # jira.hide simulates search lagging behind a create.
@@ -425,17 +429,34 @@ grep -q 'created >= -15m' "$tmp/jira.log" || fail "dedup search should be limite
 echo slow-once >"$tmp/jira.mode"
 touch "$tmp/jira.hide"
 AGENT_AUDIT_JIRA_TIMEOUT=1 run --window monthly --end 2026-07-01 --no-insights
-[ "$rc" -eq 1 ] && grep -q "^jira: create timed out; re-run to file" <<<"$out" || fail "invisible timed-out create should stop" "$out"
+[ "$rc" -eq 1 ] && grep -q "^jira: create timed out and .* re-run to file" <<<"$out" || fail "invisible timed-out create should stop" "$out"
 june="$fx/.local/share/agent-audit/reports/2026-06-30-monthly.json"
 [ "$(jget "$june" 'j.get("jira_pending"), j.get("jira_key")')" = "(True, None)" ] || fail "pending create not recorded"
 creates() { grep '"path": "/rest/api/3/issue"' "$tmp/jira.log" | grep -c 'monthly ending 2026-06-30"'; }
 [ "$(creates)" -eq 1 ] || fail "timed-out create was re-POSTed"
 [ "$(grep -c 'created >= -15m' "$tmp/jira.log")" -ge 3 ] || fail "search should be polled with backoff"
-rm "$tmp/jira.hide"
+# While a create is pending, a re-run whose searches all fail stays pending.
+touch "$tmp/jira.search-fail"
+run --window monthly --end 2026-07-01 --no-insights
+[ "$rc" -eq 1 ] && grep -q "Jira search unavailable while resolving a pending create" <<<"$out" \
+    || fail "pending create with failing search should stay pending" "$out"
+[ "$(creates)" -eq 1 ] || fail "pending create was re-filed while search was down"
+[ "$(jget "$june" 'j.get("jira_pending")')" = "True" ] || fail "pending marker lost"
+rm "$tmp/jira.search-fail" "$tmp/jira.hide"
 run --window monthly --end 2026-07-01 --no-insights
 [ "$rc" -eq 0 ] || fail "re-run after a pending create failed" "$out"
 [ "$(creates)" -eq 1 ] || fail "re-run filed a duplicate instead of finding the landed issue"
 [ "$(jget "$june" 'j.get("jira_pending"), j["jira_key"]')" = "(None, 'TASK-5')" ] || fail "re-run should adopt the landed issue"
+
+# Recovery searches that fail outright after a timed-out create still save
+# the pending marker instead of escaping through the generic error path.
+echo slow-once >"$tmp/jira.mode"
+touch "$tmp/jira.search-fail"
+AGENT_AUDIT_JIRA_TIMEOUT=1 run --window monthly --end 2026-06-01 --no-insights
+rm "$tmp/jira.search-fail"
+[ "$rc" -eq 1 ] && grep -q "^jira: create timed out and" <<<"$out" || fail "failed recovery search should report a timed-out create" "$out"
+[ "$(jget "$fx/.local/share/agent-audit/reports/2026-05-31-monthly.json" 'j.get("jira_pending")')" = "True" ] \
+    || fail "failed recovery search must still save the pending marker"
 
 # A non-JSON reply is a structured failure, not a traceback.
 echo nonjson >"$tmp/jira.mode"

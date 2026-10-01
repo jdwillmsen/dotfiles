@@ -1195,12 +1195,28 @@ class Jira:
         # look for it with backoff, and if it stays invisible leave the
         # decision to the next run, which searches again before creating.
         summary = payload["fields"]["summary"]
+        found, _ = self.poll_for(summary, "-15m")
+        if found:
+            return found
+        raise JiraCreateTimedOut(f"create timed out and '{summary}' is not in Jira search yet")
+
+    def poll_for(self, summary, within):
+        """Search with backoff. Returns (key or None, whether any search succeeded).
+
+        A failing search is just another miss: it must not abort the caller
+        before the pending marker is saved.
+        """
+        searched = False
         for wait in JIRA_FIND_BACKOFF_S:
             time.sleep(wait)
-            found = self.find_recent(summary)
+            try:
+                found = self.find_recent(summary, within)
+            except RuntimeError:
+                continue
+            searched = True
             if found:
-                return found
-        raise JiraCreateTimedOut(f"create timed out and '{summary}' is not in Jira search yet")
+                return found, True
+        return None, searched
 
     def ensure_epic(self):
         if EPIC_FILE.is_file():
@@ -1394,8 +1410,14 @@ def main(argv):
         try:
             jira = Jira()
             epic, created = jira.ensure_epic()
-            # A previous run's create timed out unseen; it may have landed since.
-            key = jira.find_recent(summary_title, within=None) if (prior or {}).get("jira_pending") else None
+            key = None
+            if (prior or {}).get("jira_pending"):
+                # A previous run's create timed out unseen and may have landed
+                # since. Create only after a full poll searched successfully
+                # and found nothing; if search keeps failing, stay pending.
+                key, searched = jira.poll_for(summary_title, None)
+                if not key and not searched:
+                    raise JiraCreateTimedOut("Jira search unavailable while resolving a pending create")
             if not key:
                 key = jira.create_issue(issue_payload(summary_title, jira_description(md, md_path), epic))
             metrics.pop("jira_pending", None)
@@ -1404,10 +1426,10 @@ def main(argv):
             json_path.write_text(json.dumps(metrics, indent=1, default=list))
             result["jira"] = f"{key} created under {epic}" + (" (epic created)" if created else "")
             result["jira_url"] = f"{jira.base}/browse/{key}"
-        except JiraCreateTimedOut:
+        except JiraCreateTimedOut as e:
             metrics["jira_pending"] = True
             json_path.write_text(json.dumps(metrics, indent=1, default=list))
-            result["jira"] = "create timed out; re-run to file (the re-run looks for the issue before creating one)"
+            result["jira"] = f"{e}; re-run to file (the re-run looks for the issue before creating one)"
             result["help"] = [f"Re-run `agent-audit --window {window}"
                               + (f" --end {opts['end']}" if opts["end"] else "") + " --no-insights` in a few minutes"]
             rc = 1

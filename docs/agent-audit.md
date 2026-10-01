@@ -44,11 +44,18 @@ collected.
 key in its JSON is a no-op on re-run, and `--force` files it again. Runs of
 the same window take a lock. A second run waits up to 10 minutes for the first
 to finish, then checks again, so a timer firing during a manual run ends as a
-no-op instead of a duplicate. A Jira create that times out is never sent
-again. Jira search can lag behind a create, so the script looks for the issue
-by summary for about a minute, with growing waits between tries. If the issue
-still does not appear, the run stops with the report saved and marked
-pending. The next run then searches for the issue before it creates one. A `--no-insights` retry keeps the commentary already saved in
+no-op instead of a duplicate. A Jira create that times out is not re-sent
+during that run. Jira search can lag behind a create, so the run searches for
+the issue by summary for about a minute, with growing waits between tries. A
+failed search counts as a miss. If the issue does not appear, the run stops
+with the report saved and marked pending.
+
+The next run polls search the same way before creating anything. If it finds
+the issue, it adopts that key. If every search fails, the report stays
+pending and nothing is created. The run creates a new issue only after a
+successful poll still finds nothing. One duplicate risk remains: a create
+that landed but stays out of search for the whole of both polls, which is
+minutes rather than the usual seconds. A `--no-insights` retry keeps the commentary already saved in
 the stored JSON.
 
 ## Windows
@@ -153,5 +160,5 @@ Each run makes at most one model call, capped by turns, dollars and wall
 time. The service's `TimeoutStartSec=20min` bounds the whole run, and it runs
 with `NoNewPrivileges=yes` and `PrivateTmp=yes`. The only repetition is
 bounded: the GitHub range split stops at single days, and a timed-out Jira
-create is never re-sent; the run only polls search for it. The weekly scan of about 600 transcript files took
+create is not re-sent in the same run; the run only polls search for it. The weekly scan of about 600 transcript files took
 under 30 s on the devbox, most of it in the GitHub searches.

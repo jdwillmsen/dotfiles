@@ -102,28 +102,44 @@ PY
 
 # ── Stubs: gh, claude, kubectl ──
 cat >"$stubs/gh" <<'STUB'
-#!/bin/sh
-echo "$*" >>"$STUB_LOG.gh"
-[ "${STUB_GH:-ok}" = "fail" ] && { echo "HTTP 403: rate limited" >&2; exit 1; }
-case "$2" in
-prs) cat <<'JSON'
-[{"number":1,"repository":{"nameWithOwner":"jdwlabs/r1"},"author":{"login":"jdwillmsen"},"url":"u1","body":"one two three four five six seven eight nine ten"},
- {"number":2,"repository":{"nameWithOwner":"jdwlabs/r1"},"author":{"login":"jdwlabs-agent-bot[bot]"},"url":"u2","body":"a b c d e f g h i j k l m n o p q r s t"},
- {"number":3,"repository":{"nameWithOwner":"jdwlabs/r1"},"author":{"login":"jdwillmsen"},"url":"u3","body":"Why it changed. Generated with Claude Code"},
- {"number":4,"repository":{"nameWithOwner":"jdwlabs/r1"},"author":{"login":"renovate[bot]"},"url":"u4","body":"bump"}]
-JSON
-;;
-commits) cat <<'JSON'
-[{"sha":"aaaaaaa111","repository":{"fullName":"jdwlabs/r1"},"commit":{"message":"feat: x\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>\nAssisted-by: Claude Code:claude-opus-5-5"}},
- {"sha":"bbbbbbb222","repository":{"fullName":"jdwlabs/r1"},"commit":{"message":"fix: y\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"}},
- {"sha":"ccccccc333","repository":{"fullName":"jdwlabs/r1"},"commit":{"message":"docs: human only"}}]
-JSON
-;;
-esac
+#!/usr/bin/env python3
+# Modes: ok (fixture rows), fail, split (full for multi-day ranges, small for
+# single days), cap (always full, so even single days are truncated).
+import datetime as dt, json, os, sys
+log = os.environ["STUB_LOG"]
+open(log + ".gh", "a").write(" ".join(sys.argv[1:]) + "\n")
+open(log + ".gh-env", "w").write("\n".join(os.environ))
+mode = os.environ.get("STUB_GH", "ok")
+if mode == "fail":
+    sys.stderr.write("HTTP 403: rate limited\n"); sys.exit(1)
+kind = sys.argv[2]
+rng = sys.argv[sys.argv.index("--created" if kind == "prs" else "--committer-date") + 1]
+a, b = (dt.date.fromisoformat(x) for x in rng.split(".."))
+if mode in ("split", "cap"):
+    n = 1000 if mode == "cap" or b > a else 3
+    if kind == "prs":
+        rows = [{"number": i, "author": {"login": "jdwillmsen"}, "url": f"u{i}", "body": "w w w"} for i in range(n)]
+    else:
+        rows = [{"sha": f"{i:07d}", "repository": {"fullName": "o/r"}, "commit": {"message": "m"}} for i in range(n)]
+    print(json.dumps(rows)); sys.exit(0)
+if kind == "prs":
+    print(json.dumps([
+        {"number": 1, "author": {"login": "jdwillmsen"}, "url": "u1", "body": "one two three four five six seven eight nine ten"},
+        {"number": 2, "author": {"login": "jdwlabs-agent-bot[bot]"}, "url": "u2", "body": "a b c d e f g h i j k l m n o p q r s t"},
+        {"number": 3, "author": {"login": "jdwillmsen"}, "url": "u3", "body": "Why it changed. Generated with Claude Code"},
+        {"number": 4, "author": {"login": "renovate[bot]"}, "url": "u4", "body": "bump"}]))
+else:
+    ai = "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+    print(json.dumps([
+        {"sha": "aaaaaaa111", "repository": {"fullName": "jdwlabs/r1"},
+         "commit": {"message": f"feat: x\n\n{ai}\nAssisted-by: Claude Code:claude-opus-5-5"}},
+        {"sha": "bbbbbbb222", "repository": {"fullName": "jdwlabs/r1"}, "commit": {"message": f"fix: y\n\n{ai}"}},
+        {"sha": "ccccccc333", "repository": {"fullName": "jdwlabs/r1"}, "commit": {"message": "docs: human only"}}]))
 STUB
 cat >"$stubs/claude" <<'STUB'
 #!/bin/sh
 printf '%s\n' "$@" >"$STUB_LOG.claude-args"
+env >"$STUB_LOG.claude-env"
 cat >"$STUB_LOG.claude-stdin"
 case "${STUB_CLAUDE:-ok}" in
 ok) echo '{"type":"result","is_error":false,"result":"**Trends** stub insight about alpha","total_cost_usd":0.012}' ;;
@@ -144,6 +160,7 @@ run() {  # args → sets $out, $rc
     out="$(env -u CLAUDE_CONFIG_DIR -u XDG_DATA_HOME HOME="$fx" TZ=UTC PATH="$stubs:/usr/bin:/bin" \
         STUB_LOG="$log" STUB_GH="${STUB_GH:-ok}" STUB_CLAUDE="${STUB_CLAUDE:-ok}" \
         AGENT_AUDIT_INSIGHTS_TIMEOUT="${AGENT_AUDIT_INSIGHTS_TIMEOUT:-30}" \
+        AGENT_AUDIT_JIRA_TIMEOUT="${AGENT_AUDIT_JIRA_TIMEOUT:-30}" AGENT_AUDIT_LOCK_WAIT="${AGENT_AUDIT_LOCK_WAIT:-30}" \
         JIRA_URL="${JIRA_URL:-}" JIRA_USERNAME="${JIRA_USERNAME:-}" JIRA_API_TOKEN="${JIRA_API_TOKEN:-}" \
         python3 "$audit" "$@" 2>"$tmp/stderr")"
     rc=$?
@@ -217,6 +234,11 @@ win() {  # $1 window, $2 end → "start end prev_start prev_end"
 }
 [ "$(win weekly 2026-09-30)" = "2026-09-21 2026-09-28 2026-09-14 2026-09-21" ] || fail "weekly snaps to ISO weeks"
 [ "$(win biweekly 2026-09-28)" = "2026-09-14 2026-09-28 2026-08-31 2026-09-14" ] || fail "biweekly window"
+# Fixed fortnight grid across 2026's 53-week year: consecutive fortnights
+# abut and ISO weeks 52 and 53 both land in one, where ISO parity skipped 52.
+[ "$(win biweekly 2026-12-28)" = "2026-12-07 2026-12-21 2026-11-23 2026-12-07" ] || fail "biweekly before the year end"
+[ "$(win biweekly 2027-01-04)" = "2026-12-21 2027-01-04 2026-12-07 2026-12-21" ] || fail "biweekly over weeks 52-53"
+[ "$(win biweekly 2027-01-18)" = "2027-01-04 2027-01-18 2026-12-21 2027-01-04" ] || fail "biweekly after the year end"
 [ "$(win monthly 2026-10-01)" = "2026-09-01 2026-10-01 2026-08-01 2026-09-01" ] || fail "monthly window"
 [ "$(win monthly 2026-10-15)" = "2026-09-01 2026-10-01 2026-08-01 2026-09-01" ] || fail "monthly mid-month run"
 [ "$(win monthly 2026-01-01)" = "2025-12-01 2026-01-01 2025-11-01 2025-12-01" ] || fail "monthly across a year"
@@ -228,15 +250,11 @@ dry_dir="$(dirname "$(field metrics)")"
 case "$dry_dir" in "$fx"/*) fail "--dry-run wrote under the data dir" ;; esac
 rm -rf "$dry_dir"
 
-# ── Biweekly parity: scheduled runs only on even ISO weeks ──
-run --window biweekly --end 2026-10-05 --scheduled --no-jira --no-insights
-[ "$rc" -eq 0 ] && grep -q "week 41 is odd" <<<"$out" || fail "odd ISO week should be a no-op" "$out"
-[ -e "$fx/.local/share/agent-audit/reports/2026-10-04-biweekly.json" ] && fail "odd-week run wrote a report"
-run --window biweekly --end 2026-09-28 --scheduled --no-jira --no-insights
+# ── Biweekly: an off-week (catch-up) run audits the missed fortnight ──
+run --window biweekly --end 2026-10-05 --no-jira --no-insights
 [ "$rc" -eq 0 ] && [ -f "$fx/.local/share/agent-audit/reports/2026-09-27-biweekly.json" ] \
-    || fail "even ISO week should run" "$out"
-run --window biweekly --end 2026-10-05 --no-jira --no-insights --dry-run
-grep -q "^report: " <<<"$out" || fail "manual biweekly runs ignore parity" "$out"
+    || fail "off-week run should audit the fortnight ending 2026-09-27" "$out"
+[ -e "$fx/.local/share/agent-audit/reports/2026-10-04-biweekly.json" ] && fail "off-week run audited a half fortnight"
 
 # ── History: a stored report supplies the previous window and the trend ──
 run --window weekly --end 2026-10-05 --no-jira --no-insights
@@ -253,6 +271,15 @@ for want in "-p" "--model sonnet" "--tools  " "--max-turns 1" "--max-budget-usd"
     grep -qF -- "$want" <<<"$args" || fail "claude call missing '$want'" "$args"
 done
 grep -q '"calls_main"' "$log.claude-stdin" || fail "claude was not fed the metrics JSON"
+# Credentials in this process's environment never reach a child.
+JIRA_API_TOKEN=secret-token JIRA_URL=http://x JIRA_USERNAME=u run --window weekly --end 2026-09-28 --dry-run --no-jira
+grep -q '^JIRA_' "$log.claude-env" && fail "JIRA_* leaked into the claude call env"
+grep -q '^JIRA_' "$log.gh-env" && fail "JIRA_* leaked into the gh env"
+grep -q '^STUB_LOG' "$log.gh-env" || fail "child env check is vacuous: the stub saw no environment"
+# A --no-insights retry keeps commentary the first attempt already paid for.
+run --window weekly --end 2026-09-28 --no-jira
+run --window weekly --end 2026-09-28 --no-jira --no-insights
+grep -q "stub insight about alpha" "$md" || fail "--no-insights retry dropped existing insights"
 STUB_CLAUDE=fail run --window weekly --end 2026-09-28 --dry-run --no-jira
 [ "$rc" -eq 0 ] && grep -q "Insights unavailable: claude exited 1" "$(field report)" || fail "failed insights must not fail the run" "$out"
 STUB_CLAUDE=slow AGENT_AUDIT_INSIGHTS_TIMEOUT=1 run --window weekly --end 2026-09-28 --dry-run --no-jira
@@ -261,6 +288,15 @@ STUB_CLAUDE=slow AGENT_AUDIT_INSIGHTS_TIMEOUT=1 run --window weekly --end 2026-0
 # ── GitHub unavailable: section degrades, run succeeds ──
 STUB_GH=fail run --window weekly --end 2026-09-28 --dry-run --no-jira --no-insights
 [ "$rc" -eq 0 ] && grep -q "Unavailable: GitHub search failed: HTTP 403" "$(field report)" || fail "gh failure should degrade" "$out"
+
+# ── GitHub search cap: full slices are split until under 1000 ──
+STUB_GH="split" run --window weekly --end 2026-09-28 --dry-run --no-jira --no-insights
+[ "$(jget "$(field metrics)" 'j["prs"]["current"]["prs"], j["prs"]["current"]["truncated"]')" = "(21, False)" ] \
+    || fail "a capped week should split into 7 complete days"
+grep -q "Truncated" "$(field report)" && fail "complete split results must not be marked truncated"
+STUB_GH=cap run --window weekly --end 2026-09-28 --dry-run --no-jira --no-insights
+[ "$(jget "$(field metrics)" 'j["prs"]["current"]["truncated"]')" = "True" ] || fail "a full single day must mark truncated"
+grep -q "^\*\*Truncated:\*\*" "$(field report)" || fail "truncation should be called out in the report"
 
 # ── Jira dry run: payload on disk, no credentials touched ──
 run --window weekly --end 2026-09-28 --dry-run --no-insights
@@ -280,7 +316,10 @@ port_file="$tmp/port"
 python3 - "$port_file" "$tmp/jira.log" <<'PY' &
 import http.server, json, sys
 port_file, log = sys.argv[1], sys.argv[2]
+import os, time
 n = {"issue": 0}
+issues = []
+mode_file = os.path.join(os.path.dirname(log), "jira.mode")
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_POST(self):
@@ -288,14 +327,25 @@ class H(http.server.BaseHTTPRequestHandler):
         with open(log, "a") as f:
             f.write(json.dumps({"path": self.path, "auth": self.headers.get("Authorization"), "body": body}) + "\n")
         if self.path.startswith("/rest/api/3/search/jql"):
-            resp = {"issues": []}
+            want = "Epic" if "issuetype = Epic" in body["jql"] else "Task"
+            resp = {"issues": [{"key": k, "fields": {"summary": sm}} for k, t, sm in issues if t == want]}
         else:
             n["issue"] += 1
-            resp = {"key": "EPIC-1" if body["fields"]["issuetype"]["name"] == "Epic" else f"TASK-{n['issue']}"}
+            kind = body["fields"]["issuetype"]["name"]
+            key = "EPIC-1" if kind == "Epic" else f"TASK-{n['issue']}"
+            issues.append((key, kind, body["fields"]["summary"]))
+            resp = {"key": key}
+            mode = open(mode_file).read().strip() if os.path.exists(mode_file) else ""
+            if kind == "Task" and mode == "slow-once":
+                os.remove(mode_file)
+                time.sleep(3)  # created server-side, but the client gives up first
         data = json.dumps(resp).encode()
-        self.send_response(201); self.send_header("Content-Length", str(len(data))); self.end_headers()
-        self.wfile.write(data)
-s = http.server.HTTPServer(("127.0.0.1", 0), H)
+        try:
+            self.send_response(201); self.send_header("Content-Length", str(len(data))); self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+s = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
 open(port_file, "w").write(str(s.server_address[1]))
 s.serve_forever()
 PY
@@ -325,11 +375,34 @@ calls_before="$(wc -l <"$tmp/jira.log")"
 run --window monthly --end 2026-10-01 --no-insights --force
 grep -q "^jira: TASK-3 created under EPIC-1$" <<<"$out" || fail "--force should file again with the stored epic" "$out"
 [ "$(($(wc -l <"$tmp/jira.log") - calls_before))" -eq 1 ] || fail "stored epic key should skip the epic search"
+
+# A create that times out but landed is found by summary, not filed twice.
+echo slow-once >"$tmp/jira.mode"
+AGENT_AUDIT_JIRA_TIMEOUT=1 run --window monthly --end 2026-09-01 --no-insights
+grep -q "^jira: TASK-4 created under EPIC-1$" <<<"$out" || fail "timed-out create should resolve to the landed issue" "$out"
+[ "$(grep '"path": "/rest/api/3/issue"' "$tmp/jira.log" | grep -c 'monthly ending 2026-08-31"')" -eq 1 ] \
+    || fail "timed-out create was retried into a duplicate"
+grep -q 'created >= -15m' "$tmp/jira.log" || fail "dedup search should be limited to recent issues"
+
+# Lock: a run waiting on a concurrent one re-checks and no-ops once that one filed.
+js3="$fx/.local/share/agent-audit/reports/2026-09-27-weekly.json"
+python3 - "$fx/.local/share/agent-audit/.weekly.lock" "$js3" <<'PY' &
+import fcntl, json, sys, time
+lock = open(sys.argv[1], "w"); fcntl.flock(lock, fcntl.LOCK_EX)
+time.sleep(2)
+j = json.load(open(sys.argv[2])); j["jira_key"] = "TASK-99"; json.dump(j, open(sys.argv[2], "w"))
+PY
+holder=$!
+python3 -c 'import time; time.sleep(0.5)'
+run --window weekly --end 2026-09-28 --no-insights
+wait "$holder"
+grep -q "TASK-99 already filed" <<<"$out" || fail "lock waiter should re-check and no-op" "$out"
 unset JIRA_URL JIRA_USERNAME JIRA_API_TOKEN
 
 # ── Units: template service + four calendar timers ──
 svc="$units/agent-audit@.service"
-grep -qx 'ExecStart=%h/.local/bin/agent-audit --window %i --scheduled' "$svc" || fail "service ExecStart"
+grep -qx 'ExecStart=%h/.local/bin/agent-audit --window %i' "$svc" || fail "service ExecStart"
+grep -qx 'NoNewPrivileges=yes' "$svc" && grep -qx 'PrivateTmp=yes' "$svc" || fail "service hardening missing"
 grep -q '^TimeoutStartSec=' "$svc" || fail "service needs a hard timeout"
 declare -A cal=([weekly]="Mon *-*-* 08:00:00" [biweekly]="Mon *-*-* 08:15:00"
     [monthly]="*-*-01 08:30:00" [quarterly]="*-01,04,07,10-01 09:00:00")

@@ -4,8 +4,9 @@ Description=Every-other-week agent usage audit
 [Timer]
 OnCalendar=Mon *-*-* 08:15:00
 Unit=agent-audit@biweekly.service
-# Fires every Monday; the service skips odd ISO weeks itself, because
-# OnCalendar has no "every other week" expression.
+# OnCalendar has no "every other week", so this fires every Monday. The
+# script snaps to a fixed fortnight grid, so an off-week firing re-targets
+# the last fortnight and is a no-op once that fortnight is filed.
 # A box that was off at the scheduled time runs the missed audit at next boot
 # instead of silently skipping a window.
 Persistent=true

@@ -17,9 +17,14 @@ collected.
    commands, agents, hooks, `.mcp.json`) and `~/.claude.json` to know what is
    enabled, so it can list what went unused.
 3. Measures the instruction files and the sets each agent loads together.
-4. Runs two `gh search` calls per window across the `jdwillmsen` and
-   `jdwlabs` owners for PR body length, "Generated with" footers, and
-   AI-co-authored default-branch commits missing an `Assisted-by:` trailer.
+4. Searches GitHub (`gh search prs` and `gh search commits`) across the
+   `jdwillmsen` and `jdwlabs` owners for PR body length, "Generated with"
+   footers, and AI-co-authored default-branch commits missing an
+   `Assisted-by:` trailer. GitHub search returns at most 1000 results and does
+   not say when it stops. A date range that comes back full is therefore split
+   in half, repeatedly, until each piece holds fewer than 1000. A quiet
+   quarter still takes one call. If a single day is still full, the report
+   marks the counts as truncated.
 5. Makes **one** `claude -p` call (Sonnet, no tools, `--max-turns 1`,
    `--max-budget-usd 0.50`, 240 s timeout, no session persistence) that reads
    the metrics JSON and returns at most 250 words of trends, anomalies and
@@ -32,22 +37,34 @@ collected.
    `~/.local/share/agent-audit/epic-key`.
 
 `<date>` is the last day inside the window. A window that already has a Jira
-key in its JSON is a no-op on re-run; `--force` files it again.
+key in its JSON is a no-op on re-run, and `--force` files it again. Runs of
+the same window take a lock. A second run waits up to 10 minutes for the first
+to finish, then checks again, so a timer firing during a manual run ends as a
+no-op instead of a duplicate. If a Jira create times out, the script searches
+for an issue with the same summary created in the last 15 minutes before it
+retries once. A `--no-insights` retry keeps the commentary already saved in
+the stored JSON.
 
 ## Windows
 
 | Window | Covers | Previous | Timer |
 |---|---|---|---|
 | `weekly` | last full Mon–Sun week | the week before | Mon 08:00 |
-| `biweekly` | last two full weeks | the two before | Mon 08:15, even ISO weeks only |
+| `biweekly` | last full fortnight on a fixed grid | the fortnight before | Mon 08:15 |
 | `monthly` | last full calendar month | the month before | 1st, 08:30 |
 | `quarterly` | last full calendar quarter | the quarter before | 1 Jan/Apr/Jul/Oct, 09:00 |
 
-Times are the box's local time, which is UTC on the devbox. `OnCalendar` has no
-"every other week", so the biweekly timer fires every Monday and the service
-(`--scheduled`) exits as a no-op on odd ISO weeks. Windows snap to Mondays,
-month starts and quarter starts, so a run that `Persistent=true` catches up a
-day late audits the same window the missed run would have.
+Times are the box's local time, which is UTC on the devbox. Windows snap to
+Mondays, month starts and quarter starts. A run that `Persistent=true` catches
+up late therefore audits the same window the missed run would have.
+
+Fortnights are counted every two weeks from Monday 1970-01-05, not by ISO week
+parity, because a 53-week year such as 2026 puts two odd weeks back to back
+and parity would skip a fortnight. `OnCalendar` has no "every other week", so
+the biweekly timer fires every Monday. A run in the off week, regular or
+catch-up, targets the most recent complete fortnight. That fortnight is a
+no-op if it was already filed, and is audited if the run that should have
+filed it was missed.
 
 ## Previous-window data and history
 
@@ -95,7 +112,10 @@ The script reads `JIRA_URL`, `JIRA_USERNAME` and `JIRA_API_TOKEN` from the
 environment. When they are unset, it reads them from the `ai-sre-relay`
 secret in the `ai-sre` namespace through `kubectl`, at runtime. The
 credentials stay in process memory: they are never printed or written to
-disk. They authenticate as the owner's own Jira account, not a bot.
+disk. Child processes (`gh`, `kubectl`, `claude`) get an environment with
+`JIRA_*` and any other credential-like variable removed. Each keeps only its
+own auth variable. The credentials authenticate as the owner's own Jira
+account, not a bot.
 
 ## Scheduling and linger
 
@@ -124,6 +144,8 @@ journalctl --user -u 'agent-audit@*' -n 50
 ## Caps
 
 Each run makes at most one model call, capped by turns, dollars and wall
-time. The service's `TimeoutStartSec=20min` bounds the whole run, and the run
-has no loops or retries. The weekly scan of about 600 transcript files took
+time. The service's `TimeoutStartSec=20min` bounds the whole run, and it runs
+with `NoNewPrivileges=yes` and `PrivateTmp=yes`. The only repetition is
+bounded: the GitHub range split stops at single days, and a timed-out Jira
+create gets one retry. The weekly scan of about 600 transcript files took
 under 30 s on the devbox, most of it in the GitHub searches.

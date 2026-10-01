@@ -103,38 +103,55 @@ PY
 # ── Stubs: gh, claude, kubectl ──
 cat >"$stubs/gh" <<'STUB'
 #!/usr/bin/env python3
-# Modes: ok (fixture rows), fail, split (full for multi-day ranges, small for
-# single days), cap (always full, so even single days are truncated).
-import datetime as dt, json, os, sys
+# Modes: ok (fixture rows), fail, split (over the cap for multi-day ranges,
+# small for single days), cap (over the cap even for single days),
+# ratelimit-once (first search request 403s), ratelimit (always 403).
+import datetime as dt, json, os, re, sys, time
 log = os.environ["STUB_LOG"]
-open(log + ".gh", "a").write(" ".join(sys.argv[1:]) + "\n")
+args = sys.argv[1:]
+open(log + ".gh", "a").write(" ".join(args) + "\n")
 open(log + ".gh-env", "w").write("\n".join(os.environ))
 mode = os.environ.get("STUB_GH", "ok")
+if args[:2] == ["api", "rate_limit"]:
+    print(int(time.time()) + 1); sys.exit(0)
 if mode == "fail":
-    sys.stderr.write("HTTP 403: rate limited\n"); sys.exit(1)
-kind = sys.argv[2]
-rng = sys.argv[sys.argv.index("--created" if kind == "prs" else "--committer-date") + 1]
-a, b = (dt.date.fromisoformat(x) for x in rng.split(".."))
-if mode in ("split", "cap"):
-    n = 1000 if mode == "cap" or b > a else 3
-    if kind == "prs":
-        rows = [{"number": i, "author": {"login": "jdwillmsen"}, "url": f"u{i}", "body": "w w w"} for i in range(n)]
-    else:
-        rows = [{"sha": f"{i:07d}", "repository": {"fullName": "o/r"}, "commit": {"message": "m"}} for i in range(n)]
-    print(json.dumps(rows)); sys.exit(0)
-if kind == "prs":
-    print(json.dumps([
+    sys.stderr.write("HTTP 404: Not Found\n"); sys.exit(1)
+flag = log + ".gh-limited"
+if mode == "ratelimit" or (mode == "ratelimit-once" and not os.path.exists(flag)):
+    open(flag, "w").close()
+    sys.stderr.write("HTTP 403: API rate limit exceeded for user\n"); sys.exit(1)
+ai = "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
+FIXTURE = {
+    "prs": [
         {"number": 1, "author": {"login": "jdwillmsen"}, "url": "u1", "body": "one two three four five six seven eight nine ten"},
         {"number": 2, "author": {"login": "jdwlabs-agent-bot[bot]"}, "url": "u2", "body": "a b c d e f g h i j k l m n o p q r s t"},
         {"number": 3, "author": {"login": "jdwillmsen"}, "url": "u3", "body": "Why it changed. Generated with Claude Code"},
-        {"number": 4, "author": {"login": "renovate[bot]"}, "url": "u4", "body": "bump"}]))
-else:
-    ai = "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
-    print(json.dumps([
+        {"number": 4, "author": {"login": "renovate[bot]"}, "url": "u4", "body": "bump"}],
+    "commits": [
         {"sha": "aaaaaaa111", "repository": {"fullName": "jdwlabs/r1"},
          "commit": {"message": f"feat: x\n\n{ai}\nAssisted-by: Claude Code:claude-opus-5-5"}},
         {"sha": "bbbbbbb222", "repository": {"fullName": "jdwlabs/r1"}, "commit": {"message": f"fix: y\n\n{ai}"}},
-        {"sha": "ccccccc333", "repository": {"fullName": "jdwlabs/r1"}, "commit": {"message": "docs: human only"}}]))
+        {"sha": "ccccccc333", "repository": {"fullName": "jdwlabs/r1"}, "commit": {"message": "docs: human only"}}],
+}
+def total(kind, a, b):
+    if mode == "cap" or (mode == "split" and b > a):
+        return 1500
+    return 3 if mode == "split" else len(FIXTURE[kind])
+if args[0] == "api":
+    q = args[args.index("-f") + 1]
+    kind = "prs" if "search/issues" in args else "commits"
+    a, b = (dt.date.fromisoformat(x) for x in re.search(r":(\S+)$", q).group(1).split(".."))
+    print(total(kind, a, b)); sys.exit(0)
+kind = args[1]
+limit = int(args[args.index("--limit") + 1])
+if mode in ("split", "cap"):
+    if kind == "prs":
+        rows = [{"number": i, "author": {"login": "jdwillmsen"}, "url": f"u{i}", "body": "w w w"} for i in range(limit)]
+    else:
+        rows = [{"sha": f"{i:07d}", "repository": {"fullName": "o/r"}, "commit": {"message": "m"}} for i in range(limit)]
+    print(json.dumps(rows))
+else:
+    print(json.dumps(FIXTURE[kind][:limit]))
 STUB
 cat >"$stubs/claude" <<'STUB'
 #!/bin/sh
@@ -161,6 +178,7 @@ run() {  # args → sets $out, $rc
         STUB_LOG="$log" STUB_GH="${STUB_GH:-ok}" STUB_CLAUDE="${STUB_CLAUDE:-ok}" \
         AGENT_AUDIT_INSIGHTS_TIMEOUT="${AGENT_AUDIT_INSIGHTS_TIMEOUT:-30}" \
         AGENT_AUDIT_JIRA_TIMEOUT="${AGENT_AUDIT_JIRA_TIMEOUT:-30}" AGENT_AUDIT_LOCK_WAIT="${AGENT_AUDIT_LOCK_WAIT:-30}" \
+        AGENT_AUDIT_GH_GAP="${AGENT_AUDIT_GH_GAP:-0}" AGENT_AUDIT_GH_MAX_WAIT="${AGENT_AUDIT_GH_MAX_WAIT:-30}" \
         JIRA_URL="${JIRA_URL:-}" JIRA_USERNAME="${JIRA_USERNAME:-}" JIRA_API_TOKEN="${JIRA_API_TOKEN:-}" \
         python3 "$audit" "$@" 2>"$tmp/stderr")"
     rc=$?
@@ -287,7 +305,18 @@ STUB_CLAUDE=slow AGENT_AUDIT_INSIGHTS_TIMEOUT=1 run --window weekly --end 2026-0
 
 # ── GitHub unavailable: section degrades, run succeeds ──
 STUB_GH=fail run --window weekly --end 2026-09-28 --dry-run --no-jira --no-insights
-[ "$rc" -eq 0 ] && grep -q "Unavailable: GitHub search failed: HTTP 403" "$(field report)" || fail "gh failure should degrade" "$out"
+[ "$rc" -eq 0 ] && grep -q "Errored.*GitHub search failed: HTTP 404" "$(field report)" || fail "gh failure should degrade" "$out"
+grep -q "^pr_hygiene: \"errored: " <<<"$out" || fail "errored PR hygiene must show in the summary" "$out"
+
+# ── GitHub rate limit: wait for the reset and retry; errored if it persists ──
+rm -f "$log.gh-limited"
+STUB_GH=ratelimit-once run --window weekly --end 2026-09-28 --dry-run --no-jira --no-insights
+grep -q "^pr_hygiene: 3 PRs" <<<"$out" || fail "a rate-limited search should be retried after the reset" "$out"
+grep -q -- "--created 2026-09-21..2026-09-27 --limit 4 " "$log.gh" || fail "fetch should request only the counted rows"
+grep -q "rate limited; waiting" "$tmp/stderr" || fail "rate-limit wait not logged"
+grep -q "api rate_limit" "$log.gh" || fail "reset time should come from the rate_limit endpoint"
+STUB_GH=ratelimit AGENT_AUDIT_GH_MAX_WAIT=2 run --window weekly --end 2026-09-28 --dry-run --no-jira --no-insights
+[ "$rc" -eq 0 ] && grep -q "still rate limited" "$(field report)" || fail "persistent rate limit should mark the section errored" "$out"
 
 # ── GitHub search cap: full slices are split until under 1000 ──
 STUB_GH="split" run --window weekly --end 2026-09-28 --dry-run --no-jira --no-insights
@@ -336,6 +365,10 @@ class H(http.server.BaseHTTPRequestHandler):
             issues.append((key, kind, body["fields"]["summary"]))
             resp = {"key": key}
             mode = open(mode_file).read().strip() if os.path.exists(mode_file) else ""
+            if kind == "Task" and mode == "nonjson":
+                os.remove(mode_file)
+                self.send_response(201); self.send_header("Content-Length", "6"); self.end_headers()
+                self.wfile.write(b"<html>"); return
             if kind == "Task" and mode == "slow-once":
                 os.remove(mode_file)
                 time.sleep(3)  # created server-side, but the client gives up first
@@ -383,6 +416,13 @@ grep -q "^jira: TASK-4 created under EPIC-1$" <<<"$out" || fail "timed-out creat
 [ "$(grep '"path": "/rest/api/3/issue"' "$tmp/jira.log" | grep -c 'monthly ending 2026-08-31"')" -eq 1 ] \
     || fail "timed-out create was retried into a duplicate"
 grep -q 'created >= -15m' "$tmp/jira.log" || fail "dedup search should be limited to recent issues"
+
+# A non-JSON reply is a structured failure, not a traceback.
+echo nonjson >"$tmp/jira.mode"
+run --window monthly --end 2026-08-01 --no-insights
+[ "$rc" -eq 1 ] && grep -q "^jira: \"failed: Jira POST /rest/api/3/issue returned a non-JSON body" <<<"$out" \
+    || fail "non-JSON Jira reply should fail cleanly" "$out"
+grep -q Traceback "$tmp/stderr" && fail "non-JSON Jira reply produced a traceback" "$(cat "$tmp/stderr")"
 
 # Lock: a run waiting on a concurrent one re-checks and no-ops once that one filed.
 js3="$fx/.local/share/agent-audit/reports/2026-09-27-weekly.json"

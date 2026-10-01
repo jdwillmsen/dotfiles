@@ -49,6 +49,13 @@ INSIGHTS_WORDS = 250
 INSIGHTS_TIMEOUT_S = int(os.environ.get("AGENT_AUDIT_INSIGHTS_TIMEOUT", "240"))
 GH_TIMEOUT_S = 90
 GH_SEARCH_CAP = 1000
+# GitHub search allows 30 requests a minute and `gh search` spends one per
+# 100 results, so calls are spaced per page; a limit hit anyway waits for
+# the reset.
+GH_SEARCH_GAP_S = float(os.environ.get("AGENT_AUDIT_GH_GAP", "2.1"))
+GH_MAX_WAIT_S = int(os.environ.get("AGENT_AUDIT_GH_MAX_WAIT", "300"))
+GH_RETRIES = 3
+GH_RATE_LIMITED = re.compile(r"rate limit|HTTP 403|HTTP 429|secondary", re.I)
 LOCK_WAIT_S = int(os.environ.get("AGENT_AUDIT_LOCK_WAIT", "600"))
 JIRA_TIMEOUT_S = int(os.environ.get("AGENT_AUDIT_JIRA_TIMEOUT", "30"))
 # Fortnights are counted from this fixed Monday.
@@ -703,16 +710,45 @@ def instruction_health():
 
 # ── PR hygiene (GitHub) ──────────────────────────────────────────────────────
 
-def gh_json(args):
+_gh = {"next": 0.0, "waited": 0.0}
+
+
+def gh_env():
+    return child_env(("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"), GH_PROMPT_DISABLED="1", NO_COLOR="1")
+
+
+def gh_search_reset_wait():
+    """Seconds until the search quota resets, or a minute when unknown."""
+    try:
+        r = subprocess.run(["gh", "api", "rate_limit", "--jq", ".resources.search.reset"],
+                           capture_output=True, text=True, timeout=30, env=gh_env())
+        return max(1.0, float(r.stdout.strip()) - time.time() + 1)
+    except (ValueError, OSError, subprocess.TimeoutExpired):
+        return 60.0
+
+
+def gh_json(args, pages=1):
+    """Run one gh search call that costs `pages` search requests."""
     if not shutil.which("gh"):
         raise RuntimeError("gh not installed")
-    r = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=GH_TIMEOUT_S,
-                       env=child_env(("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"),
-                                     GH_PROMPT_DISABLED="1", NO_COLOR="1"))
-    if r.returncode != 0:
+    for attempt in range(GH_RETRIES + 1):
+        gap = _gh["next"] - time.monotonic()
+        if gap > 0:
+            time.sleep(gap)
+        r = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=GH_TIMEOUT_S, env=gh_env())
+        _gh["next"] = time.monotonic() + pages * GH_SEARCH_GAP_S
+        if r.returncode == 0:
+            return json.loads(r.stdout or "[]")
         first = (r.stderr.strip().splitlines() or ["unknown error"])[0]
-        raise RuntimeError(f"GitHub search failed: {first[:160]}")
-    return json.loads(r.stdout or "[]")
+        if not GH_RATE_LIMITED.search(r.stderr) or attempt == GH_RETRIES:
+            raise RuntimeError(f"GitHub search failed: {first[:160]}")
+        wait = min(gh_search_reset_wait(), GH_MAX_WAIT_S - _gh["waited"])
+        if wait <= 0:
+            raise RuntimeError(f"GitHub search still rate limited after waiting {int(_gh['waited'])}s: {first[:120]}")
+        log(f"GitHub search rate limited; waiting {wait:.0f}s for the reset")
+        _gh["waited"] += wait
+        time.sleep(wait)
+    raise RuntimeError("GitHub search failed")
 
 
 def pct(xs, q):
@@ -723,21 +759,27 @@ def pct(xs, q):
 
 
 def gh_search(kind, date_flag, fields, start, end):
-    """Search [start, end), halving the range until each slice is under the cap.
+    """Fetch [start, end) completely despite the 1000-result search cap.
 
-    GitHub search returns at most 1000 results and says nothing when it
-    stops. Splitting only where a slice is full keeps a quiet quarter to a
-    single call, which matters under the 30-requests-a-minute search limit.
-    Returns (rows, truncated): truncated means a single day still hit the cap.
+    GitHub search stops at 1000 results without saying so. A one-request
+    count decides whether a range fits; ranges that do not are halved on
+    counts alone, so fetches never waste pages on a truncated result.
+    Returns (rows, truncated): truncated means a single day exceeds the cap.
     """
     rng = f"{start.isoformat()}..{(end - dt.timedelta(days=1)).isoformat()}"
-    rows = gh_json(["search", kind, "--owner", "jdwillmsen", "--owner", "jdwlabs", date_flag, rng,
-                    "--limit", str(GH_SEARCH_CAP), "--json", fields])
+    qual = date_flag.lstrip("-")
+    endpoint = "search/issues" if kind == "prs" else "search/commits"
+    q = ("is:pr " if kind == "prs" else "") + f"user:jdwillmsen user:jdwlabs {qual}:{rng}"
+    total = int(gh_json(["api", "-X", "GET", endpoint, "-f", f"q={q}", "-f", "per_page=1",
+                         "--jq", ".total_count"]))
     days = (end - start).days
-    if len(rows) < GH_SEARCH_CAP:
-        return rows, False
-    if days <= 1:
-        return rows, True
+    if total == 0:
+        return [], False
+    if total <= GH_SEARCH_CAP or days <= 1:
+        limit = min(total, GH_SEARCH_CAP)
+        rows = gh_json(["search", kind, "--owner", "jdwillmsen", "--owner", "jdwlabs", date_flag, rng,
+                        "--limit", str(limit), "--json", fields], pages=-(-limit // 100))
+        return rows, total > GH_SEARCH_CAP
     mid = start + dt.timedelta(days=days // 2)
     a, ta = gh_search(kind, date_flag, fields, start, mid)
     b, tb = gh_search(kind, date_flag, fields, mid, end)
@@ -749,7 +791,8 @@ def pr_hygiene(start, end):
         prs, t1 = gh_search("prs", "--created", "number,repository,author,body,url", start, end)
         commits, t2 = gh_search("commits", "--committer-date", "sha,commit,repository", start, end)
     except (RuntimeError, subprocess.TimeoutExpired, ValueError) as e:
-        return {"available": False, "reason": str(e)[:200]}
+        # Errored, never empty: zero PRs must not be mistaken for a quiet window.
+        return {"available": False, "errored": True, "reason": str(e)[:200]}
     prs = [p for p in prs if not BOT_AUTHORS.search(((p.get("author") or {}).get("login")) or "")]
     words = [len((p.get("body") or "").split()) for p in prs]
     footer = [p.get("url") for p in prs if GENERATED_WITH.search(p.get("body") or "")]
@@ -972,7 +1015,7 @@ def render(m):
     L += ["## PR hygiene (jdwillmsen, jdwlabs)", ""]
     pc, pp = m["prs"]["current"], m["prs"]["previous"]
     if not pc.get("available"):
-        L += [f"Unavailable: {pc.get('reason')}.", ""]
+        L += [f"**Errored** — PR hygiene not measured: {pc.get('reason')}.", ""]
     else:
         def pv(k):
             return pp.get(k) if pp.get("available") else None
@@ -1102,7 +1145,10 @@ class Jira:
                            capture_output=True, text=True, timeout=30, env=child_env())
         if r.returncode != 0 or not r.stdout.strip():
             raise RuntimeError(f"could not read {key} from the cluster secret")
-        return base64.b64decode(r.stdout.strip()).decode().strip()
+        try:
+            return base64.b64decode(r.stdout.strip(), validate=True).decode().strip()
+        except ValueError:
+            raise RuntimeError(f"{key} in the cluster secret is not valid base64 text") from None
 
     def call(self, method, path, body=None):
         req = urllib.request.Request(self.base + path, method=method,
@@ -1111,7 +1157,8 @@ class Jira:
                                               "Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(req, timeout=JIRA_TIMEOUT_S) as r:
-                return json.loads(r.read() or b"{}")
+                raw = r.read()
+            return json.loads(raw or b"{}")
         except urllib.error.HTTPError as e:
             detail = e.read().decode(errors="replace")[:300]
             raise RuntimeError(f"Jira {method} {path.split('?')[0]} -> HTTP {e.code}: {detail}") from None
@@ -1119,6 +1166,10 @@ class Jira:
             raise JiraUnreachable(f"Jira unreachable: {e.reason}") from None
         except (TimeoutError, socket.timeout, ConnectionError) as e:
             raise JiraUnreachable(f"Jira unreachable: {e}") from None
+        except ValueError:
+            raise RuntimeError(f"Jira {method} {path.split('?')[0]} returned a non-JSON body") from None
+        except OSError as e:
+            raise RuntimeError(f"Jira {method} {path.split('?')[0]} failed: {e.strerror or type(e).__name__}") from None
 
     def find_recent(self, summary):
         jql = (f'project = {JIRA_PROJECT} AND labels = {JIRA_LABEL} AND created >= -15m '
@@ -1310,7 +1361,9 @@ def main(argv):
               "disable_candidates": f"{len(metrics['disable_candidates']['plugins'])} plugins, "
                                     f"{len(metrics['disable_candidates']['mcp_servers'])} MCP servers, "
                                     f"{len(metrics['disable_candidates']['skills'])} skills",
-              "insights": "included" if metrics["insights"].get("text") else f"skipped: {metrics['insights'].get('skipped')}"}
+              "insights": "included" if metrics["insights"].get("text") else f"skipped: {metrics['insights'].get('skipped')}",
+              "pr_hygiene": (f"{prs['current']['prs']} PRs" + (" (truncated)" if prs["current"].get("truncated") else ""))
+              if prs["current"].get("available") else f"errored: {prs['current'].get('reason')}"}
     rc = 0
 
     if opts.get("no_jira"):
@@ -1332,7 +1385,7 @@ def main(argv):
             json_path.write_text(json.dumps(metrics, indent=1, default=list))
             result["jira"] = f"{key} created under {epic}" + (" (epic created)" if created else "")
             result["jira_url"] = f"{jira.base}/browse/{key}"
-        except (RuntimeError, KeyError, subprocess.TimeoutExpired) as e:
+        except (RuntimeError, KeyError, ValueError, OSError, subprocess.TimeoutExpired) as e:
             result["jira"] = f"failed: {e}"
             result["help"] = [f"Report is saved; re-run `agent-audit --window {window}"
                               + (f" --end {opts['end']}" if opts["end"] else "") + " --no-insights` to retry filing"]

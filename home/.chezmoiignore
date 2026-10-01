@@ -21,3 +21,7 @@ run_once_49-install-dev-tools.sh.tmpl
 {{ if ne .chezmoi.os "windows" }}
 AppData/**
 {{ end }}
+# chezmoi deploys untracked files too, so byte-compiled Python left by
+# running agent-audit from the source tree would land in ~/.local/bin.
+.local/bin/__pycache__
+.local/bin/__pycache__/**

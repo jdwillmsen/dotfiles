@@ -1,0 +1,13 @@
+[Unit]
+Description=Monthly agent usage audit
+
+[Timer]
+OnCalendar=*-*-01 08:30:00
+Unit=agent-audit@monthly.service
+# A box that was off at the scheduled time runs the missed audit at next boot
+# instead of silently skipping a window.
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

@@ -32,6 +32,9 @@ for f in "$HOME/.config/shell/exports.sh" "$HOME/.config/shell/aliases.sh" "$HOM
     [ -r "$f" ] && source "$f"
 done
 
+# After local.sh, so a machine can redefine or silence the notice there.
+command -v t3_expiry_notice >/dev/null 2>&1 && t3_expiry_notice
+
 # Worktree helpers (gwt/gwta/wtd/wtclean). Bash-only — the script uses mapfile
 # and 0-indexed arrays, so .zshrc deliberately leaves it out.
 [ -r "$HOME/.claude/scripts/worktree-helpers.sh" ] && source "$HOME/.claude/scripts/worktree-helpers.sh"

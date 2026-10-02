@@ -100,6 +100,9 @@ console — which is the reason the provisioner enables `--ssh` at all. It keeps
 Run this in your own terminal rather than through an agent — the token is a
 credential and there is no reason to widen where it has been.
 
+`t3pair <label> [ttl]` is the same command as a shell function, with
+`--tailscale` fixed and a 15 minute default TTL — `t3pair iphone`.
+
 `npx t3@latest auth` lists and revokes credentials and sessions.
 
 ### 4. Expiry warning
@@ -129,6 +132,19 @@ affected sessions; only a conclusive all-clear clears it, so an inconclusive
 run leaves a standing warning alone. The check re-derives nvm's node path for
 the same reason the generated `t3code.service` hardcodes one (see Operating
 notes): a systemd user unit inherits no interactive `PATH`.
+
+A failed unit is only a verdict for someone who asks, so every interactive
+shell also prints the marker at startup (`t3_expiry_notice`, called from the
+rc files) along with the re-pair command. The notice lasts exactly as long as
+the marker does, which has two consequences:
+
+- Re-pairing a device does not clear it. The old session stays listed until it
+  lapses, so revoke it — `npx t3@latest auth session revoke <id>`, the id is in
+  the notice — and run `t3-session-expiry` to re-check now rather than at the
+  next daily run.
+- A lapsed session drops out of `auth session list`, so the first run after
+  expiry is an all-clear that removes the marker. The notice covers the days
+  before a lapse, not the days after one.
 
 `chezmoi apply` reloads and enables the timer; by hand, `systemctl --user
 daemon-reload && systemctl --user enable --now t3-session-expiry.timer`.

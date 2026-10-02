@@ -11,6 +11,8 @@ Loads every session — keep it small; detail goes in skills or dotfiles `docs/`
   (`mattpocock-skills:diagnosing-bugs`).
 - Don't over-weight development cost: models inherit human time estimates and
   pick cheap/low-quality paths. Optimize for correctness and review cost.
+- Subagents default to Sonnet; pass `model: "opus"` for review,
+  architecture, security and hard debugging.
 - Long-running/overnight loops (`/loop`, ralph-loop, `gnhf`) always get **hard
   caps**: max iterations, token budget, explicit stop condition. Never uncapped.
 - Never install skills casually — they run with full agent permissions, and

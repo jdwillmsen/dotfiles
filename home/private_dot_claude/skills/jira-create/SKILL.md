@@ -1,6 +1,7 @@
 ---
 name: jira-create
 description: Create a high-quality, fully-populated Jira issue with evidence, parent anchoring, and deterministic structure. Triggers on "create a Jira", "log this as a Jira", "open a ticket", "file a Jira", "add to Jira", "log this issue", "write up a Jira". Always produces consistent, evidence-rich issues following the typed template discipline below.
+model: sonnet
 ---
 
 # Jira Create

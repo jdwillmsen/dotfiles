@@ -23,7 +23,8 @@ out="$(printf '' | bash "$here/home/private_dot_claude/modify_settings.json.json
 echo "$out" | "$PY" -c 'import json,sys; d=json.load(sys.stdin); \
  assert d["model"]=="opus", "default model should be opus"; \
  assert d["env"]["MAX_MCP_OUTPUT_TOKENS"]=="50000", "MCP output budget default missing"; \
- assert d["env"]["BASH_DEFAULT_TIMEOUT_MS"]=="180000", "bash timeout default missing"; print("PASS")'
+ assert d["env"]["BASH_DEFAULT_TIMEOUT_MS"]=="180000", "bash timeout default missing"; \
+ assert d["env"]["CLAUDE_CODE_SUBAGENT_MODEL"]=="sonnet", "subagent model default missing"; print("PASS")'
 
 # env merges per-key: a user-set var survives while the other default fills in.
 existing='{"env":{"MAX_MCP_OUTPUT_TOKENS":"9000"}}'

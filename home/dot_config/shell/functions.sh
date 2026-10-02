@@ -82,3 +82,26 @@ cj() {
         *) command claude "$@" ;;
     esac
 }
+
+# Mint a T3 Code pairing token for one device. Always --tailscale: without it
+# the link points at the loopback origin, which no other device can open.
+t3pair() {
+    local label="${1:?Usage: t3pair <device-label> [ttl]}"
+    npx t3@latest pair --tailscale --label "$label" --ttl "${2:-15m}"
+}
+
+# Surface the expiry timer's standing warning at shell start. The timer's own
+# verdict is a failed user unit, which nothing shows unprompted — sessions
+# lapsed with the warning sitting unread in the journal.
+t3_expiry_notice() {
+    local marker="${XDG_STATE_HOME:-$HOME/.local/state}/t3-session-expiry.warn"
+    [ -s "$marker" ] || return 0
+    {
+        printf '⚠ '
+        cat "$marker"
+        echo "  Re-pair each device with: t3pair <label>"
+        # A re-paired device keeps its old session until that lapses, so the
+        # warning outlives the fix unless the old session is revoked.
+        echo "  Then clear this: npx t3@latest auth session revoke <id> && t3-session-expiry"
+    } >&2
+}

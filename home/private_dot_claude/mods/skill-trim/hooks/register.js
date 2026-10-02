@@ -18,10 +18,14 @@ export const HIDDEN_SKILLS = [
   'superpowers:writing-skills',
 ]
 
-// Matched by the bootstrap's signature sentence, so if upstream rewrites it the
-// new text passes through rather than being replaced by guidance that may no
-// longer fit.
+import { sha256 } from './sha256.js'
+
+// Fingerprint of the one upstream bootstrap this mod was written against
+// (superpowers 6.4.1). Anything else, including a revised bootstrap that still
+// opens with SUPERPOWERS_MARKER, passes through so upstream changes are never
+// discarded; refresh the hash after reviewing a new upstream version.
 export const SUPERPOWERS_MARKER = 'You have superpowers.'
+export const KNOWN_BOOTSTRAP_SHA256 = '48ebb41e10d7bb85c74ac04fd685a32c3b32ce789766e4a3ab3ba8a5546fe688'
 
 // Same routing as the upstream bootstrap without the pressure register, which
 // measured no better on current models.
@@ -31,8 +35,8 @@ When several apply, process skills come first: superpowers:brainstorming before 
 Your partner's instructions (CLAUDE.md, direct requests) take precedence over any skill.
 </skills>`
 
-// A description can span several lines, so entries are split on the "- "
-// bullet rather than per line.
+// A description can span several lines and paragraphs, so a hidden entry is
+// skipped until the next "- name:" bullet rather than the next blank line.
 export function trimListing(text, hidden = HIDDEN_SKILLS) {
   const drop = new Set(hidden)
   const out = []
@@ -40,17 +44,23 @@ export function trimListing(text, hidden = HIDDEN_SKILLS) {
   for (const line of text.split('\n')) {
     const bullet = /^- (\S+?):(?: |$)/.exec(line)
     if (bullet) skipping = drop.has(bullet[1])
-    else if (line === '') skipping = false
     if (!skipping) out.push(line)
   }
   return out.join('\n')
 }
 
-export function calmContexts(contexts) {
-  return contexts.map((c) => (c.includes(SUPERPOWERS_MARKER) ? CALM_BOOTSTRAP : c))
+export function classifyContext(context, knownSha = KNOWN_BOOTSTRAP_SHA256) {
+  if (!context.includes(SUPERPOWERS_MARKER)) return 'other'
+  return sha256(context) === knownSha ? 'known' : 'drifted'
+}
+
+export function calmContexts(contexts, knownSha = KNOWN_BOOTSTRAP_SHA256) {
+  return contexts.map((c) => (classifyContext(c, knownSha) === 'known' ? CALM_BOOTSTRAP : c))
 }
 
 export function register(on) {
+  let warned = false
+
   on('prompt.attachment', { type: 'skill_listing' }, async ($, e, next) =>
     next({ ...e, text: trimListing(e.text) }),
   )
@@ -58,6 +68,10 @@ export function register(on) {
   on('classic.SessionStart', async ($, e, next) => {
     const result = await next(e)
     if (!result?.additionalContext) return result
+    if (!warned && result.additionalContext.some((c) => classifyContext(c) === 'drifted')) {
+      warned = true
+      $.ui.log('skill-trim: superpowers bootstrap changed upstream; leaving it verbose until KNOWN_BOOTSTRAP_SHA256 is refreshed')
+    }
     return { ...result, additionalContext: calmContexts(result.additionalContext) }
   })
 }

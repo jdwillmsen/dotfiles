@@ -76,9 +76,16 @@ name. A `classic.SessionStart` hook swaps superpowers' 3.4 KB
 (check for a matching skill first, process skills before implementation ones,
 CLAUDE.md wins); a controlled run on superpowers' issue tracker found the calm
 wording fired the right skill as often as the original. Together that is about
-8.4 KB less context per session. Edit the list in `hooks/register.js`, then run
-`claude plugin test` in the deployed directory. If superpowers rewrites its
-bootstrap, the new text passes through unchanged until the mod is updated.
+8.4 KB less context per session.
+
+Edit `home/private_dot_claude/mods/skill-trim/hooks/register.js` in the
+chezmoi source, never the deployed copy, then run `chezmoi apply -v` before
+`claude plugin test` in `~/.claude/mods/skill-trim`. The bootstrap is replaced
+only when it hashes to the pinned superpowers 6.4.1 fingerprint
+(`KNOWN_BOOTSTRAP_SHA256`). After a superpowers update that changes it, the
+verbose upstream text comes back and the mod logs one line per session; review
+the new text, then refresh the hash (`tests/template/test_skill_trim_mod.sh`
+prints the live value when it differs).
 
 **caveman** stays enabled so `/caveman` and the cavecrew agents work, but its
 default mode is `off`. Measured net cost was about −$9 to −$13/month: Opus

@@ -63,3 +63,12 @@ echo "$out" | "$PY" -c 'import json,sys; d=json.load(sys.stdin); names=[e["serve
  assert "claude.ai Atlassian Rovo" in names, "template-denied server missing"; \
  assert names.count("claude.ai Gmail")==1, "deny entries duplicated"; \
  assert not any("Claude Docs" in n or "Google Drive" in n for n in names), "kept connector denied"; print("PASS")'
+
+# REMOVED keys are deleted from the merged result even though the merge would
+# otherwise keep them, while unknown user keys in the same section survive.
+existing='{"skillOverrides":{"tdd":"off","zoom-out":"off","setup-matt-pocock-skills":"off","my-skill":"off"}}'
+out="$(printf '%s' "$existing" | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
+echo "$out" | "$PY" -c 'import json,sys; s=json.load(sys.stdin)["skillOverrides"]; \
+ assert not {"tdd","zoom-out","setup-matt-pocock-skills"} & set(s), "removed skillOverrides kept: %s" % s; \
+ assert s["my-skill"]=="off", "unknown user skillOverride removed"; \
+ assert s["lavish"]=="off", "enforced skillOverride lost"; print("PASS")'

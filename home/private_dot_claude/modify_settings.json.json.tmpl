@@ -75,6 +75,18 @@ ENFORCED='{
     "lavish": "off"
   }
 }'
+# REMOVED keys are deleted from the merged result, since the merge otherwise
+# keeps every on-disk key forever. These skillOverrides were written to hide
+# mattpocock skills before they arrived as a plugin; plugin skills ignore
+# skillOverrides, so the entries are dead weight. Only keys listed here go;
+# anything else the user added stays.
+REMOVED='{
+  "skillOverrides": [
+    "grill-me", "grill-with-docs", "improve-codebase-architecture",
+    "prototype", "setup-matt-pocock-skills", "tdd", "to-issues", "to-prd",
+    "triage", "write-a-skill", "zoom-out"
+  ]
+}'
 # chezmoi feeds the current file on our stdin. That stdin is captured here
 # (not left connected to python3) because a `python3 - <<PYEOF` heredoc would
 # itself occupy stdin as the script source, leaving nothing for the process
@@ -87,6 +99,7 @@ PY=python3
 import json, sys
 defaults = json.loads(sys.argv[1])
 enforced = json.loads(sys.argv[3])
+removed = json.loads(sys.argv[4])
 raw = sys.argv[2].strip()
 existing = json.loads(raw) if raw else {}
 def merge(base, override, union_lists=False):
@@ -101,6 +114,9 @@ def merge(base, override, union_lists=False):
     return out
 # existing wins over defaults; enforced wins over both
 merged = merge(merge(defaults, existing), enforced, union_lists=True)
+for section, keys in removed.items():
+    for k in keys:
+        merged.get(section, {}).pop(k, None)
 json.dump(merged, sys.stdout, indent=2)
 sys.stdout.write("\n")
-' "$DEFAULTS" "$EXISTING" "$ENFORCED"
+' "$DEFAULTS" "$EXISTING" "$ENFORCED" "$REMOVED"

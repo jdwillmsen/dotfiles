@@ -135,7 +135,7 @@ These run as part of `chezmoi apply` and need no root:
 | `run_once_42-install-cli-tools.sh` | ripgrep, delta, fd, eza, zoxide, starship, fzf, direnv, nvim, sox (Claude Code voice mode's recorder, useful only on a host that has a microphone of its own), cmake, bubblewrap (Codex sandbox) |
 | `run_onchange_43-install-agent-clis.sh.tmpl` | the CLIs the agent skills drive — version-pinned, see below |
 | `run_once_45-install-python-tools.sh` | uv, pipx |
-| `run_once_46-install-cloud-clis.sh` | terraform, aws, gcloud, az |
+| `run_once_46-install-cloud-clis.sh` | terraform (kept at or above a minimum version), aws, gcloud, az |
 | `run_once_47-install-go.sh` | Go toolchain |
 | `run_once_49-install-dev-tools.sh.tmpl` | docker, node/pnpm, rust, helm, gh, kubectl, talosctl, sops, age, Java — opt-in only |
 
@@ -167,6 +167,27 @@ distros mark the system interpreter externally-managed (PEP 668) and refuse
 points symlinked into `~/.local/bin`, deliberately avoiding the vendor
 installers that would register root-owned apt repositories and signing keys.
 `az` is a Python application, so it installs as a uv tool.
+
+Terraform is the one cloud CLI held to a version. The jdwlabs infrastructure
+tree declares a `required_version`, and a binary below it fails `terraform init`
+outright — which is how a devbox that had terraform "installed" could not plan
+during an outage. `46` therefore carries `TERRAFORM_MIN_VERSION` and compares
+it, component by component, against what `terraform version` reports: at or
+above it the script skips, below it (or unreadable) it upgrades. On Linux that
+means downloading the newest release — or `TERRAFORM_FALLBACK_VERSION` when the
+release index is unreachable — and replacing `~/.local/bin/terraform` only
+after the checksum matches, so a failed or unverifiable upgrade leaves the old
+binary working. Under brew, winget or scoop the manager owns the binary, so the
+script runs that manager's upgrade — or its install, when the old binary is one
+the manager never installed and so will not upgrade — and then re-reads the
+version; a package that is itself older than the minimum is reported rather
+than passed off as upgraded.
+
+Raising the minimum is a one-line edit, and the edit is also what delivers it:
+a `run_once_` script is keyed on its content, so changing the constant makes the
+next `chezmoi apply` run `46` again on every machine that already recorded it.
+Keep the fallback at or above the minimum — a test enforces it — or an offline
+machine would upgrade to a version the next run rejects.
 
 `47` exists because the statusline is a Go binary built from
 `scripts/claude-status` during an apply: without a toolchain that build is
@@ -413,6 +434,14 @@ one advances rather than being skipped, and a vendor installer landing past the
 declared version is reported. Reading the script's source could not have caught
 the bug it exists for — a presence check and a version check look alike until
 you run them against a tool that is present but old.
+
+`tests/scripts/test_toolchain_scripts.sh` runs `46` the same way for terraform:
+stub `curl`, `unzip` and `brew` on a sealed `PATH`, with a terraform that
+reports a chosen version. It asserts that versions below the minimum are
+replaced and versions at or above it touch nothing — including `1.9.9` and
+`1.16.10`, the pair a string comparison ranks backwards — that an unreachable
+release index installs the fallback, and that a bad or missing checksum leaves
+the existing binary in place.
 
 Sealing a test's own `PATH` is not sufficient on its own, though, because every
 `chez_apply` caller — two template tests, `tests/smoke.sh` and CI's verify

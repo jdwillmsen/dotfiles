@@ -63,14 +63,14 @@ DEFAULTS='{
 # CLAUDE_CODE_PLUGIN_DIRS loads the skill-trim mod in every session, including
 # ones started by apps that take no --plugin-dir flag. It is enforced because
 # the path is owned here: a stale on-disk value would silently drop the mod.
-# Claude Code wants a native path, so Git Bash's /c/... form is converted.
+# Claude Code wants a native path, so Git Bash's /c/... form is converted. The
+# path is set inside the python step below so json encodes it, whatever HOME
+# contains.
 SKILL_TRIM_DIR="$HOME/.claude/mods/skill-trim"
 if command -v cygpath >/dev/null 2>&1; then
     SKILL_TRIM_DIR="$(cygpath -w "$SKILL_TRIM_DIR")"
 fi
-SKILL_TRIM_DIR_JSON="$(printf '%s' "$SKILL_TRIM_DIR" | sed 's/\\/\\\\/g')"
 ENFORCED='{
-  "env": { "CLAUDE_CODE_PLUGIN_DIRS": "'"$SKILL_TRIM_DIR_JSON"'" },
   "deniedMcpServers": [
     { "serverName": "claude.ai Gmail" },
     { "serverName": "claude.ai Atlassian Rovo" }
@@ -114,6 +114,7 @@ PY=python3
 import json, sys
 defaults = json.loads(sys.argv[1])
 enforced = json.loads(sys.argv[3])
+enforced.setdefault("env", {})["CLAUDE_CODE_PLUGIN_DIRS"] = sys.argv[5]
 removed = json.loads(sys.argv[4])
 raw = sys.argv[2].strip()
 existing = json.loads(raw) if raw else {}
@@ -134,4 +135,4 @@ for section, keys in removed.items():
         merged.get(section, {}).pop(k, None)
 json.dump(merged, sys.stdout, indent=2)
 sys.stdout.write("\n")
-' "$DEFAULTS" "$EXISTING" "$ENFORCED" "$REMOVED"
+' "$DEFAULTS" "$EXISTING" "$ENFORCED" "$REMOVED" "$SKILL_TRIM_DIR"

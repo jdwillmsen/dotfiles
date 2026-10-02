@@ -16,6 +16,13 @@ echo "$out" | EXPECT="$tmp/home/.claude/mods/skill-trim" "$PY" -c 'import json,o
  assert e["CLAUDE_CODE_PLUGIN_DIRS"]==os.environ["EXPECT"], "plugin dir not enforced: "+e["CLAUDE_CODE_PLUGIN_DIRS"]; \
  assert e["MY_VAR"]=="1", "sibling env var lost"; print("PASS")'
 
+# A HOME holding a quote and a backslash must still yield valid JSON that
+# round-trips to the exact path.
+quoted_home="$tmp/h\"q\\x"
+out="$(printf '{}' | HOME="$quoted_home" bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
+echo "$out" | EXPECT="$quoted_home/.claude/mods/skill-trim" "$PY" -c 'import json,os,sys; e=json.load(sys.stdin)["env"]; \
+ assert e["CLAUDE_CODE_PLUGIN_DIRS"]==os.environ["EXPECT"], "quoted HOME mangled: "+e["CLAUDE_CODE_PLUGIN_DIRS"]; print("PASS")'
+
 # chezmoi skips dot-prefixed source names, so the manifest lives under
 # dot_claude-plugin; stage the deployed layout to check it as Claude Code sees it.
 mod="$tmp/skill-trim"
@@ -29,16 +36,33 @@ mv "$mod/dot_claude-plugin" "$mod/.claude-plugin"
 if command -v node >/dev/null 2>&1; then
     node --input-type=module -e '
 import { pathToFileURL } from "node:url"
-const { trimListing, calmContexts, CALM_BOOTSTRAP } = await import(pathToFileURL(process.argv[1]).href)
-const listing = "intro\n\n- axi: kept.\n- mattpocock-skills:tdd: hidden.\nmore hidden\n- superpowers:brainstorming: kept."
+import { createHash } from "node:crypto"
+const dir = pathToFileURL(process.argv[1]).href.replace(/register.js$/, "")
+const { trimListing, calmContexts, CALM_BOOTSTRAP } = await import(dir + "register.js")
+const { sha256 } = await import(dir + "sha256.js")
+const listing = "intro\n\n- axi: kept.\n- mattpocock-skills:tdd: hidden.\n\nsecond paragraph hidden\n- superpowers:brainstorming: kept."
 const out = trimListing(listing)
 if (out !== "intro\n\n- axi: kept.\n- superpowers:brainstorming: kept.") throw new Error("trim: " + JSON.stringify(out))
-const ctx = calmContexts(["x You have superpowers. y", "other"])
-if (ctx[0] !== CALM_BOOTSTRAP || ctx[1] !== "other") throw new Error("bootstrap not replaced")
+for (const text of ["", "abc", "x".repeat(55), "x".repeat(56), "x".repeat(64), "héllo wörld ✓".repeat(40)]) {
+  if (sha256(text) !== createHash("sha256").update(text).digest("hex")) throw new Error("sha256 differs for length " + text.length)
+}
+const known = "<X>\nYou have superpowers.\n</X>"
+const ctx = calmContexts([known, known + " revised", "other"], sha256(known))
+if (ctx[0] !== CALM_BOOTSTRAP || ctx[1] !== known + " revised" || ctx[2] !== "other") throw new Error("bootstrap replacement not exact")
 console.log("PASS")
 ' "$mod/hooks/register.js"
 else
     echo "SKIP: node not installed"
+fi
+
+# When superpowers is installed, its live bootstrap must still match the
+# pinned fingerprint; a mismatch means the mod has gone quiet after an upstream
+# update and the fingerprint needs refreshing.
+sp="$(ls -d "$HOME"/.claude/plugins/cache/*/superpowers/*/hooks/session-start 2>/dev/null | sort -V | tail -n 1 || true)"
+if [ -n "$sp" ] && command -v node >/dev/null 2>&1; then
+    pinned="$(sed -n "s/.*KNOWN_BOOTSTRAP_SHA256 = '\\([0-9a-f]*\\)'.*/\\1/p" "$mod/hooks/register.js")"
+    live="$(CLAUDE_PLUGIN_ROOT="$(dirname "$(dirname "$sp")")" bash "$sp" </dev/null | "$PY" -c 'import json,sys,hashlib; d=json.load(sys.stdin); c=d.get("hookSpecificOutput",{}).get("additionalContext") or d.get("additionalContext"); print(hashlib.sha256(c.encode()).hexdigest())')"
+    if [ "$pinned" = "$live" ]; then echo "PASS"; else echo "NOTE: installed superpowers bootstrap differs from the pinned fingerprint ($live); refresh KNOWN_BOOTSTRAP_SHA256"; fi
 fi
 
 # The mod's own suite needs the claude-code/testing kit, which only the CLI

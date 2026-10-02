@@ -5,7 +5,7 @@ repo="$(cd "$(dirname "$0")/.." && pwd)"
 . "$repo/tests/lib.sh"
 h="$(chez_sandbox)"
 chez_apply "$(chez_init personal)" "$h"
-for f in .bashrc .zshrc .gitconfig .config/shell/aliases.sh .config/starship.toml .claude/settings.json; do
+for f in .bashrc .zshrc .gitconfig .config/shell/aliases.sh .config/starship.toml .claude/settings.json .claude/mods/skill-trim/.claude-plugin/plugin.json .claude/mods/skill-trim/hooks/register.js; do
     [ -f "$h/$f" ] || { echo "FAIL: missing $f"; exit 1; }
 done
 echo "SMOKE OK"

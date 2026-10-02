@@ -53,13 +53,24 @@ DEFAULTS='{
 # listed (plugins installed by hand, the user's own skill overrides) are left
 # as they are. Lists are unioned rather than replaced, so a server denied
 # locally stays denied. Plugin skills ignore skillOverrides under any key
-# spelling, so hiding one means disabling its whole plugin in enabledPlugins.
+# spelling, so a single plugin skill is hidden by the skill-trim mod instead.
 #
 # deniedMcpServers, not disabledMcpServers: the latter is the per-project
 # /mcp toggle state Claude Code keeps in ~/.claude.json and is not read from
 # settings files. A deny here stops only Claude Code loading the connector;
 # it stays connected on claude.ai.
+#
+# CLAUDE_CODE_PLUGIN_DIRS loads the skill-trim mod in every session, including
+# ones started by apps that take no --plugin-dir flag. It is enforced because
+# the path is owned here: a stale on-disk value would silently drop the mod.
+# Claude Code wants a native path, so Git Bash's /c/... form is converted.
+SKILL_TRIM_DIR="$HOME/.claude/mods/skill-trim"
+if command -v cygpath >/dev/null 2>&1; then
+    SKILL_TRIM_DIR="$(cygpath -w "$SKILL_TRIM_DIR")"
+fi
+SKILL_TRIM_DIR_JSON="$(printf '%s' "$SKILL_TRIM_DIR" | sed 's/\\/\\\\/g')"
 ENFORCED='{
+  "env": { "CLAUDE_CODE_PLUGIN_DIRS": "'"$SKILL_TRIM_DIR_JSON"'" },
   "deniedMcpServers": [
     { "serverName": "claude.ai Gmail" },
     { "serverName": "claude.ai Atlassian Rovo" }

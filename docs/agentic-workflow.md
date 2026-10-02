@@ -66,8 +66,19 @@ Usage figures are from a 30-day transcript review.
   invocations.
 
 `skillOverrides` cannot trim inside a plugin: Claude Code ignores it for plugin
-skills under any key spelling (`tdd`, `mattpocock-skills:tdd`, …), so the only
-lever for an unwanted plugin skill is disabling its whole plugin.
+skills under any key spelling (`tdd`, `mattpocock-skills:tdd`, …). The
+**skill-trim** mod (`~/.claude/mods/skill-trim`, loaded in every session by
+`CLAUDE_CODE_PLUGIN_DIRS` in the settings template) does it instead: a
+`prompt.attachment` hook drops 15 unused atlassian, mattpocock-skills and
+superpowers skills from the skill listing, and they still run when invoked by
+name. A `classic.SessionStart` hook swaps superpowers' 3.4 KB
+`<EXTREMELY_IMPORTANT>` bootstrap for a 551 B version with the same routing
+(check for a matching skill first, process skills before implementation ones,
+CLAUDE.md wins); a controlled run on superpowers' issue tracker found the calm
+wording fired the right skill as often as the original. Together that is about
+8.4 KB less context per session. Edit the list in `hooks/register.js`, then run
+`claude plugin test` in the deployed directory. If superpowers rewrites its
+bootstrap, the new text passes through unchanged until the mod is updated.
 
 **caveman** stays enabled so `/caveman` and the cavecrew agents work, but its
 default mode is `off`. Measured net cost was about −$9 to −$13/month: Opus

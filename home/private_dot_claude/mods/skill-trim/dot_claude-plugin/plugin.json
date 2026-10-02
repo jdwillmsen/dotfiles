@@ -1,0 +1,6 @@
+{
+  "name": "skill-trim",
+  "version": "1.0.0",
+  "description": "Hides unused plugin skills from the skill listing and replaces the superpowers SessionStart bootstrap with a calm version",
+  "author": { "name": "Jake Willmsen" }
+}

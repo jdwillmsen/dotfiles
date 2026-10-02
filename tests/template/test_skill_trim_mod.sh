@@ -58,7 +58,7 @@ fi
 # When superpowers is installed, its live bootstrap must still match the
 # pinned fingerprint; a mismatch means the mod has gone quiet after an upstream
 # update and the fingerprint needs refreshing.
-sp="$(ls -d "$HOME"/.claude/plugins/cache/*/superpowers/*/hooks/session-start 2>/dev/null | sort -V | tail -n 1 || true)"
+sp="$(find "$HOME"/.claude/plugins/cache -path '*/superpowers/*/hooks/session-start' 2>/dev/null | sort -V | tail -n 1 || true)"
 if [ -n "$sp" ] && command -v node >/dev/null 2>&1; then
     pinned="$(sed -n "s/.*KNOWN_BOOTSTRAP_SHA256 = '\\([0-9a-f]*\\)'.*/\\1/p" "$mod/hooks/register.js")"
     live="$(CLAUDE_PLUGIN_ROOT="$(dirname "$(dirname "$sp")")" bash "$sp" </dev/null | "$PY" -c 'import json,sys,hashlib; d=json.load(sys.stdin); c=d.get("hookSpecificOutput",{}).get("additionalContext") or d.get("additionalContext"); print(hashlib.sha256(c.encode()).hexdigest())')"

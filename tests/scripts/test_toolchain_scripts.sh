@@ -15,6 +15,7 @@ shellcheck -s bash "$cli" "$py" "$cloud" "$go"
 # defect to flag, so shellcheck the on render — the one that actually runs.
 chez_render "$(chez_init personal true)" "$dev" | shellcheck -s bash -
 
+# Print the failure message ($1) and optional diagnostic output ($2), then exit 1.
 fail() { echo "FAIL: $1"; [ -z "${2:-}" ] || echo "--- $2"; exit 1; }
 
 # --- 42: the manager table ---------------------------------------------------
@@ -247,11 +248,14 @@ tf_run() {
         bash "${TF_SCRIPT:-$tft/cloud.sh}" 2>&1)" || tf_rc=$?
     [ "$tf_rc" -eq 0 ] || fail "cloud CLI script exited $tf_rc with terraform '${1:-absent}'" "$tf_out"
 }
+# Print the sandbox Terraform version, or nothing if its binary is absent.
 tf_have() {
     [ -x "$tf_bin" ] || return 0
     "$tf_bin" | sed -n '1s/^Terraform v//p'
 }
+# Assert the sandbox version equals $1; report $2 and the captured output on failure.
 tf_expect() { [ "$(tf_have)" = "$1" ] || fail "$2 (terraform is '$(tf_have)', want '$1')" "$tf_out"; }
+# Return success if the stub log records a ZIP archive download in the last run.
 tf_fetched() { grep -q '\.zip$' "$tf_log"; }
 
 tf_run ''

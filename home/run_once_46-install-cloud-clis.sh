@@ -45,11 +45,15 @@ version_lt() {
     return 1
 }
 
+# Print the numeric Terraform version on PATH; missing or unreadable versions
+# produce no output without failing the caller.
 terraform_version() {
     command -v terraform &>/dev/null || return 0
     terraform version 2>/dev/null | sed -n '1s/^Terraform v\([0-9][0-9.]*\).*/\1/p' || true
 }
 
+# Keep Terraform at or above TERRAFORM_MIN_VERSION, upgrading through a package
+# manager or a checksum-verified Linux x64 download when needed.
 install_terraform() {
     local have verb=install
     have="$(terraform_version)"

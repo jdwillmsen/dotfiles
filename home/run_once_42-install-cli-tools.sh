@@ -21,6 +21,7 @@ starship|starship|Starship.Starship|starship||starship
 fzf|fzf|junegunn.fzf|fzf|fzf|
 direnv|direnv|direnv.direnv|direnv|direnv|
 nvim|neovim|Neovim.Neovim|neovim|neovim|
+btop|btop|aristocratos.btop4win|btop|btop|
 sox|sox||sox|sox|
 cmake|cmake|Kitware.CMake|cmake|cmake|
 bwrap||||bubblewrap|

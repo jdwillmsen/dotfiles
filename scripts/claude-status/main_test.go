@@ -203,6 +203,51 @@ func testGit() *gitState {
 	return &gitState{Branch: "main", Ahead: 2, Behind: 1, Staged: 1, Modified: 3, Untracked: 4}
 }
 
+func TestRenderCompactFitsEveryLine(t *testing.T) {
+	git := &gitState{Branch: "feat/ABC-123-a-very-long-branch-name-that-cannot-fit", Ahead: 2, Behind: 1, Staged: 1, Modified: 3, Untracked: 4}
+	for _, cols := range []int{24, 30, 40, 52, 59} {
+		for _, line := range renderLines(fullPayload(), git, cols, false) {
+			if n := visibleLen(line); n > cols {
+				t.Errorf("cols=%d: line is %d wide: %q", cols, n, stripANSI(line))
+			}
+		}
+	}
+}
+
+func TestRenderCompactKeepsBranchKeyAndLimits(t *testing.T) {
+	git := &gitState{Branch: "feat/ABC-123-a-very-long-branch-name-that-cannot-fit", Modified: 3}
+	lines := renderLines(fullPayload(), git, 52, false)
+	if len(lines) != 2 {
+		t.Fatalf("compact at 52 cols: got %d lines, want 2:\n%s", len(lines), stripANSI(strings.Join(lines, "\n")))
+	}
+	joined := stripANSI(strings.Join(lines, "\n"))
+	for _, want := range []string{"ABC-123", "…", "~3", "ctx", "5h"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("compact: %q missing:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "$0.42") {
+		t.Errorf("compact: cost should be dropped:\n%s", joined)
+	}
+}
+
+func TestRenderCompactMovesBranchToOwnLineWhenTiny(t *testing.T) {
+	git := &gitState{Branch: "feat/ABC-123-a-very-long-branch-name-that-cannot-fit", Ahead: 2, Modified: 3}
+	lines := renderLines(fullPayload(), git, 24, false)
+	if len(lines) != 3 || !strings.HasPrefix(stripANSI(lines[1]), "⎇ ") {
+		t.Errorf("tiny: want model, branch, usage on separate lines:\n%s", stripANSI(strings.Join(lines, "\n")))
+	}
+}
+
+func TestFitSectionsKeepsFirstAndSkipsOverflow(t *testing.T) {
+	if got := fitSections(9, "|", "aaaa", "bbbbbbbb", "cc"); got != "aaaa|cc" {
+		t.Errorf("fitSections = %q, want %q", got, "aaaa|cc")
+	}
+	if got := fitSections(2, "|", "aaaa", "b"); got != "aaaa" {
+		t.Errorf("fitSections must keep the first section, got %q", got)
+	}
+}
+
 func TestRenderNarrowDropsRepoCostAndExtras(t *testing.T) {
 	lines := renderLines(fullPayload(), testGit(), 60, false)
 	if len(lines) > 2 {

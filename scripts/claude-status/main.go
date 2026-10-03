@@ -514,7 +514,7 @@ func fmtResetsAt(unixSec int64, usedPct float64) string {
 type tier int
 
 const (
-	narrow tier = iota // <80 cols: model + branch + context bar only
+	narrow tier = iota // 60–79 cols: model + branch + context bar only
 	normal             // default: two lines, diagnostics hidden
 	wide               // ≥140 cols: three lines, giant context bar
 )
@@ -538,6 +538,9 @@ func renderLines(p Payload, git *gitState, cols int, verbose bool) []string {
 }
 
 func renderLinesWithJira(p Payload, git *gitState, cols int, verbose bool, cfg *jiraConfig) []string {
+	if cols > 0 && cols < compactCols {
+		return renderCompact(p, git, cols)
+	}
 	t := layoutTier(cols)
 	showDiag := t == wide || verbose
 
@@ -574,22 +577,7 @@ func renderLinesWithJira(p Payload, git *gitState, cols int, verbose bool, cfg *
 	// Section: git context  (⎇ main ⑂wt ⇡2 ⇣1 +1 ~3 ?4 · owner/repo · PR #47 ✓)
 	var gitParts []string
 
-	branch, worktreeName := "", ""
-	switch {
-	case p.Worktree != nil:
-		worktreeName = p.Worktree.Name
-		branch = p.Worktree.Branch
-		if branch == "" && git != nil {
-			branch = git.Branch
-		}
-	case p.Workspace.GitWorktree != "":
-		worktreeName = p.Workspace.GitWorktree
-		if git != nil {
-			branch = git.Branch
-		}
-	case git != nil:
-		branch = git.Branch
-	}
+	branch, worktreeName := branchAndWorktree(p, git)
 
 	root := p.Workspace.GitWorktree
 	if root == "" {
@@ -611,23 +599,7 @@ func renderLinesWithJira(p Payload, git *gitState, cols int, verbose bool, cfg *
 		if worktreeName != "" {
 			b += " " + Gray + "⑂" + worktreeName + Reset
 		}
-		if git != nil {
-			if git.Ahead > 0 {
-				b += " " + Cyan + "⇡" + strconv.Itoa(git.Ahead) + Reset
-			}
-			if git.Behind > 0 {
-				b += " " + Purple + "⇣" + strconv.Itoa(git.Behind) + Reset
-			}
-			if git.Staged > 0 {
-				b += " " + Green + "+" + strconv.Itoa(git.Staged) + Reset
-			}
-			if git.Modified > 0 {
-				b += " " + Yellow + "~" + strconv.Itoa(git.Modified) + Reset
-			}
-			if git.Untracked > 0 {
-				b += " " + Gray + "?" + strconv.Itoa(git.Untracked) + Reset
-			}
-		}
+		b += gitCounts(git)
 		gitParts = append(gitParts, b)
 	}
 
@@ -818,6 +790,168 @@ func renderLinesWithJira(p Payload, git *gitState, cols int, verbose bool, cfg *
 		}
 	}
 	return out
+}
+
+// ── Compact layout ────────────────────────────────────────────────────────────
+// compactCols is the first width that no longer gets the compact layout. A phone
+// in portrait is about 50 columns, where the narrow tier's first line overflows
+// and is clipped.
+const compactCols = 60
+
+// minBranchRunes is the least branch text worth sharing a line with the model;
+// below it the branch moves to a line of its own.
+const minBranchRunes = 10
+
+var compactSep = " " + Gray + "│" + Reset + " "
+
+// renderCompact keeps every line within cols. The branch is never stripped of
+// its ticket key here: there is no room for a separate ticket segment.
+func renderCompact(p Payload, git *gitState, cols int) []string {
+	budget := cols - 2 // Claude Code clips an over-long line rather than wrapping it
+
+	model := ""
+	if label, marker := modelLabel(p.Model.ID, p.Model.DisplayName); label != "" {
+		model = Purple + Bold + "⬡ " + label + Reset
+		if marker != "" {
+			model += " " + Dim + marker + Reset
+		}
+	}
+
+	branch, worktreeName := branchAndWorktree(p, git)
+	if branch == "" {
+		branch = worktreeName
+	}
+
+	var lines []string
+	if branch == "" {
+		lines = append(lines, model)
+	} else {
+		counts := gitCounts(git)
+		const glyph = "⎇ "
+		ownLine := budget - visibleLen(glyph) - visibleLen(counts)
+		shared := ownLine - visibleLen(model) - visibleLen(compactSep)
+		seg := func(room int) string {
+			return Cyan + glyph + truncateRunes(branch, room) + Reset + counts
+		}
+		switch {
+		case model == "":
+			lines = append(lines, seg(ownLine))
+		case shared >= minBranchRunes || shared >= len([]rune(branch)):
+			lines = append(lines, model+compactSep+seg(shared))
+		default:
+			lines = append(lines, model, seg(ownLine))
+		}
+	}
+
+	ctx, ctxTokens := "", ""
+	if p.ContextWindow.UsedPercentage != nil {
+		pct := *p.ContextWindow.UsedPercentage
+		used := p.ContextWindow.TotalInputTokens
+		c := ctxColor(pct, p.ContextWindow.ContextWindowSize-used)
+		ctx = fmt.Sprintf("ctx %s %s%.0f%%%s", barWith(pct, 6, c), c, pct, Reset)
+		compactAt := autocompactPct()
+		if pct >= compactAt {
+			ctx += " " + BoldRed + "⚡" + Reset
+		} else if pct >= compactAt-5 {
+			ctx += " " + Red + "⚡" + Reset
+		}
+		ctxTokens = " " + Gray + fmtWindowTokens(used) + "/" + fmtWindowTokens(p.ContextWindow.ContextWindowSize) + Reset
+	}
+	var rates []string
+	if rl := p.RateLimits; rl != nil {
+		if fh := rl.FiveHour; fh != nil {
+			rates = append(rates, fmt.Sprintf("5h %s%.0f%%%s", pctColor(fh.UsedPercentage), fh.UsedPercentage, Reset))
+		}
+		if sd := rl.SevenDay; sd != nil {
+			rates = append(rates, fmt.Sprintf("7d %s%.0f%%%s", pctColor(sd.UsedPercentage), sd.UsedPercentage, Reset))
+		}
+	}
+	// Token counts are the first thing to go: the bar and percent already say it.
+	usage := fitSections(budget, compactSep, append([]string{ctx + ctxTokens}, rates...)...)
+	if visibleLen(usage) > budget || strings.Count(usage, compactSep) < len(rates) {
+		usage = fitSections(budget, compactSep, append([]string{ctx}, rates...)...)
+	}
+	lines = append(lines, usage)
+
+	var out []string
+	for _, l := range lines {
+		if l != "" {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// fitSections joins sections with sep in priority order, skipping any that
+// would push the line past budget. The first section is always kept.
+func fitSections(budget int, sep string, sections ...string) string {
+	line := ""
+	for _, s := range sections {
+		switch {
+		case s == "":
+		case line == "":
+			line = s
+		case visibleLen(line)+visibleLen(sep)+visibleLen(s) <= budget:
+			line += sep + s
+		}
+	}
+	return line
+}
+
+func truncateRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	if max < 2 {
+		return "…"
+	}
+	return string(r[:max-1]) + "…"
+}
+
+// branchAndWorktree resolves the branch and worktree name, preferring what
+// Claude Code reports over the git subprocess.
+func branchAndWorktree(p Payload, git *gitState) (branch, worktreeName string) {
+	switch {
+	case p.Worktree != nil:
+		worktreeName = p.Worktree.Name
+		branch = p.Worktree.Branch
+		if branch == "" && git != nil {
+			branch = git.Branch
+		}
+	case p.Workspace.GitWorktree != "":
+		worktreeName = p.Workspace.GitWorktree
+		if git != nil {
+			branch = git.Branch
+		}
+	case git != nil:
+		branch = git.Branch
+	}
+	return branch, worktreeName
+}
+
+// gitCounts renders ahead/behind and working-tree counts, each with a leading space.
+func gitCounts(git *gitState) string {
+	if git == nil {
+		return ""
+	}
+	s := ""
+	if git.Ahead > 0 {
+		s += " " + Cyan + "⇡" + strconv.Itoa(git.Ahead) + Reset
+	}
+	if git.Behind > 0 {
+		s += " " + Purple + "⇣" + strconv.Itoa(git.Behind) + Reset
+	}
+	if git.Staged > 0 {
+		s += " " + Green + "+" + strconv.Itoa(git.Staged) + Reset
+	}
+	if git.Modified > 0 {
+		s += " " + Yellow + "~" + strconv.Itoa(git.Modified) + Reset
+	}
+	if git.Untracked > 0 {
+		s += " " + Gray + "?" + strconv.Itoa(git.Untracked) + Reset
+	}
+	return s
 }
 
 // joinSections joins non-empty sections with sep.

@@ -14,10 +14,13 @@ import (
 
 // ── ANSI ──────────────────────────────────────────────────────────────────────
 const (
-	Reset   = "\033[0m"
-	Bold    = "\033[1m"
-	Dim     = "\033[2m"
-	Gray    = "\033[90m"
+	Reset = "\033[0m"
+	Bold  = "\033[1m"
+	Dim   = "\033[2m"
+	// Fixed 256-colour grey, not SGR 90: bright-black is whatever the terminal's
+	// theme says, and Ghostty-based terminals render it at ~3:1 on a dark
+	// background — unreadable on a phone. Index 247 is the same on every terminal.
+	Gray    = "\033[38;5;247m"
 	Red     = "\033[91m"
 	Green   = "\033[92m"
 	Yellow  = "\033[93m"

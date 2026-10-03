@@ -145,6 +145,16 @@ var ansiRe = regexp.MustCompile(`\033(\[[0-9;]*m|\]8;;[^\033]*\033\\)`)
 
 func stripANSI(s string) string { return ansiRe.ReplaceAllString(s, "") }
 
+// Line fitting counts visible runes, so a colour the width regexp misses would
+// truncate rows early.
+func TestVisibleLenIgnoresEveryColour(t *testing.T) {
+	for _, c := range []string{Bold, Dim, Gray, Red, Green, Yellow, Blue, Purple, Cyan, BoldRed} {
+		if got := visibleLen(c + "ab" + Reset); got != 2 {
+			t.Errorf("visibleLen(%q+\"ab\") = %d, want 2", c, got)
+		}
+	}
+}
+
 func fullPayload() Payload {
 	var p Payload
 	p.SessionID = "test"

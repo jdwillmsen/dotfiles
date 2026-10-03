@@ -555,16 +555,12 @@ func renderLinesWithJira(p Payload, git *gitState, cols int, verbose bool, cfg *
 	// ── LINE 1 ────────────────────────────────────────────────────────────────
 	// Section: model — ⬡ <label>, with the effort level when the model reports one.
 	var secModel string
-	vimPrefix := ""
-	if p.Vim != nil && p.Vim.Mode != "" {
-		vimPrefix = Gray + "[" + strings.ToLower(p.Vim.Mode[:1]) + "]" + Reset + " "
-	}
 	outputStyle := ""
 	if p.OutputStyle != nil && p.OutputStyle.Name != "" && p.OutputStyle.Name != "default" {
 		outputStyle = "  " + Dim + p.OutputStyle.Name + Reset
 	}
 	if label, marker := modelLabel(p.Model.ID, p.Model.DisplayName); label != "" {
-		s := vimPrefix + Purple + Bold + "⬡ " + label + Reset
+		s := vimPrefix(p) + Purple + Bold + "⬡ " + label + Reset
 		if marker != "" {
 			s += " " + Dim + marker + Reset
 		}
@@ -811,7 +807,7 @@ func renderCompact(p Payload, git *gitState, cols int) []string {
 
 	model := ""
 	if label, marker := modelLabel(p.Model.ID, p.Model.DisplayName); label != "" {
-		model = Purple + Bold + "⬡ " + label + Reset
+		model = vimPrefix(p) + Purple + Bold + "⬡ " + label + Reset
 		if marker != "" {
 			model += " " + Dim + marker + Reset
 		}
@@ -907,6 +903,13 @@ func truncateRunes(s string, max int) string {
 		return "…"
 	}
 	return string(r[:max-1]) + "…"
+}
+
+func vimPrefix(p Payload) string {
+	if p.Vim == nil || p.Vim.Mode == "" {
+		return ""
+	}
+	return Gray + "[" + strings.ToLower(p.Vim.Mode[:1]) + "]" + Reset + " "
 }
 
 // branchAndWorktree resolves the branch and worktree name, preferring what

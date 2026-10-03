@@ -85,12 +85,19 @@ rc=0
 err="$(HOME="$tmp/home" bash --norc -ic 'unset XDG_STATE_HOME; source "$1"' _ "$bashrc" 2>&1 >/dev/null)" || rc=$?
 echo "$err" | grep -q 'abc-123' || fail "an interactive bash did not show the notice" "$err"
 
-# No zsh dialect to execute against everywhere this runs, so the call is
-# asserted structurally: present, and after the loop that defines it.
-loop_line="$(grep -n 'shell/functions.sh' "$zshrc" | head -n 1 | cut -d: -f1 || true)"
-call_line="$(grep -n '&& t3_expiry_notice$' "$zshrc" | head -n 1 | cut -d: -f1 || true)"
-[ -n "$call_line" ] || fail "zshrc never calls t3_expiry_notice"
-[ -n "$loop_line" ] || fail "zshrc no longer sources functions.sh"
-[ "$call_line" -gt "$loop_line" ] || fail "zshrc calls t3_expiry_notice before sourcing functions.sh"
+# zsh is not on every box this runs on: where it is, start a real interactive
+# zsh against the sandbox; elsewhere fall back to checking an uncommented call
+# sits after the loop that defines it.
+if command -v zsh >/dev/null 2>&1; then
+    cp "$zshrc" "$tmp/home/.zshrc"
+    err="$(env -u XDG_STATE_HOME HOME="$tmp/home" ZDOTDIR="$tmp/home" zsh -ic 'exit' </dev/null 2>&1 >/dev/null)" || true
+    echo "$err" | grep -q 'abc-123' || fail "an interactive zsh did not show the notice" "$err"
+else
+    loop_line="$(grep -n '^[^#]*shell/functions\.sh' "$zshrc" | head -n 1 | cut -d: -f1 || true)"
+    call_line="$(grep -n '^[^#]*&& t3_expiry_notice[[:space:]]*$' "$zshrc" | head -n 1 | cut -d: -f1 || true)"
+    [ -n "$call_line" ] || fail "zshrc never calls t3_expiry_notice"
+    [ -n "$loop_line" ] || fail "zshrc no longer sources functions.sh"
+    [ "$call_line" -gt "$loop_line" ] || fail "zshrc calls t3_expiry_notice before sourcing functions.sh"
+fi
 
 echo "PASS"

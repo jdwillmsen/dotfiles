@@ -539,18 +539,11 @@ func renderLines(p Payload, git *gitState, cols int, verbose bool) []string {
 
 func renderLinesWithJira(p Payload, git *gitState, cols int, verbose bool, cfg *jiraConfig) []string {
 	if cols > 0 && cols < compactCols {
-		return renderCompact(p, git, cols)
+		return renderCompact(p, git, cols, cfg)
 	}
 	t := layoutTier(cols)
 	showDiag := t == wide || verbose
-
-	cwd := p.Workspace.CurrentDir
-	if cwd == "" {
-		cwd = p.Cwd
-	}
-	if cwd == "" {
-		cwd, _ = os.Getwd()
-	}
+	cwd := currentDir(p)
 
 	// ── LINE 1 ────────────────────────────────────────────────────────────────
 	// Section: model — ⬡ <label>, with the effort level when the model reports one.
@@ -575,11 +568,7 @@ func renderLinesWithJira(p Payload, git *gitState, cols int, verbose bool, cfg *
 
 	branch, worktreeName := branchAndWorktree(p, git)
 
-	root := p.Workspace.GitWorktree
-	if root == "" {
-		root = cwd
-	}
-	ticketKey := resolveTicketKey(root, branch, cfg)
+	ticketKey := resolveTicketKey(workspaceRoot(p, cwd), branch, cfg)
 	// Narrow drops the ticket segment, so the branch must keep the key there or
 	// it disappears from the statusline entirely.
 	if ticketKey != "" && t != narrow {
@@ -800,10 +789,10 @@ const minBranchRunes = 10
 
 var compactSep = " " + Gray + "│" + Reset + " "
 
-// renderCompact keeps every line within cols. The branch is never stripped of
-// its ticket key here: there is no room for a separate ticket segment.
-func renderCompact(p Payload, git *gitState, cols int) []string {
-	budget := cols - 2 // Claude Code clips an over-long line rather than wrapping it
+// renderCompact keeps every line within cols-2. There is no room for a separate
+// ticket segment, so the ticket key stays visible inside the branch label.
+func renderCompact(p Payload, git *gitState, cols int, cfg *jiraConfig) []string {
+	budget := max(cols-2, 1) // Claude Code clips an over-long line rather than wrapping it
 
 	model := ""
 	if label, marker := modelLabel(p.Model.ID, p.Model.DisplayName); label != "" {
@@ -811,9 +800,14 @@ func renderCompact(p Payload, git *gitState, cols int) []string {
 		if marker != "" {
 			model += " " + Dim + marker + Reset
 		}
+		if visibleLen(model) > budget {
+			room := budget - visibleLen(vimPrefix(p)) - visibleLen("⬡ ")
+			model = vimPrefix(p) + Purple + Bold + "⬡ " + truncateRunes(label, room) + Reset
+		}
 	}
 
 	branch, worktreeName := branchAndWorktree(p, git)
+	ticketKey := resolveTicketKey(workspaceRoot(p, currentDir(p)), branch, cfg)
 	if branch == "" {
 		branch = worktreeName
 	}
@@ -827,7 +821,7 @@ func renderCompact(p Payload, git *gitState, cols int) []string {
 		ownLine := budget - visibleLen(glyph) - visibleLen(counts)
 		shared := ownLine - visibleLen(model) - visibleLen(compactSep)
 		seg := func(room int) string {
-			return Cyan + glyph + truncateRunes(branch, room) + Reset + counts
+			return Cyan + glyph + compactBranchLabel(branch, ticketKey, room) + Reset + counts
 		}
 		switch {
 		case model == "":
@@ -851,6 +845,9 @@ func renderCompact(p Payload, git *gitState, cols int) []string {
 		} else if pct >= compactAt-5 {
 			ctx += " " + Red + "⚡" + Reset
 		}
+		if visibleLen(ctx) > budget {
+			ctx = fmt.Sprintf("ctx %s%.0f%%%s", c, pct, Reset)
+		}
 		ctxTokens = " " + Gray + fmtWindowTokens(used) + "/" + fmtWindowTokens(p.ContextWindow.ContextWindowSize) + Reset
 	}
 	var rates []string
@@ -871,11 +868,49 @@ func renderCompact(p Payload, git *gitState, cols int) []string {
 
 	var out []string
 	for _, l := range lines {
-		if l != "" {
-			out = append(out, l)
+		if l == "" {
+			continue
 		}
+		// Last resort for widths too small for any layout: plain text cut to fit
+		// beats a line the terminal clips mid-escape.
+		if visibleLen(l) > budget {
+			l = truncateRunes(ansiSeq.ReplaceAllString(l, ""), budget)
+		}
+		out = append(out, l)
 	}
 	return out
+}
+
+// compactBranchLabel fits branch into room runes. When truncation would cut the
+// ticket key, or an override key is not in the branch at all, the key leads.
+func compactBranchLabel(branch, key string, room int) string {
+	if key == "" || (len([]rune(branch)) <= room && strings.Contains(strings.ToUpper(branch), key)) {
+		return truncateRunes(branch, room)
+	}
+	rest := stripTicketKey(branch, key)
+	keyLen := len([]rune(key))
+	if strings.EqualFold(rest, key) || room < keyLen+3 {
+		return truncateRunes(key, room)
+	}
+	return key + " " + truncateRunes(rest, room-keyLen-1)
+}
+
+func currentDir(p Payload) string {
+	cwd := p.Workspace.CurrentDir
+	if cwd == "" {
+		cwd = p.Cwd
+	}
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	return cwd
+}
+
+func workspaceRoot(p Payload, cwd string) string {
+	if p.Workspace.GitWorktree != "" {
+		return p.Workspace.GitWorktree
+	}
+	return cwd
 }
 
 // fitSections joins sections with sep in priority order, skipping any that

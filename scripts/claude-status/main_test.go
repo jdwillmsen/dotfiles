@@ -660,6 +660,41 @@ func TestRenderTicketSegmentIsHyperlinked(t *testing.T) {
 	}
 }
 
+func TestRenderCompactKeepsTicketKeyWhenBranchTruncated(t *testing.T) {
+	cfg := &jiraConfig{SiteBase: "https://example.atlassian.net", Projects: []string{"JDWLABS"}}
+	git := &gitState{Branch: "feat/JDWLABS-123-a-very-long-branch-name-that-cannot-fit", Modified: 3}
+	for _, cols := range []int{24, 30, 40, 52} {
+		lines := renderLinesWithJira(jiraPayload(t), git, cols, false, cfg)
+		plain := stripANSI(strings.Join(lines, "\n"))
+		if strings.Count(plain, "JDWLABS-123") != 1 {
+			t.Errorf("cols=%d: want the key exactly once:\n%s", cols, plain)
+		}
+		for _, line := range lines {
+			if n := visibleLen(line); n > cols-2 {
+				t.Errorf("cols=%d: line is %d wide: %q", cols, n, stripANSI(line))
+			}
+		}
+	}
+}
+
+func TestRenderCompactNeverExceedsWidth(t *testing.T) {
+	p := fullPayload()
+	p.Model.ID = ""
+	p.Model.DisplayName = "An Unusually Long Model Display Name"
+	p.Vim = &struct {
+		Mode string `json:"mode"`
+	}{Mode: "NORMAL"}
+	git := &gitState{Branch: "feat/ABC-123-a-very-long-branch-name-that-cannot-fit", Ahead: 12, Behind: 3, Staged: 10, Modified: 30, Untracked: 40}
+	for cols := 1; cols < compactCols; cols++ {
+		limit := max(cols-2, 1)
+		for _, line := range renderLines(p, git, cols, false) {
+			if n := visibleLen(line); n > limit {
+				t.Errorf("cols=%d: line is %d wide, limit %d: %q", cols, n, limit, stripANSI(line))
+			}
+		}
+	}
+}
+
 func TestRenderTicketDroppedAtNarrow(t *testing.T) {
 	cfg := &jiraConfig{SiteBase: "https://example.atlassian.net", Projects: []string{"ABC"}}
 	git := &gitState{Branch: "feat/ABC-123-fix-login"}

@@ -207,7 +207,26 @@ func TestRenderCompactFitsEveryLine(t *testing.T) {
 	git := &gitState{Branch: "feat/ABC-123-a-very-long-branch-name-that-cannot-fit", Ahead: 2, Behind: 1, Staged: 1, Modified: 3, Untracked: 4}
 	for _, cols := range []int{24, 30, 40, 52, 59} {
 		for _, line := range renderLines(fullPayload(), git, cols, false) {
-			if n := visibleLen(line); n > cols {
+			if n := visibleLen(line); n > cols-2 {
+				t.Errorf("cols=%d: line is %d wide: %q", cols, n, stripANSI(line))
+			}
+		}
+	}
+}
+
+func TestRenderCompactShowsVimMode(t *testing.T) {
+	p := fullPayload()
+	p.Vim = &struct {
+		Mode string `json:"mode"`
+	}{Mode: "INSERT"}
+	git := &gitState{Branch: "feat/ABC-123-a-very-long-branch-name-that-cannot-fit", Modified: 3}
+	for _, cols := range []int{24, 52} {
+		lines := renderLines(p, git, cols, false)
+		if !strings.HasPrefix(stripANSI(lines[0]), "[i] ⬡ ") {
+			t.Errorf("cols=%d: want vim prefix before model:\n%s", cols, stripANSI(strings.Join(lines, "\n")))
+		}
+		for _, line := range lines {
+			if n := visibleLen(line); n > cols-2 {
 				t.Errorf("cols=%d: line is %d wide: %q", cols, n, stripANSI(line))
 			}
 		}

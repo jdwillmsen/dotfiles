@@ -21,6 +21,7 @@ pressure is how a five-minute outage becomes an hour.
 | `docker.service`, `containerd.service` | system | `run_once_49-install-dev-tools.sh.tmpl` (opt-in, via `chezmoi apply`) | yes | nothing — no containers, `docker0` is DOWN | `docker info` |
 | `t3-session-expiry.timer` → `.service` | user | `home/dot_config/systemd/user/`, enabled by `run_onchange_51-enable-t3-session-expiry.sh.tmpl` — **repo-owned** | yes, installed by a home apply; a box that has not applied since the units landed reads `not-found` here | — | `systemctl --user list-timers t3-session-expiry` |
 | `agent-audit-{weekly,biweekly,monthly,quarterly}.timer` → `agent-audit@.service` | user | `home/dot_config/systemd/user/`, enabled by `run_onchange_52-enable-agent-audit.sh.tmpl` — **repo-owned**; see [`agent-audit.md`](agent-audit.md) | yes, installed by a home apply; `not-found` until one runs | — | `systemctl --user list-timers 'agent-audit-*'` |
+| `atop.service`, `atopacct.service`, `atop-rotate.timer` | system | `scripts/provision-monitoring.sh` (root step) | yes | — | `atop -r /var/log/atop/atop_$(date +%Y%m%d)` |
 | `user@1000.service` + linger | system/user | `scripts/provision-persistence.sh` (root step) | `Linger=yes` | — | `loginctl show-user dev-admin -p Linger` |
 
 `Owned by` and `Enabled` answer different questions and can disagree. `Owned

@@ -59,6 +59,43 @@ detached tmux server has no active login session to hide behind. See
 tmux-resurrect/continuum into the full model, and why each layer alone is
 insufficient.
 
+## Workload monitoring
+
+```bash
+sudo scripts/provision-monitoring.sh
+```
+
+Two tools, split by when you need the answer:
+
+| Tool | Installed by | Answers |
+|---|---|---|
+| `btop` | `chezmoi apply` (CLI tool table, every platform) | What is loading the box *right now* — CPU, memory, per-disk I/O, per-process detail |
+| `atop` | this script (root, Linux only) | What was loading it *at 01:55 last night* |
+
+The recorded half exists because the failures worth diagnosing are rarely
+on screen when they happen. A T3 Code client showing "reconnecting" was traced
+to multi-second disk stalls on this box's virtual disk: T3 Code writes SQLite
+synchronously, so a slow write freezes the whole server, WebSocket included.
+Live tools showed only the aftermath.
+
+atop logs to `/var/log/atop` every 60 seconds instead of the package's 600,
+and keeps 14 days. A ten-minute average hides a stall of a few seconds; a
+one-minute one still dilutes it but leaves the process responsible visible.
+`atopacct` is enabled too, so processes that start and exit between samples
+are still recorded. Environment overrides: `ATOP_INTERVAL`,
+`ATOP_GENERATIONS`, `ATOP_LOGPATH`.
+
+Replaying a window:
+
+```bash
+atop -r /var/log/atop/atop_20261003 -b 01:50   # then t / T to step samples
+atop -r /var/log/atop/atop_20261003 -b 01:50 -d   # disk view: which process wrote
+```
+
+`/proc/pressure/io` is the quickest live yes/no on whether the disk is the
+bottleneck: a `full` average in the tens of percent means tasks are stalled
+waiting on I/O for that share of the time.
+
 ## Tailnet access
 
 A first run on an unauthenticated node prints a one-time login URL — an

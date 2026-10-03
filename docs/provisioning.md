@@ -83,7 +83,8 @@ and keeps 14 days. A ten-minute average hides a stall of a few seconds; a
 one-minute one still dilutes it but leaves the process responsible visible.
 `atopacct` is enabled too, so processes that start and exit between samples
 are still recorded. Environment overrides: `ATOP_INTERVAL`,
-`ATOP_GENERATIONS`, `ATOP_LOGPATH`.
+`ATOP_GENERATIONS`, `ATOP_LOGPATH`, and `ATOP_DEFAULTS` (the config file
+written, `/etc/default/atop`; redirected by the test so it runs without root).
 
 Replaying a window:
 
@@ -169,7 +170,7 @@ These run as part of `chezmoi apply` and need no root:
 
 | Script | Installs |
 |---|---|
-| `run_once_42-install-cli-tools.sh` | ripgrep, delta, fd, eza, zoxide, starship, fzf, direnv, nvim, sox (Claude Code voice mode's recorder, useful only on a host that has a microphone of its own), cmake, bubblewrap (Codex sandbox) |
+| `run_once_42-install-cli-tools.sh` | ripgrep, delta, fd, eza, zoxide, starship, fzf, direnv, nvim, btop, sox (Claude Code voice mode's recorder, useful only on a host that has a microphone of its own), cmake, bubblewrap (Codex sandbox) |
 | `run_onchange_43-install-agent-clis.sh.tmpl` | the CLIs the agent skills drive — version-pinned, see below |
 | `run_once_45-install-python-tools.sh` | uv, pipx |
 | `run_once_46-install-cloud-clis.sh` | terraform, aws, gcloud, az |

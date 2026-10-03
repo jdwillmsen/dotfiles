@@ -15,7 +15,8 @@ shellcheck -s bash "$cli" "$py" "$cloud" "$go"
 # defect to flag, so shellcheck the on render — the one that actually runs.
 chez_render "$(chez_init personal true)" "$dev" | shellcheck -s bash -
 
-fail() { echo "FAIL: $1"; exit 1; }
+# Print the failure message ($1) and optional diagnostic output ($2), then exit 1.
+fail() { echo "FAIL: $1"; [ -z "${2:-}" ] || echo "--- $2"; exit 1; }
 
 # --- 42: the manager table ---------------------------------------------------
 # read -r splits on a fixed field count, so a row with the wrong number of
@@ -149,6 +150,171 @@ grep -q 'TERRAFORM_FALLBACK_VERSION' "$cloud" || fail "terraform pinned fallback
 grep -q 'SHA256SUMS' "$cloud" || fail "terraform download not checksum-verified"
 grep -q 'checksums unavailable' "$cloud" || fail "terraform must refuse an unverifiable download"
 grep -q 'checksum mismatch' "$cloud" || fail "terraform mismatch not rejected"
+
+# The outage this covers was invisible to source-reading: the guard was
+# `command -v terraform`, so a binary older than the infrastructure tree's
+# required_version read as done and was never replaced. Only running the script
+# against a terraform that reports a *version* shows the difference.
+tf_min="$(sed -n 's/^TERRAFORM_MIN_VERSION=//p' "$cloud")"
+tf_fallback="$(sed -n 's/^TERRAFORM_FALLBACK_VERSION=//p' "$cloud")"
+if [ -z "$tf_min" ] || [ -z "$tf_fallback" ]; then fail "terraform version constants missing"; fi
+
+# No local EXIT trap: bash keeps one handler per signal, so installing one here
+# would replace the harness teardown. Allocating under its root lets it reap this.
+tft="$(mktemp -d "$CHEZ_TMP_ROOT/terraform.XXXXXXXX")"
+# The minimum is pinned in the copy under test so the cases below keep their
+# meaning when the real one moves.
+sed 's/^TERRAFORM_MIN_VERSION=.*/TERRAFORM_MIN_VERSION=1.16.3/' "$cloud" >"$tft/cloud.sh"
+tf_stub="$tft/stub"; tf_brew="$tft/brew"; tf_home="$tft/home"; tf_log="$tft/log"
+tf_bin="$tf_home/.local/bin/terraform"
+mkdir -p "$tf_stub" "$tf_brew"
+
+# The archive is a marker naming its own URL: the checksum stub can then derive
+# the matching digest, and the unzip stub the version to unpack.
+cat >"$tf_stub/curl" <<'SH'
+#!/usr/bin/env bash
+url="${!#}"; out=""
+while [ $# -gt 0 ]; do
+    if [ "$1" = -o ]; then out="$2"; fi
+    shift
+done
+echo "curl $url" >>"$STUB_LOG"
+case "$url" in
+    */releases/latest)
+        [ -n "${LATEST:-}" ] || exit 22
+        printf '{"tag_name": "v%s"}\n' "$LATEST"
+        ;;
+    *_SHA256SUMS)
+        v="${url##*/terraform_}"; v="${v%_SHA256SUMS}"
+        archive="terraform_${v}_linux_amd64.zip"
+        case "${SUMS_MODE:-ok}" in
+            missing) exit 22 ;;
+            bad) sum="$(printf 'tampered\n' | sha256sum)" ;;
+            *) sum="$(printf 'archive %s\n' "${url%/*}/$archive" | sha256sum)" ;;
+        esac
+        printf '%s  %s\n' "${sum%% *}" "$archive"
+        ;;
+    *.zip) printf 'archive %s\n' "$url" >"$out" ;;
+    *) exit 22 ;;
+esac
+SH
+cat >"$tf_stub/unzip" <<'SH'
+#!/usr/bin/env bash
+read -r _ url <"$2"
+v="${url##*/terraform_}"
+printf '#!/usr/bin/env bash\necho "Terraform v%s"\necho "on linux_amd64"\n' "${v%%_*}" >"$4/terraform"
+SH
+cat >"$tf_stub/uname" <<'SH'
+#!/usr/bin/env bash
+case "$1" in -s) echo Linux ;; -m) echo x86_64 ;; esac
+SH
+for present in aws gcloud az; do printf '#!/usr/bin/env bash\n' >"$tf_stub/$present"; done
+# BREW_LANDS is the version the manager's newest package carries; empty models
+# a formula that has nothing newer to offer. BREW_OWNS=0 models a terraform that
+# brew never installed, which it refuses to upgrade.
+cat >"$tf_brew/brew" <<'SH'
+#!/usr/bin/env bash
+echo "brew $*" >>"$STUB_LOG"
+if [ "$1" = upgrade ] && [ "${BREW_OWNS:-1}" = 0 ]; then exit 1; fi
+[ -n "${BREW_LANDS:-}" ] || exit 0
+printf '#!/usr/bin/env bash\necho "Terraform v%s"\n' "$BREW_LANDS" >"$TF_BIN"
+chmod 755 "$TF_BIN"
+SH
+chmod 755 "$tf_stub"/* "$tf_brew/brew"
+
+# A sealed PATH: inheriting the caller's would let this machine's real
+# terraform, curl and package managers answer for the stubs.
+tf_sys="$tft/sysbin"; mkdir -p "$tf_sys"
+for u in bash env sed head awk mktemp sha256sum install rm mkdir chmod; do
+    up="$(type -P "$u")" || true
+    [ -n "$up" ] || fail "cannot sandbox $u: no external binary"
+    ln -sf "$up" "$tf_sys/$u"
+done
+
+# $1 is the version already on the box ("" for absent).
+tf_run() {
+    : >"$tf_log"
+    rm -rf "$tf_home"; mkdir -p "${tf_bin%/*}"
+    if [ -n "$1" ]; then
+        printf '#!/usr/bin/env bash\necho "Terraform v%s"\necho "on linux_amd64"\n' "$1" >"$tf_bin"
+        chmod 755 "$tf_bin"
+    fi
+    local path="$tf_stub:$tf_sys"
+    [ "${WITH_BREW:-0}" = 0 ] || path="$tf_brew:$path"
+    tf_rc=0
+    tf_out="$(env -i PATH="$path" HOME="$tf_home" STUB_LOG="$tf_log" TF_BIN="$tf_bin" \
+        LATEST="${LATEST-9.9.9}" SUMS_MODE="${SUMS_MODE:-ok}" \
+        BREW_LANDS="${BREW_LANDS:-}" BREW_OWNS="${BREW_OWNS:-1}" \
+        bash "${TF_SCRIPT:-$tft/cloud.sh}" 2>&1)" || tf_rc=$?
+    [ "$tf_rc" -eq 0 ] || fail "cloud CLI script exited $tf_rc with terraform '${1:-absent}'" "$tf_out"
+}
+# Print the sandbox Terraform version, or nothing if its binary is absent.
+tf_have() {
+    [ -x "$tf_bin" ] || return 0
+    "$tf_bin" | sed -n '1s/^Terraform v//p'
+}
+# Assert the sandbox version equals $1; report $2 and the captured output on failure.
+tf_expect() { [ "$(tf_have)" = "$1" ] || fail "$2 (terraform is '$(tf_have)', want '$1')" "$tf_out"; }
+# Return success if the stub log records a ZIP archive download in the last run.
+tf_fetched() { grep -q '\.zip$' "$tf_log"; }
+
+tf_run ''
+tf_expect 9.9.9 "absent terraform was not installed"
+
+# 1.9.9 sorts above 1.16.3 as a string and 1.16.10 below it, so these two are
+# the cases a lexical comparison gets backwards.
+for old in 1.16.0 1.16.2 1.9.9 0.15.5; do
+    tf_run "$old"
+    tf_expect 9.9.9 "terraform $old is below the minimum but was not upgraded"
+done
+for current in 1.16.3 1.16.10 1.17.0 2.0.0; do
+    tf_run "$current"
+    tf_expect "$current" "terraform $current meets the minimum but was replaced"
+    if [ -s "$tf_log" ]; then fail "terraform $current still reached the network" "$(cat "$tf_log")"; fi
+done
+
+# A binary that reports no version cannot be shown to meet the minimum.
+tf_run 1.16.0
+printf '#!/usr/bin/env bash\nexit 1\n' >"$tf_bin"
+tf_out="$(env -i PATH="$tf_stub:$tf_sys" HOME="$tf_home" STUB_LOG="$tf_log" LATEST=9.9.9 \
+    bash "$tft/cloud.sh" 2>&1)" || fail "unreadable terraform aborted the script" "$tf_out"
+tf_expect 9.9.9 "terraform with no readable version was kept"
+
+LATEST='' tf_run 1.16.0
+tf_expect "$tf_fallback" "an unreachable release index did not fall back to the pinned version"
+# An offline machine installs the fallback, so a fallback under the real minimum
+# would upgrade to a binary the very next run rejects again.
+LATEST='' TF_SCRIPT="$cloud" tf_run "$tf_fallback"
+if [ -s "$tf_log" ]; then
+    fail "terraform fallback $tf_fallback is below the minimum $tf_min" "$tf_out"
+fi
+
+# An upgrade that cannot be verified must leave the working binary in place.
+for mode in bad missing; do
+    SUMS_MODE="$mode" tf_run 1.16.0
+    tf_fetched || fail "checksum case '$mode' never downloaded an archive" "$tf_out"
+    tf_expect 1.16.0 "terraform was replaced despite '$mode' checksums"
+done
+
+# Where a package manager owns the binary, it does the upgrade — and a package
+# that has nothing new enough is reported rather than passing as upgraded.
+WITH_BREW=1 BREW_LANDS=1.16.4 tf_run ''
+grep -qx 'brew install terraform' "$tf_log" || fail "absent terraform not installed through brew" "$tf_out"
+tf_expect 1.16.4 "brew install left no terraform behind"
+WITH_BREW=1 BREW_LANDS=1.16.4 tf_run 1.16.0
+grep -qx 'brew upgrade terraform' "$tf_log" || fail "old terraform not upgraded through brew" "$tf_out"
+tf_fetched && fail "brew-managed terraform was also downloaded directly" "$tf_out"
+echo "$tf_out" | grep -q 'still below' && fail "a successful brew upgrade reported as too old" "$tf_out"
+# A terraform brew never installed: the upgrade is refused, so brew installs its own.
+WITH_BREW=1 BREW_OWNS=0 BREW_LANDS=1.16.4 tf_run 1.16.0
+grep -qx 'brew install terraform' "$tf_log" ||
+    fail "a terraform brew does not own was not installed through brew" "$tf_out"
+tf_expect 1.16.4 "a terraform brew does not own stayed below the minimum"
+WITH_BREW=1 tf_run 1.16.0
+echo "$tf_out" | grep -q 'still below 1.16.3 after brew upgrade' ||
+    fail "a brew upgrade that left terraform too old went unreported" "$tf_out"
+WITH_BREW=1 tf_run 1.16.3
+if [ -s "$tf_log" ]; then fail "current terraform still invoked brew" "$(cat "$tf_log")"; fi
 
 # --- 47: go ------------------------------------------------------------------
 # The statusline build is the reason Go is here; a distro package that trails

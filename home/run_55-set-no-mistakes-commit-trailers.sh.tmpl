@@ -52,7 +52,8 @@ fi
 others="$(awk -v b="$begin" -v e="$end" '$0 == b { skip = 1 } !skip { print } $0 == e { skip = 0 }' "$config")"
 # A hand-written top-level commit: section would collide with the block's own
 # mapping key; YAML rejects the duplicate, so it is left for a human to merge.
-if printf '%s\n' "$others" | grep -q '^commit:'; then
+# Quoted and spaced spellings are the same key to a YAML loader.
+if printf '%s\n' "$others" | grep -Eq "^(commit|\"commit\"|'commit')[[:space:]]*:"; then
     echo "no-mistakes trailers: $config already has its own commit: section — add the trailers there by hand"
     exit 0
 fi

@@ -130,15 +130,19 @@ run_trigger "$h" "$new"
 echo "$out" | grep -q "markers .* are damaged" || fail "no diagnostic for damaged markers" "$out"
 [ "$before" = "$(cat "$h/.no-mistakes/config.yaml")" ] || fail "a config with damaged markers was rewritten"
 
-# ── A hand-written commit section is left for a human ──
-h="$(mktemp -d "$tmp/home.XXXXXX")"
-seed_config "$h"
-printf 'commit:\n  fix_message: "{{.Summary}}"\n' >>"$h/.no-mistakes/config.yaml"
-before="$(cat "$h/.no-mistakes/config.yaml")"
-run_trigger "$h" "$new"
-[ "$rc" -eq 0 ] || fail "trigger failed on a config with its own commit section" "$out"
-echo "$out" | grep -q "add the trailers there by hand" || fail "no diagnostic for an existing commit section" "$out"
-[ "$before" = "$(cat "$h/.no-mistakes/config.yaml")" ] || fail "an existing commit section was rewritten"
+# ── A hand-written commit section is left for a human, however it is spelled ──
+# A second commit mapping is a duplicate key, so every spelling a YAML loader
+# reads as "commit" must be recognised.
+for key in 'commit:' 'commit :' '"commit":' "'commit':"; do
+    h="$(mktemp -d "$tmp/home.XXXXXX")"
+    seed_config "$h"
+    printf '%s\n  fix_message: "{{.Summary}}"\n' "$key" >>"$h/.no-mistakes/config.yaml"
+    before="$(cat "$h/.no-mistakes/config.yaml")"
+    run_trigger "$h" "$new"
+    [ "$rc" -eq 0 ] || fail "trigger failed on a config with its own $key section" "$out"
+    echo "$out" | grep -q "add the trailers there by hand" || fail "no diagnostic for an existing $key section" "$out"
+    [ "$before" = "$(cat "$h/.no-mistakes/config.yaml")" ] || fail "an existing $key section was rewritten"
+done
 
 # ── An apply aimed elsewhere never touches the live home ──
 h="$(mktemp -d "$tmp/home.XXXXXX")"

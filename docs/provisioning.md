@@ -83,8 +83,8 @@ and keeps 14 days. A ten-minute average hides a stall of a few seconds; a
 one-minute one still dilutes it but leaves the process responsible visible.
 `atopacct` is enabled too, so processes that start and exit between samples
 are still recorded. Environment overrides: `ATOP_INTERVAL`,
-`ATOP_GENERATIONS`, `ATOP_LOGPATH`, and `ATOP_DEFAULTS` (the config file
-written, `/etc/default/atop`; redirected by the test so it runs without root).
+`ATOP_GENERATIONS`, `ATOP_LOGPATH`. The config always lands at
+`/etc/default/atop`, the one path every atop consumer reads.
 
 Replaying a window:
 

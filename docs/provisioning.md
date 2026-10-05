@@ -84,11 +84,12 @@ one-minute one still dilutes it but leaves the process responsible visible.
 `atopacct` is enabled too, so processes that start and exit between samples
 are still recorded. Environment overrides: `ATOP_INTERVAL`,
 `ATOP_GENERATIONS`, `ATOP_LOGPATH`. The first two must be positive whole
-numbers — atop reads a zero interval as "sample only on demand" — and the log
-path an absolute one of letters, digits, `.`, `_`, `-` and `/`, because a
-shell and systemd both parse the file and would disagree on anything else. A
-bad value stops the run before anything is installed or written. The config
-always lands at `/etc/default/atop`, the one path every atop consumer reads.
+numbers of at most nine digits — atop reads a zero interval as "sample only
+on demand" — and the log path an absolute one of letters, digits, `.`, `_`,
+`-` and `/`, because a shell and systemd both parse the file and would
+disagree on anything else. A bad value stops the run before anything is
+installed or written. The config always lands at `/etc/default/atop`, the one
+path every atop consumer reads.
 
 Replaying a window:
 

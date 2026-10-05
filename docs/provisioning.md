@@ -382,7 +382,7 @@ further:
 |---|---|---|
 | `npm` | exact, `npm install -g <pkg>@<version>` | the registry addresses versions directly |
 | `script` | checked afterwards, not passed in | the vendor ships a curl-pipe installer that resolves its own "latest" and accepts no version input |
-| `script` with `selfUpdate` | as `script`, then the tool's own updater | the installer only reaches the latest stable release; no-mistakes is pinned to a pre-release, which `no-mistakes update --beta` reaches. The updater restarts the daemon and refuses while a pipeline run is active. An apply during one reports the failure with the command to finish it, `no-mistakes update --beta --yes`; this script does not re-run until the declared version changes |
+| `script` with `selfUpdate` | as `script`, then the tool's own updater | the installer only reaches the latest stable release; no-mistakes is pinned to a pre-release, which `no-mistakes update --beta` reaches. The updater restarts the daemon and refuses while a pipeline run is active. An apply during one reports the failure with the command to finish it, `no-mistakes update --beta --yes`. A pin ahead of the newest published pre-release is reported the same way: the updater succeeds short of it, and the apply says to rerun that command once the pin is out. Either way this script does not re-run until the declared version changes |
 
 That asymmetry is announced rather than hidden: a `script` row re-reads the
 tool's version after installing and reports a mismatch against the declared

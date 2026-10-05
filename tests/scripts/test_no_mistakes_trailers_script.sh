@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 here="$(cd "$(dirname "$0")/../.." && pwd)"
-trigger="$here/home/run_onchange_55-set-no-mistakes-commit-trailers.sh.tmpl"
+trigger="$here/home/run_55-set-no-mistakes-commit-trailers.sh.tmpl"
 
 fail() {
     echo "FAIL: $1"
@@ -112,10 +112,23 @@ echo "$out" | grep -q "already set" || fail "converged run did not report a no-o
 [ "$before" = "$(cat "$h/.no-mistakes/config.yaml")" ] || fail "converged run rewrote the file"
 
 # ── A changed declaration replaces the block rather than adding a second ──
-sed -i 's/no-mistakes:{{\.Agent}}/stale:{{.Agent}}/' "$h/.no-mistakes/config.yaml"
+sed -i 's|no-mistakes/{{\.Agent}}|stale/{{.Agent}}|' "$h/.no-mistakes/config.yaml"
 run_trigger "$h" "$new"
 [ "$(trailers_of "$h")" = "$want_json" ] || fail "a stale managed block was not replaced" "$(trailers_of "$h")"
 grep -c '^commit:' "$h/.no-mistakes/config.yaml" | grep -qx 1 || fail "the rewrite left more than one commit key"
+
+# ── Damaged markers leave the file alone instead of truncating it ──
+# Stripping from a begin marker with no end would delete the rest of the file.
+h="$(mktemp -d "$tmp/home.XXXXXX")"
+seed_config "$h"
+run_trigger "$h" "$new"
+sed -i '/^# <<< commit.trailers/d' "$h/.no-mistakes/config.yaml"
+printf 'review_agent_timeout: "30m"\n' >>"$h/.no-mistakes/config.yaml"
+before="$(cat "$h/.no-mistakes/config.yaml")"
+run_trigger "$h" "$new"
+[ "$rc" -eq 0 ] || fail "trigger failed on damaged markers" "$out"
+echo "$out" | grep -q "markers .* are damaged" || fail "no diagnostic for damaged markers" "$out"
+[ "$before" = "$(cat "$h/.no-mistakes/config.yaml")" ] || fail "a config with damaged markers was rewritten"
 
 # ── A hand-written commit section is left for a human ──
 h="$(mktemp -d "$tmp/home.XXXXXX")"
@@ -139,20 +152,26 @@ grep -q "not the live home" "$tmp/scratch.out" ||
     fail "a scratch-destination apply did not announce the skip" "$(cat "$tmp/scratch.out")"
 [ "$before" = "$(cat "$h/.no-mistakes/config.yaml")" ] || fail "a scratch-destination apply rewrote the live config"
 
-# ── The re-run hash follows both the trailers and the declared version ──
-# A version bump must re-run the script, or a machine skipped as too old stays
-# without trailers after it upgrades.
+# ── Too old at one apply, upgraded by the next: the trailers arrive ──
+# The script runs on every apply, so an upgrade alone is enough; nothing in the
+# data has to change for a box that was skipped to catch up.
 h="$(mktemp -d "$tmp/home.XXXXXX")"
-base="$(render "$h")"
-for edit in 's/stale-never-matches//' 's/^    version: "v1\.88\.0"/    version: "v1.88.1"/' 's/no-mistakes:{{\.Agent}}/x:{{.Agent}}/'; do
-    src="$(mktemp -d "$tmp/src.XXXXXX")"
-    cp -a "$here/home" "$src/home"
-    sed -i "$edit" "$src/home/.chezmoidata.yaml"
-    touched="$(HOME="$h" chezmoi execute-template --source "$src/home" --destination "$h" <"$trigger")"
-    case "$edit" in
-        *stale-never-matches*) [ "$touched" = "$base" ] || fail "an unrelated render changed the re-run hash" ;;
-        *) [ "$touched" != "$base" ] || fail "edit '$edit' does not change the re-run hash" ;;
-    esac
-done
+seed_config "$h"
+run_trigger "$h" "$(fake_cli 1.87.1)"
+echo "$out" | grep -q "predates 1.88.0" || fail "an old binary was not skipped" "$out"
+run_trigger "$h" "$new"
+[ "$(trailers_of "$h")" = "$want_json" ] || fail "an upgraded box did not get the trailers" "$(trailers_of "$h")"
+
+# ── A trailer containing a single quote still renders as one literal value ──
+src="$(mktemp -d "$tmp/src.XXXXXX")"
+cp -a "$here/home" "$src/home"
+sed -i "s|^  - \"Assisted-by: |  - \"Assisted-by: it's |" "$src/home/.chezmoidata.yaml"
+h="$(mktemp -d "$tmp/home.XXXXXX")"
+seed_config "$h"
+HOME="$h" chezmoi execute-template --source "$src/home" --destination "$h" <"$trigger" >"$tmp/quoted.sh"
+HOME="$h" PATH="$new:$PATH" BASH_ENV=/dev/null "$bash_bin" "$tmp/quoted.sh" >"$tmp/quoted.out" 2>&1 ||
+    fail "a trailer with a single quote broke the script" "$(cat "$tmp/quoted.out")"
+yq -o=json -I=0 '.commit.trailers[1]' "$h/.no-mistakes/config.yaml" | grep -qF "Assisted-by: it's no-mistakes/" ||
+    fail "a trailer with a single quote was not written intact" "$(yq '.commit.trailers' "$h/.no-mistakes/config.yaml")"
 
 echo "PASS"

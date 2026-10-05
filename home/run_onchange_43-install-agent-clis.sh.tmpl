@@ -83,7 +83,7 @@ if [ -n "$have" ] && [ "${have#v}" != "${want#v}" ]; then
     if {{ .name }} {{ .selfUpdate }}; then
         confirm_version {{ .name | quote }} "$want"
     else
-        echo "{{ .name }} {{ .selfUpdate }} failed"
+        echo "{{ .name }} {{ .selfUpdate }} failed — run it once no pipeline run is active; the next chezmoi apply then finishes the setup"
     fi
 fi
 {{- end }}

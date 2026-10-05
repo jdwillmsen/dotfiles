@@ -133,4 +133,4 @@ noMistakesAgent: "[claude, codex, grok]"
 # Script 55 writes these into the tool's config.
 noMistakesCommitTrailers:
   - "Co-Authored-By: {{.Model}} via no-mistakes {{.Agent}} <noreply@no-mistakes.invalid>"
-  - "Assisted-by: no-mistakes:{{.Agent}}:{{.Model}}"
+  - "Assisted-by: no-mistakes/{{.Agent}}:{{.Model}}"

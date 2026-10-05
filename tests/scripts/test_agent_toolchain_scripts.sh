@@ -148,7 +148,7 @@ chmod +x "$stub"/* "$tmp/vendor-installer" "$tmp/nm-stub-writer"
 # and npm on this machine answer for the stubs, and every case below would
 # assert nothing.
 sysbin="$tmp/sysbin"; mkdir -p "$sysbin"
-for u in bash sh env head grep cat chmod rm printf; do
+for u in bash sh env head grep cat chmod rm printf sort; do
     up="$(type -P "$u")" || true
     [ -n "$up" ] || fail "cannot sandbox $u: no external binary"
     ln -sf "$up" "$sysbin/$u" || fail "cannot sandbox $u"
@@ -275,6 +275,13 @@ SEED_NM="v0.0.1" SEED_GNHF="$gnhf_want" VENDOR_VERSION="v0.5.0" run
 [ "$rc" -eq 0 ] || fail "beta-channel run failed" "$out"
 logged "^no-mistakes update --beta --yes\$" || fail "a pin past stable did not run the beta updater" "$(cat "$log")"
 echo "$out" | grep -q "no-mistakes: now at $nm_want" || fail "the beta updater did not reach the pin" "$out"
+
+# The newest pre-release is still below the pin: the updater succeeds without
+# reaching it, and the run must say how to finish rather than "reconcile".
+SEED_NM="v0.0.1" SEED_GNHF="$gnhf_want" VENDOR_VERSION="v0.5.0" BETA_VERSION="v0.6.0" run
+[ "$rc" -eq 0 ] || fail "a beta below the pin aborted the apply" "$out"
+echo "$out" | grep -q "no-mistakes: now at 0.6.0, below the declared $nm_want — run 'no-mistakes update --beta --yes' once $nm_want is published" ||
+    fail "a beta below the pin did not say how to finish" "$out"
 
 # Already at the pin: the updater is not touched, so a converged box does no network.
 SEED_NM="$nm_want" SEED_GNHF="$gnhf_want" run

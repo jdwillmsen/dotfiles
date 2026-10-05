@@ -13,7 +13,9 @@ set -euo pipefail
 ATOP_INTERVAL=${ATOP_INTERVAL:-60}
 ATOP_GENERATIONS=${ATOP_GENERATIONS:-14}
 ATOP_LOGPATH=${ATOP_LOGPATH:-/var/log/atop}
-ATOP_DEFAULTS=${ATOP_DEFAULTS:-/etc/default/atop}
+# Not a setting: atop.service and atop.daily both read /etc/default/atop, so
+# only the root it sits under moves, and only so the test can run unprivileged.
+ATOP_DEFAULTS="${PROVISION_ROOT:-}/etc/default/atop"
 
 die() { echo "provision-monitoring: $*" >&2; exit 1; }
 step() { echo; echo "== $*"; }
@@ -23,9 +25,19 @@ command -v apt-get &>/dev/null || die "needs apt-get (Debian-family only)"
 command -v systemctl &>/dev/null || die "needs systemd"
 for v in ATOP_INTERVAL ATOP_GENERATIONS; do
     case "${!v}" in
-        '' | *[!0-9]* | 0) die "$v must be a positive whole number, got '${!v}'" ;;
+        '' | *[!0-9]*) die "$v must be a positive whole number, got '${!v}'" ;;
     esac
+    # "00" is still zero: atop treats a zero interval as manual sampling only,
+    # and rotation as a zero-day cutoff. Base 10, so a leading 0 is not octal.
+    [ "$((10#${!v}))" -gt 0 ] || die "$v must be a positive whole number, got '${!v}'"
+    printf -v "$v" '%d' "$((10#${!v}))"
 done
+# atop.daily sources this file as shell while systemd reads it as an
+# EnvironmentFile; a space or shell metacharacter would point the logger and
+# the rotation at different directories, so allow only plain path characters.
+case "$ATOP_LOGPATH" in
+    /*[!A-Za-z0-9._/-]* | [!/]* | '') die "ATOP_LOGPATH must be an absolute path of letters, digits, . _ - and /, got '$ATOP_LOGPATH'" ;;
+esac
 
 step "atop"
 apt-get update -qq
@@ -35,6 +47,7 @@ step "logging config"
 # The package samples every 600s. Averaged over ten minutes, a disk stall of a
 # few seconds — long enough to drop every client WebSocket — reads as a quiet
 # interval. 60s still dilutes it, but leaves the culprit visible.
+mkdir -p "${ATOP_DEFAULTS%/*}"
 cat >"$ATOP_DEFAULTS" <<EOF
 LOGOPTS=""
 LOGINTERVAL=$ATOP_INTERVAL

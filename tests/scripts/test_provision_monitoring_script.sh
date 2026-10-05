@@ -26,6 +26,17 @@ echo "$c \$*" >>"$tmp/calls"
 EOF
     chmod +x "$tmp/bin/$c"
 done
+cat >>"$tmp/bin/apt-get" <<EOF
+[ "\$1" = install ] && echo "apt-get env DEBIAN_FRONTEND=\${DEBIAN_FRONTEND:-}" >>"$tmp/calls"
+exit 0
+EOF
+# The logger reads its config only at start, so what matters is the file as it
+# stood when the restart ran, not as it ends up.
+cat >>"$tmp/bin/systemctl" <<EOF
+if [ "\$*" = "restart atop.service" ]; then
+    cp "\$PROVISION_ROOT/etc/default/atop" "$tmp/at-restart" 2>/dev/null || : >"$tmp/at-restart"
+fi
+EOF
 
 run() {  # $1 = uid the stub id reports, rest = env assignments -> sets out, rc
     local uid="$1"
@@ -33,7 +44,7 @@ run() {  # $1 = uid the stub id reports, rest = env assignments -> sets out, rc
     printf '#!/usr/bin/env bash\necho %s\n' "$uid" >"$tmp/bin/id"
     chmod +x "$tmp/bin/id"
     : >"$tmp/calls"
-    rm -rf "$tmp/root"
+    rm -rf "$tmp/root" "$tmp/at-restart"
     rc=0
     out="$(env PATH="$tmp/bin:$PATH" PROVISION_ROOT="$tmp/root" "$@" \
         bash "$script" 2>&1)" || rc=$?
@@ -49,7 +60,10 @@ echo "$out" | grep -q "must run as root" || fail "no diagnostic without root" "$
 # ── default run ──
 run 0
 [ "$rc" -eq 0 ] || fail "default run failed" "$out"
-echo "$calls" | grep -qx "apt-get install -y -qq atop" || fail "atop not installed" "$calls"
+echo "$calls" | grep -qx "apt-get install -y -qq -o Dpkg::Options::=--force-confold atop" ||
+    fail "atop not installed keeping the local conffile" "$calls"
+echo "$calls" | grep -qx "apt-get env DEBIAN_FRONTEND=noninteractive" ||
+    fail "apt can still stop at an interactive prompt" "$calls"
 
 # The config is read by a shell (atop.daily) and by systemd as an
 # EnvironmentFile, so it is parsed the way they parse it, not grepped.
@@ -64,11 +78,11 @@ echo "$calls" | grep -q "^systemctl enable --now .*atop-rotate.timer" || fail "d
 echo "$calls" | grep -qx "systemctl enable atop.service" || fail "logger not enabled at boot" "$calls"
 
 # A logger already running keeps its old interval until restarted, so the
-# restart has to come after the config is written — i.e. after install.
-install_at="$(echo "$calls" | grep -n "apt-get install" | cut -d: -f1)"
-restart_at="$(echo "$calls" | grep -n "^systemctl restart atop.service$" | cut -d: -f1 || true)"
-[ -n "$restart_at" ] || fail "logger not restarted, so a new interval never applies" "$calls"
-[ "$restart_at" -gt "$install_at" ] || fail "logger restarted before install" "$calls"
+# restart has to see the config already written.
+grep -qx "systemctl restart atop.service" <<<"$calls" || fail "logger not restarted, so a new interval never applies" "$calls"
+# shellcheck disable=SC1091  # snapshot taken by the systemctl stub
+( . "$tmp/at-restart"
+  [ "${LOGINTERVAL:-}" = 60 ] || fail "logger restarted before its config was written" "$(cat "$tmp/at-restart")" )
 
 # ── overrides ──
 run 0 ATOP_INTERVAL=30 ATOP_GENERATIONS=3 ATOP_LOGPATH="$tmp/logs"
@@ -92,7 +106,7 @@ run 0 ATOP_INTERVAL=030 ATOP_GENERATIONS=08
 # atop with, so it must stop the run before any change is made.
 # shellcheck disable=SC2016  # the $(id) is a literal the script must reject
 for bad in "ATOP_INTERVAL=0" "ATOP_INTERVAL=00" "ATOP_INTERVAL=1m" \
-    "ATOP_GENERATIONS=-1" "ATOP_GENERATIONS=000" \
+    "ATOP_GENERATIONS=-1" "ATOP_GENERATIONS=000" "ATOP_INTERVAL=18446744073709551617" \
     "ATOP_LOGPATH=var/log/atop" "ATOP_LOGPATH=/var/log/at op" \
     'ATOP_LOGPATH=/var/log/$(id)' 'ATOP_LOGPATH=/var/log/a"b'; do
     run 0 "$bad"

@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Adds commit.trailers to no-mistakes' own config, so the fix commits its
+# pipeline makes name the agent and model behind them. Same reasoning as script
+# 54: the file is the tool's, extended by its upgrades, so this edits it in
+# place instead of chezmoi owning it. The block is fenced by markers so a later
+# apply replaces exactly what it wrote and nothing else.
+#
+# Rendering the wanted trailers and the declared CLI version is what retriggers
+# the run, so a version bump re-checks a machine that was too old last time:
+# want version: {{ range .agentClis }}{{ if eq .name "no-mistakes" }}{{ .version }}{{ end }}{{ end }}
+{{ if ne .chezmoi.destDir .chezmoi.homeDir -}}
+echo "no-mistakes trailers: applying to {{ .chezmoi.destDir }}, not the live home — skipping"
+exit 0
+{{ end -}}
+
+config="$HOME/.no-mistakes/config.yaml"
+# commit.trailers first shipped in this release. An older binary rejects the
+# unknown key, which would fail every pipeline run at config load.
+min="1.88.0"
+begin="# >>> commit.trailers - managed by dotfiles script 55 >>>"
+end="# <<< commit.trailers - managed by dotfiles script 55 <<<"
+
+if [ ! -f "$config" ]; then
+    echo "no-mistakes trailers: no $config — run 'no-mistakes init' in a repo first"
+    exit 0
+fi
+if ! command -v no-mistakes >/dev/null 2>&1; then
+    echo "no-mistakes trailers: no-mistakes is not installed — skipping"
+    exit 0
+fi
+have="$(no-mistakes --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
+if [ -z "$have" ] || [ "$(printf '%s\n%s\n' "$min" "$have" | sort -V | head -n1)" != "$min" ]; then
+    echo "no-mistakes trailers: installed ${have:-unknown version} predates $min, which added commit.trailers — skipping"
+    exit 0
+fi
+
+# Command substitution drops trailing newlines, which is what makes a re-run
+# reproduce the same file instead of growing a blank line each time.
+others="$(awk -v b="$begin" -v e="$end" '$0 == b { skip = 1 } !skip { print } $0 == e { skip = 0 }' "$config")"
+# A hand-written top-level commit: section would collide with the block's own
+# mapping key; YAML rejects the duplicate, so it is left for a human to merge.
+if printf '%s\n' "$others" | grep -q '^commit:'; then
+    echo "no-mistakes trailers: $config already has its own commit: section — add the trailers there by hand"
+    exit 0
+fi
+
+tmp="$(mktemp "${config}.XXXXXX")"
+{
+    printf '%s\n\n%s\n' "$others" "$begin"
+    printf 'commit:\n  trailers:\n'
+{{- range .noMistakesCommitTrailers }}
+    printf '    - %s\n' {{ . | toJson | squote }}
+{{- end }}
+    printf '%s\n' "$end"
+} >"$tmp"
+
+if cmp -s "$tmp" "$config"; then
+    rm -f "$tmp"
+    echo "no-mistakes trailers: already set"
+    exit 0
+fi
+# Same-directory temp plus mv so a daemon reading the file never sees a partial one.
+mv "$tmp" "$config"
+echo "no-mistakes trailers: commit.trailers written to $config"
+# The daemon reads its config at startup. Not restarted here: a restart during
+# an active run is the pipeline's business, not an apply's.
+echo "no-mistakes trailers: restart the daemon to pick this up — no-mistakes daemon restart"

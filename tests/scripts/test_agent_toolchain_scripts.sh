@@ -81,9 +81,22 @@ stub="$tmp/stub"; mkdir -p "$stub"
 cat >"$tmp/vendor-installer" <<'SH'
 #!/usr/bin/env bash
 echo "vendor-installer $VENDOR_VERSION" >>"$STUB_LOG"
+"$NM_STUB_WRITER" "$VENDOR_VERSION"
+SH
+
+# Writes the no-mistakes stub at a given version. Its `update` subcommand stands
+# in for the CLI's own updater: it lands on BETA_VERSION, the newest pre-release,
+# which the stable-only vendor installer can never reach.
+cat >"$tmp/nm-stub-writer" <<'SH'
+#!/usr/bin/env bash
 cat >"$STUB_DIR/no-mistakes" <<EOF
 #!/usr/bin/env bash
-echo "no-mistakes version $VENDOR_VERSION (deadbee) 2026-01-01T00:00:00Z"
+if [ "\${1:-}" = update ]; then
+    echo "no-mistakes \$*" >>"$STUB_LOG"
+    [ "\${UPDATE_MODE:-ok}" = ok ] || exit 1
+    exec "$NM_STUB_WRITER" "\$BETA_VERSION"
+fi
+echo "no-mistakes version $1 (deadbee) 2026-01-01T00:00:00Z"
 EOF
 chmod 755 "$STUB_DIR/no-mistakes"
 SH
@@ -129,7 +142,7 @@ echo "${spec##*@}"
 EOF
 chmod 755 "$STUB_DIR/gnhf"
 SH
-chmod +x "$stub"/* "$tmp/vendor-installer"
+chmod +x "$stub"/* "$tmp/vendor-installer" "$tmp/nm-stub-writer"
 
 # A sealed PATH: inheriting the caller's would let the real no-mistakes, gnhf
 # and npm on this machine answer for the stubs, and every case below would
@@ -191,7 +204,9 @@ run() {
         esac
         seed "$row" "$(declared "$row")"
     done
-    [ -z "${SEED_NM:-}" ] || seed no-mistakes "\"no-mistakes version $SEED_NM (cafe123) 2026-01-01T00:00:00Z\""
+    if [ -n "${SEED_NM:-}" ]; then
+        STUB_DIR="$stub" NM_STUB_WRITER="$tmp/nm-stub-writer" "$tmp/nm-stub-writer" "$SEED_NM"
+    fi
     [ -z "${SEED_GNHF:-}" ] || seed gnhf "$SEED_GNHF"
     local path="$stub:$sysbin"
     [ "${WITH_NPM:-1}" = 1 ] || path="$sysbin"
@@ -200,6 +215,8 @@ run() {
         STUB_LOG="$log" STUB_DIR="$stub" VENDOR_INSTALLER="$tmp/vendor-installer" \
         npm_config_prefix="$tmp/npm-global" \
         VENDOR_VERSION="${VENDOR_VERSION:-$nm_want}" \
+        BETA_VERSION="${BETA_VERSION:-$nm_want}" UPDATE_MODE="${UPDATE_MODE:-ok}" \
+        NM_STUB_WRITER="$tmp/nm-stub-writer" \
         CURSOR_VERSION="$(declared cursor-agent)" \
         CURL_MODE="${CURL_MODE:-ok}" NPM_MODE="${NPM_MODE:-ok}" \
         bash "$tmp/clis.sh" 2>&1)" || rc=$?
@@ -249,6 +266,26 @@ SEED_NM="v0.0.1" SEED_GNHF="$gnhf_want" VENDOR_VERSION="v9.9.9" run
 [ "$rc" -eq 0 ] || fail "vendor overshoot aborted the run" "$out"
 echo "$out" | grep -q "no-mistakes: now at 9.9.9, but $nm_want is declared" ||
     fail "vendor installing past the declared version was not reported" "$out"
+
+# ── Past the stable channel: the tool's own updater finishes the job ────────
+# The vendor installer only fetches the latest stable release. A pin on a
+# pre-release must then be reached with the CLI's beta updater, not reported as
+# an overshoot the repo can never reconcile.
+SEED_NM="v0.0.1" SEED_GNHF="$gnhf_want" VENDOR_VERSION="v0.5.0" run
+[ "$rc" -eq 0 ] || fail "beta-channel run failed" "$out"
+logged "^no-mistakes update --beta --yes\$" || fail "a pin past stable did not run the beta updater" "$(cat "$log")"
+echo "$out" | grep -q "no-mistakes: now at $nm_want" || fail "the beta updater did not reach the pin" "$out"
+
+# Already at the pin: the updater is not touched, so a converged box does no network.
+SEED_NM="$nm_want" SEED_GNHF="$gnhf_want" run
+if logged '^no-mistakes update'; then fail "a converged box still ran the updater" "$(cat "$log")"; fi
+
+# A refused update, such as one blocked by an active pipeline run, is reported
+# and the rest of the table still runs.
+SEED_NM="v0.0.1" SEED_GNHF="$gnhf_want" VENDOR_VERSION="v0.5.0" UPDATE_MODE=fail run
+[ "$rc" -eq 0 ] || fail "a failed update aborted the apply" "$out"
+echo "$out" | grep -q "no-mistakes update --beta --yes failed" || fail "no update-failure report" "$out"
+echo "$out" | grep -q "agent CLIs reconciled" || fail "run aborted after a failed update" "$out"
 
 # ── Unattended safety: no installer or package manager still exits clean ────
 SEED_NM='' SEED_GNHF='' WITH_NPM=0 run

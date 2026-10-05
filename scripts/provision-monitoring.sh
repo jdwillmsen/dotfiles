@@ -25,7 +25,9 @@ command -v apt-get &>/dev/null || die "needs apt-get (Debian-family only)"
 command -v systemctl &>/dev/null || die "needs systemd"
 for v in ATOP_INTERVAL ATOP_GENERATIONS; do
     case "${!v}" in
-        '' | *[!0-9]*) die "$v must be a positive whole number, got '${!v}'" ;;
+        # Nine digits bounds it below 64-bit arithmetic, which would wrap
+        # an absurd value into a small valid-looking one.
+        '' | *[!0-9]* | ??????????*) die "$v must be a positive whole number, got '${!v}'" ;;
     esac
     # "00" is still zero: atop treats a zero interval as manual sampling only,
     # and rotation as a zero-day cutoff. Base 10, so a leading 0 is not octal.
@@ -41,7 +43,10 @@ esac
 
 step "atop"
 apt-get update -qq
-apt-get install -y -qq atop
+# /etc/default/atop is a dpkg conffile this script rewrites, so an upgrade that
+# changes the packaged copy would stop at dpkg's keep-or-replace prompt. Keep
+# ours unasked; it is rewritten below either way.
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq -o Dpkg::Options::=--force-confold atop
 
 step "logging config"
 # The package samples every 600s. Averaged over ten minutes, a disk stall of a

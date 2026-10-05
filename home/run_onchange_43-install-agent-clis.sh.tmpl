@@ -74,6 +74,19 @@ else
 {{- end }}
 {{- end }}
 fi
+{{- if hasKey . "selfUpdate" }}
+# The installer above lands on the latest stable release; a pin past it is
+# reached through the tool's own updater, which also restarts its daemon and
+# refuses to while a pipeline run is active.
+have="$(installed_version {{ .name | quote }})"
+if [ -n "$have" ] && [ "${have#v}" != "${want#v}" ]; then
+    if {{ .name }} {{ .selfUpdate }}; then
+        confirm_version {{ .name | quote }} "$want"
+    else
+        echo "{{ .name }} {{ .selfUpdate }} failed"
+    fi
+fi
+{{- end }}
 {{ end }}
 # no-mistakes gates a repo, not a machine: `no-mistakes init` must be run inside
 # each repo you want routed through it, and that is also what installs the

@@ -59,7 +59,11 @@ agentSkills:
 agentClis:
   - name: no-mistakes
     kind: script
-    version: "v1.60.2"
+    version: "v1.88.0"
+    # The vendor installer only fetches the latest stable release, and the
+    # commit.trailers key script 55 writes first shipped in a pre-release, so
+    # the tool's own updater takes the box the rest of the way.
+    selfUpdate: "update --beta --yes"
     posixUrl: "https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.sh"
     windowsUrl: "https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.ps1"
   - name: gnhf
@@ -122,3 +126,11 @@ t3Providers:
 # grok's free Build quota. Failing over is worth having even when, as then,
 # every account behind the first is also free-tier.
 noMistakesAgent: "[claude, codex, grok]"
+# Trailers no-mistakes appends to the fix commits its pipeline makes, so they
+# carry the agent+model attribution every other AI-assisted commit here must.
+# Which agent made a fix depends on the fallback list above, so the email
+# cannot be any one vendor's; .invalid is reserved and never deliverable.
+# Script 55 writes these into the tool's config.
+noMistakesCommitTrailers:
+  - "Co-Authored-By: {{.Model}} via no-mistakes {{.Agent}} <noreply@no-mistakes.invalid>"
+  - "Assisted-by: no-mistakes:{{.Agent}}:{{.Model}}"

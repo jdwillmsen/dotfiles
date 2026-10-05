@@ -6,9 +6,10 @@ set -euo pipefail
 # place instead of chezmoi owning it. The block is fenced by markers so a later
 # apply replaces exactly what it wrote and nothing else.
 #
-# Rendering the wanted trailers and the declared CLI version is what retriggers
-# the run, so a version bump re-checks a machine that was too old last time:
-# want version: {{ range .agentClis }}{{ if eq .name "no-mistakes" }}{{ .version }}{{ end }}{{ end }}
+# A run_ script, not run_onchange_: a machine whose binary was too old, or whose
+# beta update was refused during an active pipeline run, must pick the trailers
+# up on the first apply after it upgrades, and run_onchange_ would only re-run
+# once the data changed. A converged run reads two files and exits.
 {{ if ne .chezmoi.destDir .chezmoi.homeDir -}}
 echo "no-mistakes trailers: applying to {{ .chezmoi.destDir }}, not the live home — skipping"
 exit 0
@@ -35,6 +36,17 @@ if [ -z "$have" ] || [ "$(printf '%s\n%s\n' "$min" "$have" | sort -V | head -n1)
     exit 0
 fi
 
+# A begin marker without its end, or markers out of order, means the block was
+# edited by hand; stripping from the begin marker to EOF would delete whatever
+# the tool wrote after it, so the file is left for a human instead.
+begins="$(grep -cxF -- "$begin" "$config" || true)"
+ends="$(grep -cxF -- "$end" "$config" || true)"
+if [ "$begins" != "$ends" ] || [ "$begins" -gt 1 ] ||
+    { [ "$begins" -eq 1 ] && [ "$(grep -nxF -- "$begin" "$config" | cut -d: -f1)" -gt "$(grep -nxF -- "$end" "$config" | cut -d: -f1)" ]; }; then
+    echo "no-mistakes trailers: the managed block markers in $config are damaged — fix them by hand"
+    exit 0
+fi
+
 # Command substitution drops trailing newlines, which is what makes a re-run
 # reproduce the same file instead of growing a blank line each time.
 others="$(awk -v b="$begin" -v e="$end" '$0 == b { skip = 1 } !skip { print } $0 == e { skip = 0 }' "$config")"
@@ -50,7 +62,7 @@ tmp="$(mktemp "${config}.XXXXXX")"
     printf '%s\n\n%s\n' "$others" "$begin"
     printf 'commit:\n  trailers:\n'
 {{- range .noMistakesCommitTrailers }}
-    printf '    - %s\n' {{ . | toJson | squote }}
+    printf '    - %s\n' {{ . | toJson | replace "'" "'\\''" | squote }}
 {{- end }}
     printf '%s\n' "$end"
 } >"$tmp"

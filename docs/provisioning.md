@@ -369,9 +369,11 @@ Script `55` adds `commit.trailers` to the same file, from
 agent and model behind them like every other AI-assisted commit here. It writes
 a block fenced by marker comments and replaces only that block on later runs.
 It skips, and says why, while the installed binary predates v1.88.0: an older
-one rejects the unknown key and would fail every run at config load. A
-hand-written top-level `commit:` section is left for a human to merge, since a
-second one is a duplicate YAML key.
+one rejects the unknown key and would fail every run at config load. It runs on
+every apply rather than on change, so a box that was too old picks the trailers
+up on the first apply after it upgrades. A hand-written top-level `commit:`
+section, or damaged block markers, are left for a human to fix, since a second
+`commit:` is a duplicate YAML key.
 
 The declared version is then enforced as far as each channel allows, and no
 further:
@@ -380,7 +382,7 @@ further:
 |---|---|---|
 | `npm` | exact, `npm install -g <pkg>@<version>` | the registry addresses versions directly |
 | `script` | checked afterwards, not passed in | the vendor ships a curl-pipe installer that resolves its own "latest" and accepts no version input |
-| `script` with `selfUpdate` | as `script`, then the tool's own updater | the installer only reaches the latest stable release; no-mistakes is pinned to a pre-release, which `no-mistakes update --beta` reaches. The updater restarts the daemon and refuses while a pipeline run is active, so an apply during one reports the failure and retries on the next |
+| `script` with `selfUpdate` | as `script`, then the tool's own updater | the installer only reaches the latest stable release; no-mistakes is pinned to a pre-release, which `no-mistakes update --beta` reaches. The updater restarts the daemon and refuses while a pipeline run is active. An apply during one reports the failure with the command to finish it, `no-mistakes update --beta --yes`; this script does not re-run until the declared version changes |
 
 That asymmetry is announced rather than hidden: a `script` row re-reads the
 tool's version after installing and reports a mismatch against the declared

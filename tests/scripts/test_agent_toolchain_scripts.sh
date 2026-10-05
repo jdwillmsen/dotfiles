@@ -205,7 +205,7 @@ run() {
         seed "$row" "$(declared "$row")"
     done
     if [ -n "${SEED_NM:-}" ]; then
-        STUB_DIR="$stub" NM_STUB_WRITER="$tmp/nm-stub-writer" "$tmp/nm-stub-writer" "$SEED_NM"
+        STUB_DIR="$stub" STUB_LOG="$log" NM_STUB_WRITER="$tmp/nm-stub-writer" "$tmp/nm-stub-writer" "$SEED_NM"
     fi
     [ -z "${SEED_GNHF:-}" ] || seed gnhf "$SEED_GNHF"
     local path="$stub:$sysbin"
@@ -284,7 +284,8 @@ if logged '^no-mistakes update'; then fail "a converged box still ran the update
 # and the rest of the table still runs.
 SEED_NM="v0.0.1" SEED_GNHF="$gnhf_want" VENDOR_VERSION="v0.5.0" UPDATE_MODE=fail run
 [ "$rc" -eq 0 ] || fail "a failed update aborted the apply" "$out"
-echo "$out" | grep -q "no-mistakes update --beta --yes failed" || fail "no update-failure report" "$out"
+echo "$out" | grep -q "no-mistakes update --beta --yes failed — run it once no pipeline run is active" ||
+    fail "a failed update did not say how to finish it" "$out"
 echo "$out" | grep -q "agent CLIs reconciled" || fail "run aborted after a failed update" "$out"
 
 # ── Unattended safety: no installer or package manager still exits clean ────

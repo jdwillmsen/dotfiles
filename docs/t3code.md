@@ -129,9 +129,8 @@ systemctl --user status t3-session-expiry.service
 
 A due run also drops `~/.local/state/t3-session-expiry.warn` naming the
 affected sessions; only a conclusive all-clear clears it, so an inconclusive
-run leaves a standing warning alone. The check re-derives nvm's node path for
-the same reason the generated `t3code.service` hardcodes one (see Operating
-notes): a systemd user unit inherits no interactive `PATH`.
+run leaves a standing warning alone. The check re-derives nvm's node path
+because a systemd user unit inherits no interactive `PATH`.
 
 A failed unit is only a verdict for someone who asks, so every interactive
 shell also prints the marker at startup (`t3_expiry_notice`, called from the
@@ -217,7 +216,8 @@ reaches neither `~/.local/bin` nor the version-managed npm prefix, which is
 every provider binary here — so without help each one fails to spawn.
 `~/.config/systemd/user/t3code.service.d/10-provider-path.conf` supplies a
 `PATH` covering both. It is a drop-in rather than an edit to the unit because
-`npx t3@latest service update` regenerates the unit and would drop the setting.
+T3 regenerates the unit on every install, repair and update, and would drop the
+setting.
 
 That file is static, and the moving part sits behind a name that is not:
 `~/.local/npm-bin` is a symlink script `52` points at the real npm global bin,
@@ -225,8 +225,8 @@ which lives under a version-managed node install. An earlier version resolved
 the prefix at render time instead, which made a managed file's content depend
 on the environment rendering it — an apply and a verify disagreed, and CI
 failed on drift that was real. After an nvm major-version change, run
-`chezmoi apply` alongside `npx t3@latest service update`: the apply repoints
-the symlink, the update regenerates the unit's own hardcoded node path.
+`chezmoi apply` to repoint the symlink; the unit itself does not depend on
+node (see Operating notes).
 
 ### OpenCode models
 
@@ -331,10 +331,12 @@ does not inherit from any shell. The drop-in described under
 [PATH](#path) supplies one; the alternative, if you ever need a binary outside
 it, is an explicit path set per provider in T3's settings.
 
-**The generated unit hardcodes an nvm-versioned node path** in `ExecStart`.
-Removing that node version breaks the service at next start, with no warning
-until then. `npx t3@latest service update` regenerates the unit against the
-current node; run it after any nvm major-version change.
+**The generated unit names a versioned path** in `ExecStart`:
+`~/.t3/runtime/versions/<version>/t3`, T3's self-contained binary, so the unit
+needs no node and an nvm change cannot break it. `npx t3@latest update` moves
+to a newer release and restarts the service; `npx t3@latest service install`
+repairs a unit that is missing or points at the wrong version.
+`service update` is deprecated and only repairs.
 
 ## State on disk
 

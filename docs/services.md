@@ -83,7 +83,7 @@ box with no tailnet.
   active version back while leaving the unit stopped. `Restart=always` does not
   cover it, because systemd does not restart a unit that was deliberately
   stopped — so the failure is silent and lasts until someone reaches for the
-  harness. A deliberate `npx t3@latest service update` recovered the same
+  harness. A deliberate `npx t3@latest service install` recovered the same
   version that had failed unattended. `devbox-health` is what surfaces it.
   [`t3code.md`](t3code.md) is the owner's manual — this document
   only claims the daemon exists and how to tell if it is up.
@@ -146,10 +146,10 @@ line:
   that file, not the journal, when the unit reads healthy and the server does
   not answer. Its rotation, and the rest of the `~/.t3` layout, are in
   [`t3code.md`](t3code.md#state-on-disk).
-- **`ExecStart` hardcodes an nvm-versioned interpreter path**, so a Node
-  upgrade that prunes that version breaks the service at its next start with no
-  warning until then — confirm the path after any nvm change. The recovery is
-  [`t3code.md`](t3code.md#operating-notes).
+- **`ExecStart` names a versioned path** — T3's self-contained binary under
+  `~/.t3/runtime/versions/<version>` — so T3 rewrites the unit on every version
+  switch and a Node upgrade does not touch it. Repairing a unit that points at
+  the wrong version is in [`t3code.md`](t3code.md#operating-notes).
 
 ## no-mistakes daemon — background half of the ship pipeline
 

@@ -57,6 +57,7 @@ w(".config/streams.json", json.dumps({"streams": {
     "jdwillmsen": {"jira": "JDW"}, "jdwlabs": {"jira": "JDWLABS"}, "dotablaze-tech": {"jira": "DOTA"}}}))
 w("projects/jdwlabs/r1/AGENTS.md", "x" * 40000 + "\n")
 w("projects/jdwillmsen/r2/AGENTS.md", "y\n")
+w("projects/dotablaze-tech/r1/AGENTS.md", "z\n")
 
 def asst(mid, model, ts, content, usage):
     return {"type": "assistant", "timestamp": ts, "entrypoint": "cli",
@@ -238,7 +239,10 @@ check 'j["disable_candidates"]["skills"]' "['alpha:unused-skill', 'gamma:g-skill
 check 'j["previous"]["sessions"], j["previous"]["tokens"]["output"]' "(1, 1000)" "previous window from transcripts"
 check 'j["coverage"]["files_scanned"], j["coverage"]["bad_lines"]' "(3, 1)" "old files skipped by mtime, bad lines counted"
 check '[f["path"] for f in j["instructions"]["files"] if f["flag"]]' "['~/AGENTS.md']" "instruction file over 200 lines"
-check '[c["flag"] for c in j["instructions"]["combined"]]' "['', '', 'over_32KiB']" "combined size flag"
+check '[c["flag"] for c in j["instructions"]["combined"]]' "['', '', '', 'over_32KiB']" "combined size flag"
+check '[c["set"].split(" (")[0] for c in j["instructions"]["combined"][1:]]' \
+    "['codex in dotablaze-tech/r1', 'codex in jdwillmsen/r2', 'codex in jdwlabs/r1']" \
+    "same-named repos under two owners get distinct combined-set labels"
 check 'j["prs"]["current"]["prs"], j["prs"]["current"]["body_words_median"], j["prs"]["current"]["generated_with_footer"]' \
     "(3, 10, 1)" "PR hygiene excludes dependency bots"
 check 'j["prs"]["current"]["ai_coauthored_commits"], j["prs"]["current"]["missing_assisted_by_examples"]' \

@@ -705,7 +705,8 @@ def instruction_health():
     combined = [{"set": "claude_global (user CLAUDE.md + ~/CLAUDE.md, with imports)",
                  "bytes": total(list(dict.fromkeys(claude_chain + home_chain)))}]
     for r in repos:
-        combined.append({"set": f"codex in {r.parent.name} (~/.codex + ~/AGENTS.md + repo)",
+        repo = r.parent.relative_to(HOME / "projects").as_posix()
+        combined.append({"set": f"codex in {repo} (~/.codex + ~/AGENTS.md + repo)",
                          "bytes": total([codex_global, HOME / "AGENTS.md", r])})
     for c in combined:
         c["flag"] = "over_32KiB" if c["bytes"] > INSTR_MAX_COMBINED else ""

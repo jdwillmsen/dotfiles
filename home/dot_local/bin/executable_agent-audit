@@ -685,7 +685,8 @@ def instruction_health():
         home_chain = [HOME / "AGENTS.md"]
     codex_global = HOME / ".codex/AGENTS.md"
     memories = sorted(Path(p) for p in glob.glob(str(CLAUDE_DIR / "projects/*/memory/MEMORY.md")))
-    repos = sorted(Path(p) for p in glob.glob(str(HOME / "projects/jdwlabs/*/AGENTS.md")))
+    repos = sorted({Path(p) for pattern in ("projects/*/AGENTS.md", "projects/*/*/AGENTS.md")
+                    for p in glob.glob(str(HOME / pattern))})
 
     files, seen = [], set()
     for p in claude_chain + home_chain + [codex_global] + memories + repos:
@@ -761,6 +762,17 @@ def pct(xs, q):
     return xs[min(len(xs) - 1, int(q * len(xs)))]
 
 
+def stream_owners():
+    """GitHub owners to measure: the stream map when readable, else the two
+    owners this audit started with — a missing map must not blank the section."""
+    try:
+        streams = json.loads((HOME / ".config/streams.json").read_text())["streams"]
+        owners = [o for o in streams if re.fullmatch(r"[A-Za-z0-9-]+", o)]
+    except (OSError, ValueError, KeyError, TypeError):
+        owners = []
+    return owners or ["jdwillmsen", "jdwlabs"]
+
+
 def gh_search(kind, date_flag, fields, start, end):
     """Fetch [start, end) completely despite the 1000-result search cap.
 
@@ -772,7 +784,8 @@ def gh_search(kind, date_flag, fields, start, end):
     rng = f"{start.isoformat()}..{(end - dt.timedelta(days=1)).isoformat()}"
     qual = date_flag.lstrip("-")
     endpoint = "search/issues" if kind == "prs" else "search/commits"
-    q = ("is:pr " if kind == "prs" else "") + f"user:jdwillmsen user:jdwlabs {qual}:{rng}"
+    owners = stream_owners()
+    q = ("is:pr " if kind == "prs" else "") + " ".join(f"user:{o}" for o in owners) + f" {qual}:{rng}"
     total = int(gh_json(["api", "-X", "GET", endpoint, "-f", f"q={q}", "-f", "per_page=1",
                          "--jq", ".total_count"]))
     days = (end - start).days
@@ -780,7 +793,7 @@ def gh_search(kind, date_flag, fields, start, end):
         return [], False
     if total <= GH_SEARCH_CAP or days <= 1:
         limit = min(total, GH_SEARCH_CAP)
-        rows = gh_json(["search", kind, "--owner", "jdwillmsen", "--owner", "jdwlabs", date_flag, rng,
+        rows = gh_json(["search", kind, *[x for o in owners for x in ("--owner", o)], date_flag, rng,
                         "--limit", str(limit), "--json", fields], pages=-(-limit // 100))
         return rows, total > GH_SEARCH_CAP
     mid = start + dt.timedelta(days=days // 2)
@@ -1015,7 +1028,7 @@ def render(m):
                [(c["set"], f"{c['bytes'] / 1024:.1f}", c["flag"] or "ok") for c in ih["combined"]])
     L.append("")
 
-    L += ["## PR hygiene (jdwillmsen, jdwlabs)", ""]
+    L += [f"## PR hygiene ({', '.join(stream_owners())})", ""]
     pc, pp = m["prs"]["current"], m["prs"]["previous"]
     if not pc.get("available"):
         L += [f"**Errored** — PR hygiene not measured: {pc.get('reason')}.", ""]

@@ -66,10 +66,18 @@ mkrepo e
 mkrepo f git@github.com:kunchenguid/no-mistakes.git
 git -C "$tmp/f" config stream.owner jdwillmsen
 git -C "$tmp/a" worktree add -q -b wt-inside "$tmp/inside" >/dev/null 2>&1
+# The slug becomes a directory under WT_BASE: segments that could climb out of
+# it must never be used, from the remote or from the override.
+mkrepo g git@github.com:../../escaped.git
+mkrepo h git@github.com:acme/widget.git
+git -C "$tmp/h" config stream.owner ../..
+mkrepo i git@github.com:acme/widget.git
+git -C "$tmp/i" config stream.owner a/b
 
 stream_bin="$here/home/dot_local/bin/executable_stream"
 for case in "a:jdwlabs/platform" "b:dotablaze-tech/platform" "c:jdwillmsen/career" \
-    "d:jdwillmsen/gameops" "e:e" "f:jdwillmsen/no-mistakes" "inside:jdwlabs/platform"; do
+    "d:jdwillmsen/gameops" "e:e" "f:jdwillmsen/no-mistakes" "inside:jdwlabs/platform" \
+    "g:g" "h:acme/widget" "i:acme/widget"; do
     dir="${case%%:*}" want="${case#*:}"
     got="$(slug_in "$tmp/$dir")"
     [ "$got" = "$want" ] || { echo "FAIL: __wt_project in $dir gave '$got', expected '$want'"; exit 1; }
@@ -86,6 +94,8 @@ done
 (cd "$tmp/inside" && WT_BASE="$tmp/wt" bash -c '. "$0"; gwta fix/nested' "$script" >/dev/null 2>&1)
 [ -d "$tmp/wt/jdwlabs/platform/fix/nested" ] \
     || { echo "FAIL: gwta from a linked worktree used the wrong namespace"; exit 1; }
+(cd "$tmp/g" && WT_BASE="$tmp/wt" bash -c '. "$0"; gwta fix/climb' "$script" >/dev/null 2>&1)
+[ -d "$tmp/wt/g/fix/climb" ] || { echo "FAIL: gwta with a climbing remote left WT_BASE"; exit 1; }
 rm -rf "$tmp"
 
 echo "PASS"

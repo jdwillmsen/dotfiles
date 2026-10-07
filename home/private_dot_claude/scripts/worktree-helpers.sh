@@ -31,13 +31,22 @@ __wt_repo_root() {
 # owner for a fork whose origin is upstream. Resolved from the remote and the
 # main checkout, never the cwd: a linked worktree's folder is named after its
 # branch. Must agree with `stream slug`.
+#
+# The result becomes a directory under WT_BASE, so a segment that could climb
+# out of it — from an odd remote or a bad override — is discarded.
+__wt_ok_segment() { [[ "$1" =~ ^[A-Za-z0-9_.-]+$ && "$1" != "." && "$1" != ".." ]]; }
+
 __wt_project() {
     local url slug owner root
     url=$(git remote get-url origin 2>/dev/null)
     url="${url%/}"
     url="${url%.git}"
     slug=$(printf '%s' "$url" | sed -nE 's#^.*[:/]([^/:]+)/([^/]+)$#\1/\2#p')
+    if [[ -n "$slug" ]] && ! { __wt_ok_segment "${slug%/*}" && __wt_ok_segment "${slug#*/}"; }; then
+        slug=""
+    fi
     owner=$(git config --get stream.owner 2>/dev/null)
+    __wt_ok_segment "$owner" || owner=""
     if [[ -z "$slug" ]]; then
         root=$(git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | head -1)
         [[ -n "$root" ]] || return 1

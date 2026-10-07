@@ -56,16 +56,18 @@ wtd feat/auth-jwt [-Force] [-KeepBranch]
 
 ## Worktree locations
 
-- Shell helpers: `~/worktrees/<project>/<type>/<name>` — global, outside repo.
+- Shell helpers: `~/worktrees/<owner>/<repo>/<type>/<name>` — global, outside
+  repo, namespaced by the repo's GitHub owner.
   Override with `export WT_BASE=~/worktrees` in `.bashrc` (already default).
 - Native `EnterWorktree` (agent sessions): `.claude/worktrees/<name>` inside
   the repo, created and cleaned by the tool.
 
 ```
 ~/worktrees/
-└── myapp/
-    ├── feat/auth-jwt/       ← worktree (shell)
-    └── fix/null-session/    ← worktree (shell)
+└── acme/
+    └── myapp/
+        ├── feat/auth-jwt/       ← worktree (shell)
+        └── fix/null-session/    ← worktree (shell)
 
 /c/repos/myapp/              ← main checkout (merge target only)
 └── .claude/worktrees/       ← worktrees (native tool)
@@ -123,8 +125,11 @@ Rename mid-session with `/rename`.
 
 ### `~/.config/claude-jira.json`
 
-Machine-local and never tracked — the site host identifies the company and the
-project keys name real projects:
+Machine-local. On a personal machine `chezmoi apply` generates it from the
+stream map (`stream jira-config --write`) and marks it with
+`"generatedFrom": "streams.json"`. A file without that marker was written by
+hand — typically an employer's site on a work machine — and is never
+replaced:
 
 ```json
 { "siteBase": "https://example.atlassian.net", "projects": ["ABC", "DEF"] }
@@ -133,3 +138,8 @@ project keys name real projects:
 Missing or unparseable means the feature is entirely off: no statusline segment,
 no `cj` naming. An empty `projects` list disables branch resolution
 specifically; the override file still works, since it is explicit.
+
+## `stream` — business stream per GitHub owner
+
+Resolves a repo's `<owner>/<repo>`, its Jira project, and the stream's open
+PRs and alerts. See [streams.md](streams.md).

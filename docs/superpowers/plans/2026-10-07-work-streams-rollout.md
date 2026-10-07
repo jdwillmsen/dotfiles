@@ -89,7 +89,7 @@ If the connector cannot create dashboards or gadgets, give the owner this table 
 
 - [ ] **Step 6: File the tracking Epic**
 
-Use the `jira-create` skill to file an Epic in `JDW`: "Separate work into per-business streams across Jira, GitHub and the devbox". Scope: this plan's Tasks 2–8. Acceptance criteria: the spec's Verification section. Record the key as `<EPIC>`; the cleanup PR in Task 7 uses branch `chore/<EPIC>-stream-docs-sweep`.
+The skill takes its project from the current repo, so first `cd` into a `jdwillmsen` repo (for example `~/projects/gameops`) and confirm `stream key` prints `JDW` — from `platform` it would file into `JDWLABS`. Then use the `jira-create` skill to file an Epic in `JDW`: "Separate work into per-business streams across Jira, GitHub and the devbox". Scope: this plan's Tasks 2–8. Acceptance criteria: the spec's Verification section. Record the key as `<EPIC>`; the cleanup PR in Task 7 uses branch `chore/<EPIC>-stream-docs-sweep`.
 
 - [ ] **Step 7: Report**
 

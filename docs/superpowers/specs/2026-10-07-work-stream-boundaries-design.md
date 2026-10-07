@@ -40,8 +40,8 @@ dotfiles reflects the structure, and the box is left clean.
 
 **A piece of work belongs to the stream of the GitHub owner of its repo.**
 
-`git remote get-url origin` yields `<owner>/<repo>`; everything else derives
-from `<owner>`. A fork whose `origin` is the upstream repo is assigned to its
+The owner and repo are parsed from the URL that `git remote get-url origin`
+returns; everything else derives from `<owner>`. A fork whose `origin` is the upstream repo is assigned to its
 real owner with `git config stream.owner <owner>` (`jdwillmsen/no-mistakes`). Work with no repo (brand, admin) belongs
 to the stream of the business it serves and is filed by hand.
 

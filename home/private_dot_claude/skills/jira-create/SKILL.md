@@ -22,14 +22,14 @@ Determine from conversation context:
 
 | Decision | How |
 |----------|-----|
-| **Issue type** | Bug = broken thing; Task = concrete work item; Spike = time-boxed investigation that ends in a decision or tickets, not a merge; Epic = multi-issue goal. JDWLABS has no Story type — file new capability as a Task |
-| **Project** | Default `JDWLABS`. If context implies another project, ask. |
+| **Issue type** | Bug = broken thing; Task = concrete work item; Spike = time-boxed investigation that ends in a decision or tickets, not a merge; Epic = multi-issue goal. These projects have no Story type — file new capability as a Task |
+| **Project** | Run `stream key` in the repo the work is for; its output is `<PROJECT>` for every step below. The project follows the repo's GitHub owner (`jdwillmsen` → `JDW`, with `career` → `CAREER`; `jdwlabs` → `JDWLABS`; `dotablaze-tech` → `DOTA`), not the directory the session happens to be in. If it exits 1, or the work belongs to no repo, ask which stream — never default. |
 | **Priority** | Derive from impact: P1=cluster down/data loss, P2=degraded service, P3=improvement, P4=low-impact cleanup |
 | **Summary draft** | `<Action verb> <specific noun> <context>` — ≤80 chars, no filler words |
 
 Call `getAccessibleAtlassianResources` to get `cloudId`. Cache it for all subsequent calls.
 
-Call `listJiraProjectIssueTypesMetadata` (via `executeRead`) to confirm the project's issue types; on JDWLABS they are Epic, Task, Bug, Spike and Subtask. If the type you picked is not listed, stop and ask — do not silently file it as a Task with a prefix like `Bug:`.
+Call `listJiraProjectIssueTypesMetadata` (via `executeRead`) to confirm the project's issue types; on JDWLABS they are Epic, Task, Bug, Spike and Subtask, and other projects may differ. If the type you picked is not listed, stop and ask — do not silently file it as a Task with a prefix like `Bug:`.
 
 ---
 
@@ -37,16 +37,18 @@ Call `listJiraProjectIssueTypesMetadata` (via `executeRead`) to confirm the proj
 
 **Purpose:** Every issue must have a parent. No orphans.
 
-**If the user already named the parent** (e.g. "put it under JDWLABS-131"): verify it exists and scope-fits via `getJiraIssue`, then skip the search below.
+**If the user already named the parent** (e.g. "put it under <PROJECT>-131"): verify it exists and scope-fits via `getJiraIssue`, then skip the search below.
 
 **Search strategy:**
 1. Extract 3-5 keywords from the issue context
 2. Call `search(cloudId, query="<keywords> Epic")` targeting Epics
-3. Also call `searchJiraIssuesUsingJql(cloudId, jql="project = JDWLABS AND issuetype = Epic AND text ~ '<keywords>' ORDER BY updated DESC")` for precision
+3. Also call `searchJiraIssuesUsingJql(cloudId, jql="project = <PROJECT> AND issuetype = Epic AND text ~ '<keywords>' ORDER BY updated DESC")` for precision
 4. Present top 3 Epic candidates with their summaries and status
 5. User picks one — OR — if no match, **pause and create the Epic first**
 
-**Dependency/duplicate sweep (feeds the draft's Dependencies section):** run one JQL over open issues with the same keywords (`project = JDWLABS AND statusCategory != Done AND text ~ '<keywords>'`). Record real Blocks/Blocked-by keys, link duplicates instead of re-filing, or write "none" — never from memory.
+**Dependency/duplicate sweep (feeds the draft's Dependencies section):** run one JQL over open issues with the same keywords (`project = <PROJECT> AND statusCategory != Done AND text ~ '<keywords>'`). Record real Blocks/Blocked-by keys, link duplicates instead of re-filing, or write "none" — never from memory.
+
+**Work that touches another stream:** the parent Epic is always in `<PROJECT>`. A dependency on another stream's ticket is recorded with a `Blocks` or `Relates` link to that ticket, never by parenting across projects — an Epic lives in exactly one project.
 
 **If Epic must be created first:**
 - Draft the Epic using the Epic template below
@@ -116,7 +118,7 @@ Build the complete issue draft. Use the typed template for the issue type. Fill 
 **Markdown with plain bullets.** Draft and ship the description as Markdown; `createJiraIssue` converts it to Jira's format server-side. That tool accepts only `markdown` or `html`, with no ADF input, and its Markdown path does not convert GFM task lists: `- [ ]` lands as literal escaped `\[ \]` text. So every list in the description, including Deliverables and Definition of Done, is a plain `- ` bullet. Headings, numbered lists, `**bold**`, inline code and fenced code blocks all convert cleanly.
 
 #### Bug Template
-Environment goes in the Bug's **Environment field**, not the description (see Full Field Set). Affects versions is not available: JDWLABS is a team-managed project and Jira does not offer that field on team-managed issue types.
+Environment goes in the Bug's **Environment field**, not the description (see Full Field Set). Affects versions is not available: every project on this site is team-managed and Jira does not offer that field on team-managed issue types.
 
 ```markdown
 ## Problem
@@ -146,15 +148,15 @@ Environment goes in the Bug's **Environment field**, not the description (see Fu
 [Immediate workaround if known. Link to fix PR if exists.]
 
 ## Dependencies
-- **Blocks:** [JDWLABS-XX or "none"]
-- **Blocked by:** [JDWLABS-XX or "none"]
+- **Blocks:** [<PROJECT>-XX or "none"]
+- **Blocked by:** [<PROJECT>-XX or "none"]
 
 ## Definition of Done
 [Compose from ## Reference: Definition of Done — universal core + Bug block + applicable work-surface block(s)]
 ```
 
 #### Spike Template
-The time-box is the **Due date** field, which JDWLABS makes required on Spikes: the create call is rejected without it. The exit condition has no field, so it lives in the description and is mandatory.
+The time-box is the **Due date** field, which JDWLABS makes required on Spikes (check other projects with getJiraIssueTypeMetaWithFields): the create call is rejected without it. The exit condition has no field, so it lives in the description and is mandatory.
 
 ```markdown
 ## Question
@@ -198,8 +200,8 @@ The time-box is the **Due date** field, which JDWLABS makes required on Spikes: 
 [How to do this. Not a novel — 3-5 bullet points max.]
 
 ## Dependencies
-- **Blocks:** [JDWLABS-XX or "none"]
-- **Blocked by:** [JDWLABS-XX or "none"]
+- **Blocks:** [<PROJECT>-XX or "none"]
+- **Blocked by:** [<PROJECT>-XX or "none"]
 
 ## Definition of Done
 - [Verifiable completion criterion]
@@ -276,7 +278,7 @@ JIRA DRAFT — [ISSUE TYPE] — [PROJECT]
 Summary:     [summary text]
 Type:        [Bug / Task / Spike / Epic]
 Priority:    [P1-P4 + name]
-Parent:      [JDWLABS-XX — Epic summary]
+Parent:      [<PROJECT>-XX — Epic summary]
 Assignee:    [name]
 Labels:      [label1, label2, ...]
 
@@ -322,7 +324,7 @@ Execute in this exact order:
      additional_fields={"duedate": "YYYY-MM-DD"}   # Spike only
    )
    ```
-   Capture the returned issue key (e.g., `JDWLABS-42`).
+   Capture the returned issue key (e.g., `<PROJECT>-42`).
 
    **Bug only:** then set Environment with `editJiraIssue(cloudId, issueIdOrKey, fields={"environment": "<markdown>"})`.
 
@@ -341,9 +343,9 @@ Execute in this exact order:
 
 4. **Report result**
    ```
-   ✅ Created JDWLABS-42 — [summary]
-   🔗 https://jdwillmsen.atlassian.net/browse/JDWLABS-42
-   👆 Parent: JDWLABS-XX — [epic summary]
+   ✅ Created <PROJECT>-42 — [summary]
+   🔗 https://jdwillmsen.atlassian.net/browse/<PROJECT>-42
+   👆 Parent: <PROJECT>-XX — [epic summary]
    ```
 
 ---

@@ -74,7 +74,7 @@ generated from the stream map by a chezmoi `run_onchange_` script so the two
 cannot drift. That file is created on this box as part of this work.
 
 Consumers: `worktree-helpers.sh`, `cj`, the statusline, `jira-create`,
-`agent-audit`.
+`agent-audit`, `stream status`.
 
 ## Jira
 
@@ -106,6 +106,22 @@ project's workflow changes.
 Whether the available Atlassian API can create dashboards and gadgets is
 unverified. If it cannot, the plan supplies the filters and exact gadget
 settings for a one-time manual build.
+
+## GitHub views
+
+Jira holds planning state; GitHub's per-stream view covers only what Jira
+cannot see — code in flight. No GitHub Projects boards are created.
+
+- **Saved PR search per stream**, documented in `docs/` as bookmarkable URLs:
+  `is:open is:pr archived:false` plus `user:jdwillmsen`, `org:jdwlabs` or
+  `org:dotablaze-tech`.
+- **Notification filter per stream** (`org:<owner>` / `owner:<owner>`), set
+  once by hand in GitHub's inbox settings; the exact filters are documented.
+- **`stream status [<owner>]`** — a new command in `home/dot_local/bin/`. For
+  one owner, or every stream in the map when none is given, it prints open PRs
+  with their check state, reviews requested from the user, and open
+  code-scanning and Dependabot alerts. It reads owners from the stream map,
+  uses `gh` only, mutates nothing, and follows AXI since agents run it too.
 
 ## Box layout
 
@@ -207,6 +223,8 @@ the specific list.
 - `/resume` in a moved repo lists its earlier sessions.
 - The JDWLABS board shows no issue whose epic targets a `jdwillmsen` repo.
 - The All streams dashboard shows all four projects.
+- `stream status` lists each owner's open PRs and matches the PR count of that
+  owner's saved search; `stream status jdwlabs` shows no `jdwillmsen` repo.
 - `chezmoi apply` is a no-op afterwards and `git status` in the source is clean.
 - A grep for the old flat paths across dotfiles and each repo's agent docs
   returns nothing.

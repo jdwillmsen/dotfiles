@@ -29,6 +29,9 @@ JIRA_CONFIG = HOME / ".config/claude-jira.json"
 GENERATED_FROM = "streams.json"
 KEY_RE = re.compile(r"[A-Z][A-Z0-9]{1,9}")
 REMOTE_RE = re.compile(r"^.*[:/]([^/:]+)/([^/]+?)(?:\.git)?$")
+SEGMENT_RE = re.compile(r"[A-Za-z0-9_.-]+")
+LOGIN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*")
+ALERT_PAGE = 100
 GH_TIMEOUT_S = 60
 PR_PAGE = 100
 TITLE_MAX = 58
@@ -132,6 +135,12 @@ def emit(obj):
     print(toon(obj))
 
 
+def ok_segment(s):
+    """A slug segment becomes a directory name, so it must not be able to
+    climb out of the worktree base."""
+    return bool(SEGMENT_RE.fullmatch(s)) and s not in (".", "..")
+
+
 def load_map():
     try:
         smap = json.loads(MAP_PATH.read_text())
@@ -143,9 +152,13 @@ def load_map():
     if not isinstance(streams, dict) or not streams:
         raise Fail(f"{MAP_PATH} (streams.json) has no streams")
     for owner, s in streams.items():
-        keys = [s.get("jira")] if isinstance(s, dict) else [None]
-        keys += list((s.get("repoOverrides") or {}).values()) if isinstance(s, dict) else []
-        for k in keys:
+        # Owners are sent to GitHub as search terms and command arguments.
+        if not LOGIN_RE.fullmatch(owner):
+            raise Fail(f"{MAP_PATH} (streams.json): invalid owner {owner!r}")
+        overrides = s.get("repoOverrides", {}) if isinstance(s, dict) else None
+        if not isinstance(overrides, dict):
+            raise Fail(f"{MAP_PATH} (streams.json): stream {owner} is malformed")
+        for k in [s.get("jira"), *overrides.values()]:
             if not isinstance(k, str) or not KEY_RE.fullmatch(k):
                 raise Fail(f"{MAP_PATH} (streams.json): stream {owner} has an invalid Jira key {k!r}")
     return smap
@@ -167,8 +180,11 @@ def slug(path):
     if not root:
         return None
     m = REMOTE_RE.match(git(path, "remote", "get-url", "origin").rstrip("/"))
+    if m and not (ok_segment(m.group(1)) and ok_segment(m.group(2))):
+        m = None
     name = m.group(2) if m else Path(root).name
-    owner = git(path, "config", "--get", "stream.owner") or (m.group(1) if m else "")
+    override = git(path, "config", "--get", "stream.owner")
+    owner = override if ok_segment(override) else (m.group(1) if m else "")
     return f"{owner}/{name}" if owner else name
 
 
@@ -325,18 +341,27 @@ def stream_alerts(owner):
         counts = {}
         for kind, col in (("dependabot", "dependabot"), ("code-scanning", "code_scanning")):
             r = gh(["api", "-X", "GET", f"repos/{owner}/{repo}/{kind}/alerts",
-                    "-f", "state=open", "-f", "per_page=100", "--jq", "length"])
+                    "-f", "state=open", "-f", f"per_page={ALERT_PAGE}", "--jq", "length"])
             n = r.stdout.strip()
             counts[col] = int(n) if r.returncode == 0 and n.isdigit() else None
         if None in counts.values():
             unmeasured += 1
         if any(counts.values()):
-            rows.append({"repo": repo, **{c: ("n/a" if v is None else v) for c, v in counts.items()}})
+            rows.append({"repo": repo, **{c: alert_cell(v) for c, v in counts.items()}})
     return rows, len(repos), unmeasured
 
 
+def alert_cell(n):
+    """One page is fetched, so a full page means "at least", never "exactly"."""
+    if n is None:
+        return "n/a"
+    return f"{n}+" if n >= ALERT_PAGE else n
+
+
 def alert_total(rows):
-    return sum(v for r in rows for v in (r["dependabot"], r["code_scanning"]) if isinstance(v, int))
+    cells = [v for r in rows for v in (r["dependabot"], r["code_scanning"]) if v != "n/a"]
+    total = sum(int(str(v).rstrip("+")) for v in cells)
+    return f"{total}+" if any(str(v).endswith("+") for v in cells) else total
 
 
 def status_detail(owner, s, with_alerts):
@@ -380,7 +405,10 @@ def cmd_status(args):
                "review_requested": sum(p["review"] == "requested" for p in prs),
                "failing": sum(p["checks"] == "failing" for p in prs)}
         if with_alerts:
-            row["alerts"] = alert_total(stream_alerts(owner)[0])
+            alerts, repos, unmeasured = stream_alerts(owner)
+            row["alerts"] = alert_total(alerts)
+            # A zero beside unmeasured repos is "not known", not "nothing to fix".
+            row["alerts_unmeasured"] = f"{unmeasured} of {repos} repos"
         rows.append(row)
     emit({"streams": rows, "help": ["stream status <owner>", "stream status --no-alerts"]})
     return 0
@@ -404,6 +432,10 @@ def main(argv):
     except Fail as e:
         emit({"error": str(e), **({"help": e.help} if e.help else {})})
         return e.code
+    except Exception as e:  # noqa: BLE001 — agents read stdout; a traceback there is noise
+        print(f"{type(e).__name__}: {e}", file=sys.stderr)
+        emit({"error": f"unexpected failure: {type(e).__name__}: {str(e)[:160]}"})
+        return 1
 
 
 if __name__ == "__main__":

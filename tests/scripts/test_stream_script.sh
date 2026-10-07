@@ -71,6 +71,16 @@ git -C "$tmp/repos/orphan" config stream.owner jdwillmsen
 cwd="$tmp/repos/orphan" run slug;    expect "jdwillmsen/orphan" "stream.owner applies with no remote"
 git -C "$tmp/repos/orphan" config --unset stream.owner
 
+# The slug becomes a directory under the worktree base, so a segment that could
+# climb out of it is never used.
+mkrepo climber git@github.com:../../escaped.git
+cwd="$tmp/repos/climber" run slug;   expect "climber" "a remote with .. segments falls back to the basename"
+git -C "$tmp/repos/platform" config stream.owner ../..
+cwd="$tmp/repos/platform" run slug;  expect "jdwlabs/platform" "a stream.owner with .. is ignored"
+git -C "$tmp/repos/platform" config stream.owner a/b
+cwd="$tmp/repos/platform" run slug;  expect "jdwlabs/platform" "a stream.owner with a slash is ignored"
+git -C "$tmp/repos/platform" config --unset stream.owner
+
 cwd="$tmp" run slug
 [ "$rc" -eq 1 ] && grep -q '^error: ' <<<"$out" || fail "slug outside a repo must be a structured error" "$out"
 
@@ -115,6 +125,13 @@ cwd="$tmp/repos/platform" run key
 echo '{"streams": {"x": {"jira": "lower"}}}' >"$fx/.config/streams.json"
 run
 [ "$rc" -eq 1 ] && grep -q '^error: ' <<<"$out" || fail "an invalid key in the map must be rejected" "$out"
+# Owners are sent to GitHub as search terms and arguments, so only a login shape is accepted.
+echo '{"jiraSite": "https://x.example", "streams": {"--web": {"jira": "ABC"}}}' >"$fx/.config/streams.json"
+run
+[ "$rc" -eq 1 ] && grep -q '^error: .*invalid owner' <<<"$out" || fail "an owner that is not a login must be rejected" "$out"
+echo '{"jiraSite": "https://x.example", "streams": {"ok": {"jira": "ABC", "repoOverrides": ["a"]}}}' >"$fx/.config/streams.json"
+run
+[ "$rc" -eq 1 ] && grep -q '^error: ' <<<"$out" || fail "a malformed repoOverrides must be a structured error, not a traceback" "$out$(cat "$tmp/stderr")"
 cp "$tmp/streams.bak" "$fx/.config/streams.json"
 
 # ── jira-config: generated allowlist for cj and the statusline ──
@@ -140,11 +157,17 @@ run jira-config --write
 [ "$rc" -eq 0 ] && grep -q '^status: kept' <<<"$out" || fail "a hand-written config must be kept" "$out"
 grep -q 'work.example.net' "$cfg" || fail "a hand-written config was overwritten"
 rm -f "$cfg"
+# Anything unexpected still reaches the caller as a structured error on stdout.
+chmod 500 "$fx/.config"
+run jira-config --write
+chmod 700 "$fx/.config"
+[ "$rc" -eq 1 ] && grep -q '^error: ' <<<"$out" || fail "an unwritable config dir must be a structured error" "$out$(cat "$tmp/stderr")"
 
 # ── status: GitHub's view of one stream, against a stub gh ──
 cat >"$stubs/gh" <<'STUB'
 #!/usr/bin/env python3
-# Modes: ok (fixture), fail (every call errors), many (more PRs than one page).
+# Modes: ok (fixture), fail (every call errors), many (more PRs than one page),
+# full (an alerts page comes back full).
 import json, os, re, sys
 args = sys.argv[1:]
 open(os.environ["STUB_LOG"], "a").write(" ".join(args) + "\n")
@@ -169,7 +192,7 @@ if args[:2] == ["repo", "list"]:
     sys.exit(0)
 if args[0] == "api":
     path = next(a for a in args if a.startswith("repos/"))
-    if path == "repos/jdwlabs/apps/dependabot/alerts": print(3); sys.exit(0)
+    if path == "repos/jdwlabs/apps/dependabot/alerts": print(100 if mode == "full" else 3); sys.exit(0)
     if path == "repos/jdwlabs/apps/code-scanning/alerts": print(0); sys.exit(0)
     if path == "repos/jdwlabs/platform/dependabot/alerts": print(0); sys.exit(0)
     sys.stderr.write("HTTP 404: Not Found\n"); sys.exit(1)
@@ -194,6 +217,7 @@ grep -q 'user:jdwlabs' "$tmp/log" || fail "PR search not scoped to the owner"
 grep -q 'jdwillmsen' <<<"$out" && fail "status jdwlabs leaked another stream" "$out"
 
 run status jdwlabs --no-alerts
+[ "$rc" -eq 0 ] && grep -q '^summary: ' <<<"$out" || fail "--no-alerts should still report PRs" "$out"
 grep -q '^alerts' <<<"$out" && fail "--no-alerts should skip alerts" "$out"
 
 run status dotablaze-tech
@@ -202,10 +226,18 @@ run status dotablaze-tech
 
 run status
 [ "$rc" -eq 0 ] || fail "status should exit 0" "$out"
-grep -q '^streams\[3\]{stream,jira,open_prs,review_requested,failing,alerts}:' <<<"$out" || fail "overview header wrong" "$out"
-grep -q '^  jdwlabs,JDWLABS,3,1,1,3$' <<<"$out" || fail "jdwlabs overview row wrong" "$out"
-grep -q '^  jdwillmsen,JDW,1,0,0,0$' <<<"$out" || fail "jdwillmsen overview row wrong" "$out"
-grep -q '^  dotablaze-tech,DOTA,0,0,0,0$' <<<"$out" || fail "empty stream overview row wrong" "$out"
+grep -q '^streams\[3\]{stream,jira,open_prs,review_requested,failing,alerts,alerts_unmeasured}:' <<<"$out" \
+    || fail "overview header wrong" "$out"
+grep -q '^  jdwlabs,JDWLABS,3,1,1,3,1 of 2 repos$' <<<"$out" || fail "jdwlabs overview row wrong" "$out"
+# gameops's alert endpoints both 404: the overview must say unmeasured, not a clean zero.
+grep -q '^  jdwillmsen,JDW,1,0,0,0,1 of 1 repos$' <<<"$out" || fail "unreadable alerts must not read as zero" "$out"
+grep -q '^  dotablaze-tech,DOTA,0,0,0,0,0 of 0 repos$' <<<"$out" || fail "empty stream overview row wrong" "$out"
+
+# A full page means "at least this many", never exactly this many.
+STUB_GH=full run status jdwlabs
+grep -q '^  apps,100+,0$' <<<"$out" || fail "a full alerts page must read 100+" "$out"
+STUB_GH=full run status
+grep -q '^  jdwlabs,JDWLABS,3,1,1,100+,1 of 2 repos$' <<<"$out" || fail "the overview total must carry the + of a capped count" "$out"
 
 STUB_GH=many run status jdwlabs --no-alerts
 grep -q '^summary: "250 open' <<<"$out" && grep -q '^truncated: "showing 3 of 250' <<<"$out" \

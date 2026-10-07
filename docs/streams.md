@@ -13,7 +13,10 @@ project, its folder under `~/projects`, and its worktree namespace.
 
 `~/.config/streams.json` (source: `home/dot_config/streams.json`) is the one
 place owners and project keys are written down. Adding a stream is one entry
-there; `chezmoi apply` then regenerates `~/.config/claude-jira.json`.
+there; on a personal machine `chezmoi apply` then regenerates
+`~/.config/claude-jira.json` (see
+[shell-helpers.md](shell-helpers.md#configclaude-jirajson) for when a
+hand-written file is kept).
 
 ## `stream`
 
@@ -23,9 +26,12 @@ stream slug               # jdwlabs/platform
 stream key                # JDWLABS
 stream status             # one row per stream: open PRs, reviews, failing, alerts
 stream status jdwlabs     # that stream's PRs with check state, and alerts
+stream status --no-alerts # skip the per-repo alert requests
+stream jira-config        # print the Jira allowlist; --write saves it
 ```
 
-Read-only against GitHub and Jira. Output is TOON for agents; errors are
+Read-only against GitHub and Jira. A repo whose alerts could not be read is
+counted as not measured, never as zero. Output is TOON for agents; errors are
 structured on stdout, exit 1 for a failure and 2 for a usage error.
 
 A fork whose `origin` is the upstream repo would resolve to the upstream

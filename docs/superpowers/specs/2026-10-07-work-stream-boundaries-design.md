@@ -41,8 +41,8 @@ dotfiles reflects the structure, and the box is left clean.
 **A piece of work belongs to the stream of the GitHub owner of its repo.**
 
 `git remote get-url origin` yields `<owner>/<repo>`; everything else derives
-from `<owner>`. A fork belongs to the fork's owner (`jdwillmsen/no-mistakes`),
-whatever `origin` currently points at. Work with no repo (brand, admin) belongs
+from `<owner>`. A fork whose `origin` is the upstream repo is assigned to its
+real owner with `git config stream.owner <owner>` (`jdwillmsen/no-mistakes`). Work with no repo (brand, admin) belongs
 to the stream of the business it serves and is filed by hand.
 
 | Stream | Jira project | Folder | Worktrees |
@@ -60,6 +60,7 @@ One tracked file, `home/dot_config/streams.json`, is the source of truth:
 
 ```json
 {
+  "jiraSite": "https://jdwillmsen.atlassian.net",
   "streams": {
     "jdwillmsen":     { "jira": "JDW",     "repoOverrides": { "career": "CAREER" } },
     "jdwlabs":        { "jira": "JDWLABS" },
@@ -68,10 +69,12 @@ One tracked file, `home/dot_config/streams.json`, is the source of truth:
 }
 ```
 
-It holds owner names and project keys only. The Jira site host stays in the
-machine-local, untracked `~/.config/claude-jira.json`, whose `projects` list is
-generated from the stream map by a chezmoi `run_onchange_` script so the two
-cannot drift. That file is created on this box as part of this work.
+It holds owner names, project keys and the Jira site, all of which the tracked
+`jira-create` skill already names. The machine-local
+`~/.config/claude-jira.json` is generated from it by a chezmoi `run_onchange_`
+script on personal machines, so the two cannot drift; a hand-written file — an
+employer's site on a work machine — is never replaced. That file is created on
+this box as part of this work.
 
 Consumers: `worktree-helpers.sh`, `cj`, the statusline, `jira-create`,
 `agent-audit`, `stream status`.
@@ -148,8 +151,9 @@ directory is renamed to the new encoding so `/resume` and memory survive.
 ## Tooling changes (all in chezmoi source)
 
 - `worktree-helpers.sh` — `__wt_project` returns `<owner>/<repo>` from the
-  origin remote, falling back to the basename when there is no remote. Listing
-  and cleanup walk two levels.
+  origin remote, falling back to the basename when there is no remote. `wtd`
+  already finds a worktree by branch wherever it lives, so old-layout
+  worktrees stay removable until they are re-homed.
 - `cj` and `claude-status` — no logic change; they gain the keys through the
   generated `claude-jira.json`. Tests add `JDW`, `DOTA` and `CAREER` cases.
 - `jira-create` skill — resolves the project from the current repo's owner via
@@ -193,8 +197,7 @@ the specific list.
    project dirs; verify; next repo. `dotablaze-tech` clones.
 4. **Ticket migration.** Signed-off list moved to `JDW`.
 5. **Cleanup.** Inventories, sign-off, removal.
-6. **Docs sweep.** Final pass so every reference matches the end state; drop
-   the old-layout fallback from the helpers.
+6. **Docs sweep.** Final pass so every reference matches the end state.
 
 ## Risks
 

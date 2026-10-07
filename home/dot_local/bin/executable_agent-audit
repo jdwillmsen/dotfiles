@@ -763,17 +763,22 @@ def pct(xs, q):
 
 
 def stream_owners():
-    """GitHub owners to measure: the stream map when readable, else the two
-    owners this audit started with — a missing map must not blank the section."""
+    """GitHub owners to measure, from the stream map. Raises rather than guess:
+    a partial owner list would be reported as if it covered every stream."""
+    path = HOME / ".config/streams.json"
     try:
-        streams = json.loads((HOME / ".config/streams.json").read_text())["streams"]
-        owners = [o for o in streams if re.fullmatch(r"[A-Za-z0-9-]+", o)]
-    except (OSError, ValueError, KeyError, TypeError):
-        owners = []
-    return owners or ["jdwillmsen", "jdwlabs"]
+        streams = json.loads(path.read_text())["streams"]
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise RuntimeError(f"stream map {path} unreadable: {e}")
+    if not isinstance(streams, dict) or not streams:
+        raise RuntimeError(f"stream map {path} has no streams")
+    bad = [o for o in streams if not re.fullmatch(r"[A-Za-z0-9-]+", o)]
+    if bad:
+        raise RuntimeError(f"stream map {path} has an invalid owner: {bad[0]!r}")
+    return list(streams)
 
 
-def gh_search(kind, date_flag, fields, start, end):
+def gh_search(kind, date_flag, fields, owners, start, end):
     """Fetch [start, end) completely despite the 1000-result search cap.
 
     GitHub search stops at 1000 results without saying so. A one-request
@@ -784,7 +789,6 @@ def gh_search(kind, date_flag, fields, start, end):
     rng = f"{start.isoformat()}..{(end - dt.timedelta(days=1)).isoformat()}"
     qual = date_flag.lstrip("-")
     endpoint = "search/issues" if kind == "prs" else "search/commits"
-    owners = stream_owners()
     q = ("is:pr " if kind == "prs" else "") + " ".join(f"user:{o}" for o in owners) + f" {qual}:{rng}"
     total = int(gh_json(["api", "-X", "GET", endpoint, "-f", f"q={q}", "-f", "per_page=1",
                          "--jq", ".total_count"]))
@@ -797,15 +801,16 @@ def gh_search(kind, date_flag, fields, start, end):
                         "--limit", str(limit), "--json", fields], pages=-(-limit // 100))
         return rows, total > GH_SEARCH_CAP
     mid = start + dt.timedelta(days=days // 2)
-    a, ta = gh_search(kind, date_flag, fields, start, mid)
-    b, tb = gh_search(kind, date_flag, fields, mid, end)
+    a, ta = gh_search(kind, date_flag, fields, owners, start, mid)
+    b, tb = gh_search(kind, date_flag, fields, owners, mid, end)
     return a + b, ta or tb
 
 
 def pr_hygiene(start, end):
     try:
-        prs, t1 = gh_search("prs", "--created", "number,repository,author,body,url", start, end)
-        commits, t2 = gh_search("commits", "--committer-date", "sha,commit,repository", start, end)
+        owners = stream_owners()
+        prs, t1 = gh_search("prs", "--created", "number,repository,author,body,url", owners, start, end)
+        commits, t2 = gh_search("commits", "--committer-date", "sha,commit,repository", owners, start, end)
     except (RuntimeError, subprocess.TimeoutExpired, ValueError) as e:
         # Errored, never empty: zero PRs must not be mistaken for a quiet window.
         return {"available": False, "errored": True, "reason": str(e)[:200]}
@@ -822,7 +827,7 @@ def pr_hygiene(start, end):
                 repo = r.get("fullName") or r.get("nameWithOwner") or "?"
                 missing.append(f"{repo}@{(c.get('sha') or '')[:7]}")
     return {
-        "available": True, "truncated": t1 or t2, "prs": len(prs),
+        "available": True, "owners": owners, "truncated": t1 or t2, "prs": len(prs),
         "body_words_median": int(statistics.median(words)) if words else 0,
         "body_words_p90": pct(words, 0.9),
         "generated_with_footer": len(footer), "generated_with_urls": footer[:10],
@@ -1028,8 +1033,8 @@ def render(m):
                [(c["set"], f"{c['bytes'] / 1024:.1f}", c["flag"] or "ok") for c in ih["combined"]])
     L.append("")
 
-    L += [f"## PR hygiene ({', '.join(stream_owners())})", ""]
     pc, pp = m["prs"]["current"], m["prs"]["previous"]
+    L += ["## PR hygiene" + (f" ({', '.join(pc['owners'])})" if pc.get("owners") else ""), ""]
     if not pc.get("available"):
         L += [f"**Errored** — PR hygiene not measured: {pc.get('reason')}.", ""]
     else:

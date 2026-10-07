@@ -53,6 +53,8 @@ w(".claude/skills/mine/SKILL.md", "---\nname: mine\n---\n")
 w(".claude/CLAUDE.md", "# global\n@RTK.md\n")
 w(".claude/RTK.md", "rtk\n")
 w("AGENTS.md", "line\n" * 250)
+w(".config/streams.json", json.dumps({"streams": {
+    "jdwillmsen": {"jira": "JDW"}, "jdwlabs": {"jira": "JDWLABS"}, "dotablaze-tech": {"jira": "DOTA"}}}))
 w("projects/jdwlabs/r1/AGENTS.md", "x" * 40000 + "\n")
 w("projects/jdwillmsen/r2/AGENTS.md", "y\n")
 
@@ -244,22 +246,10 @@ check 'j["prs"]["current"]["ai_coauthored_commits"], j["prs"]["current"]["missin
 grep -q -- "--created 2026-09-21..2026-09-27" "$log.gh" || fail "PR search not scoped to the window" "$(cat "$log.gh")"
 check '"~/projects/jdwillmsen/r2/AGENTS.md" in [f["path"] for f in j["instructions"]["files"]]' "True" \
     "instruction files found under every owner folder"
-# With no stream map the audit keeps its two original owners.
-grep -q -- "--owner jdwillmsen --owner jdwlabs --created" "$log.gh" || fail "default owners changed" "$(cat "$log.gh")"
-mkdir -p "$fx/.config"
-echo '{"streams": {"jdwillmsen": {"jira": "JDW"}, "jdwlabs": {"jira": "JDWLABS"}, "dotablaze-tech": {"jira": "DOTA"}}}' \
-    >"$fx/.config/streams.json"
-: >"$log.gh"
-run --window weekly --end 2026-09-28 --no-jira --no-insights --force
 grep -q -- "--owner jdwillmsen --owner jdwlabs --owner dotablaze-tech --created" "$log.gh" \
     || fail "PR hygiene must cover every stream in the map" "$(cat "$log.gh")"
 grep -q "user:jdwillmsen user:jdwlabs user:dotablaze-tech" "$log.gh" || fail "count query must cover every stream" "$(cat "$log.gh")"
 grep -q "^## PR hygiene (jdwillmsen, jdwlabs, dotablaze-tech)" "$md" || fail "report heading should name the streams measured"
-echo 'not json' >"$fx/.config/streams.json"
-: >"$log.gh"
-run --window weekly --end 2026-09-28 --no-jira --no-insights --force
-grep -q -- "--owner jdwillmsen --owner jdwlabs --created" "$log.gh" || fail "a broken stream map must fall back, not crash" "$out"
-rm -f "$fx/.config/streams.json"
 grep -q "Insights unavailable: --no-insights" "$md" || fail "report should say insights were skipped"
 grep -q "^| Output tokens | 160 | 1,000 | -84% |" "$md" || fail "headline delta row missing" "$(grep Output "$md")"
 
@@ -326,6 +316,20 @@ STUB_CLAUDE=slow AGENT_AUDIT_INSIGHTS_TIMEOUT=1 run --window weekly --end 2026-0
 STUB_GH=fail run --window weekly --end 2026-09-28 --dry-run --no-jira --no-insights
 [ "$rc" -eq 0 ] && grep -q "Errored.*GitHub search failed: HTTP 404" "$(field report)" || fail "gh failure should degrade" "$out"
 grep -q "^pr_hygiene: \"errored: " <<<"$out" || fail "errored PR hygiene must show in the summary" "$out"
+
+# ── Stream map missing or broken: errored, never a guessed owner list ──
+mv "$fx/.config/streams.json" "$tmp/streams.json"
+for broken in missing "not json" '{"streams": {}}' '{"streams": {"jdwlabs": {}, "bad owner": {}}}'; do
+    [ "$broken" = missing ] || echo "$broken" >"$fx/.config/streams.json"
+    : >"$log.gh"
+    run --window weekly --end 2026-09-28 --dry-run --no-jira --no-insights
+    [ "$rc" -eq 0 ] && grep -q "^pr_hygiene: \"errored: stream map " <<<"$out" \
+        || fail "stream map $broken: PR hygiene must report errored" "$out"
+    grep -q "^## PR hygiene$" "$(field report)" || fail "stream map $broken: heading claims owners it did not measure" "$(grep '^## PR' "$(field report)")"
+    grep -q "Errored.*stream map" "$(field report)" || fail "stream map $broken: report must say why PR hygiene is errored"
+    grep -q -e "--owner" -e "user:" "$log.gh" && fail "stream map $broken: no owner may be searched" "$(cat "$log.gh")"
+done
+mv "$tmp/streams.json" "$fx/.config/streams.json"
 
 # ── GitHub rate limit: wait for the reset and retry; errored if it persists ──
 rm -f "$log.gh-limited"

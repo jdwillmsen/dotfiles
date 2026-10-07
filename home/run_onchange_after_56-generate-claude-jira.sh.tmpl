@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Regenerate the Jira allowlist whenever the stream map changes, so cj and the
+# statusline cannot drift from it.
+# {{ include "dot_config/streams.json" | sha256sum }}
+# {{ include "dot_local/bin/executable_stream" | sha256sum }}
+{{ if ne .machineRole "personal" -}}
+# The stream map names personal businesses; any other role keeps whatever Jira
+# config it was given by hand.
+echo "claude-jira: machine role is {{ .machineRole }} — skipping"
+exit 0
+{{ else -}}
+stream="$HOME/.local/bin/stream"
+if [ ! -x "$stream" ] || ! command -v python3 >/dev/null 2>&1; then
+    echo "claude-jira: stream or python3 unavailable — skipping"
+    exit 0
+fi
+"$stream" jira-config --write
+{{ end -}}

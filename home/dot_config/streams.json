@@ -1,0 +1,8 @@
+{
+  "jiraSite": "https://jdwillmsen.atlassian.net",
+  "streams": {
+    "jdwillmsen": { "jira": "JDW", "repoOverrides": { "career": "CAREER" } },
+    "jdwlabs": { "jira": "JDWLABS" },
+    "dotablaze-tech": { "jira": "DOTA" }
+  }
+}

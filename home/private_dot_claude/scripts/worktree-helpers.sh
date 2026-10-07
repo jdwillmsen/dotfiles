@@ -4,7 +4,7 @@
 # Bash-only by construction: mapfile and 0-indexed arrays have no zsh
 # equivalent, so .zshrc deliberately does not source this.
 #
-# Worktrees: ~/worktrees/<project>/<type>/<name>   (override: export WT_BASE=...)
+# Worktrees: ~/worktrees/<owner>/<repo>/<type>/<name>   (override: export WT_BASE=...)
 # Commands:  gwt  gwta  gwtr  wts  wtd  wtp  wtst  wtclean
 #
 # shellcheck disable=SC2059  # colour codes are interpolated into every format
@@ -26,7 +26,28 @@ __wt_repo_root() {
         || { echo "[wt] Not in a git repo" >&2; return 1; }
 }
 
-__wt_project() { basename "$(__wt_repo_root 2>/dev/null)"; }
+# <owner>/<repo>, so a worktree lands under its business stream and two owners'
+# same-named repos cannot collide. `git config stream.owner` overrides the
+# owner for a fork whose origin is upstream. Resolved from the remote and the
+# main checkout, never the cwd: a linked worktree's folder is named after its
+# branch. Must agree with `stream slug`.
+__wt_project() {
+    local url slug owner root
+    url=$(git remote get-url origin 2>/dev/null)
+    url="${url%/}"
+    url="${url%.git}"
+    slug=$(printf '%s' "$url" | sed -nE 's#^.*[:/]([^/:]+)/([^/]+)$#\1/\2#p')
+    owner=$(git config --get stream.owner 2>/dev/null)
+    if [[ -z "$slug" ]]; then
+        root=$(git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | head -1)
+        [[ -n "$root" ]] || return 1
+        slug=$(basename "$root")
+        [[ -z "$owner" ]] || slug="$owner/$slug"
+    elif [[ -n "$owner" ]]; then
+        slug="$owner/${slug#*/}"
+    fi
+    printf '%s\n' "$slug"
+}
 
 __wt_branch_list() {
     git worktree list --porcelain 2>/dev/null \
@@ -50,7 +71,7 @@ __wt_branch_merged() {
     [[ "$n" =~ ^[0-9]+$ ]] && [[ "$n" -gt 0 ]]
 }
 
-# Short path: strips ~/worktrees/<project>/ prefix
+# Short path: strips ~/worktrees/<owner>/<repo>/ prefix
 # -l flag: keep full path
 __wt_path_display() {
     local path="$1" long="${2:-0}" project

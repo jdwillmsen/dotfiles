@@ -64,8 +64,9 @@ touched block; never comment out dead code. Match surrounding density.
 - Agent sessions: native `EnterWorktree` (branches fresh from origin).
   Terminal: `gwta` / `wtd` / `wtclean` (dotfiles `docs/shell-helpers.md`).
 - Branch names: `feat/`, `fix/`, `chore/`, `docs/`, `refactor/` + ticket key +
-  kebab-case — `feat/JDWLABS-123-fix-login-retry`. The key is what the
-  statusline and `cj` resolve; omit it only for work with no ticket.
+  kebab-case — `feat/JDWLABS-123-fix-login-retry`. The key's project is the
+  repo's stream (`stream key`); the statusline and `cj` resolve it. Omit the
+  key only for work with no ticket.
 - **main is a merge target only**: no direct commits or pushes — everything
   lands via PR with green CI (dotfiles enforces this with a GitHub ruleset).
 - **Refresh main immediately after every merge**: `git pull --ff-only`. If it

@@ -33,10 +33,19 @@ Flat, one directory per top-level project, no nested grouping folder.
   `infrastructure/`, `platform/`. Each has its own remote; treat them as
   unrelated repos that happen to share a parent folder.
 
-## Worktrees — `~/worktrees/<project>/<branch>`
+## Worktrees — `~/worktrees/<owner>/<repo>/<branch>`
 
-`WT_BASE` (default `~/worktrees`) may not exist until the first `gwta` run —
-its absence is not an error.
+`gwta` namespaces by the repo's GitHub owner, so `jdwlabs/platform` and
+`dotablaze-tech/platform` cannot collide. `WT_BASE` (default `~/worktrees`)
+may not exist until the first `gwta` run — its absence is not an error.
+
+## Streams — one per GitHub owner
+
+Each owner is a separate business with its own Jira project; the map is
+`~/.config/streams.json`. `stream key` prints the project for the current
+repo and `stream status <owner>` its open PRs and alerts. A fork whose origin
+is upstream is assigned with `git config stream.owner <owner>`. Detail:
+dotfiles `docs/streams.md`.
 
 ## Ticket-aware Claude launch — `cj`
 

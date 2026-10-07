@@ -141,6 +141,85 @@ run jira-config --write
 grep -q 'work.example.net' "$cfg" || fail "a hand-written config was overwritten"
 rm -f "$cfg"
 
+# ── status: GitHub's view of one stream, against a stub gh ──
+cat >"$stubs/gh" <<'STUB'
+#!/usr/bin/env python3
+# Modes: ok (fixture), fail (every call errors), many (more PRs than one page).
+import json, os, re, sys
+args = sys.argv[1:]
+open(os.environ["STUB_LOG"], "a").write(" ".join(args) + "\n")
+mode = os.environ.get("STUB_GH", "ok")
+if mode == "fail":
+    sys.stderr.write("HTTP 401: Bad credentials\n"); sys.exit(1)
+def pr(repo, n, title, state, decision="REVIEW_REQUIRED"):
+    return {"number": n, "title": title, "url": f"https://github.com/x/{repo}/pull/{n}", "isDraft": False,
+            "reviewDecision": decision, "repository": {"name": repo},
+            "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": state} if state else None}}]}}
+if args[:2] == ["api", "graphql"]:
+    owner = re.search(r"open=.*user:(\S+)", " ".join(args)).group(1)
+    nodes = {"jdwlabs": [pr("platform", 7, "feat: a, b", "SUCCESS"), pr("apps", 9, "fix: c", "FAILURE", "APPROVED"),
+                         pr("apps", 11, "x" * 90, None)],
+             "jdwillmsen": [pr("gameops", 3, "feat: d", "PENDING")]}.get(owner, [])
+    mine = [n for n in nodes if n["number"] == 7]
+    count = 250 if mode == "many" else len(nodes)
+    print(json.dumps({"data": {"open": {"issueCount": count, "nodes": nodes}, "mine": {"nodes": mine}}}))
+    sys.exit(0)
+if args[:2] == ["repo", "list"]:
+    print(json.dumps({"jdwlabs": ["apps", "platform"], "jdwillmsen": ["gameops"]}.get(args[2], [])))
+    sys.exit(0)
+if args[0] == "api":
+    path = next(a for a in args if a.startswith("repos/"))
+    if path == "repos/jdwlabs/apps/dependabot/alerts": print(3); sys.exit(0)
+    if path == "repos/jdwlabs/apps/code-scanning/alerts": print(0); sys.exit(0)
+    if path == "repos/jdwlabs/platform/dependabot/alerts": print(0); sys.exit(0)
+    sys.stderr.write("HTTP 404: Not Found\n"); sys.exit(1)
+sys.exit(1)
+STUB
+chmod +x "$stubs/gh"
+
+run status jdwlabs
+[ "$rc" -eq 0 ] || fail "status jdwlabs should exit 0" "$out$(cat "$tmp/stderr")"
+grep -q '^summary: "3 open, 1 awaiting your review, 1 failing"' <<<"$out" || fail "status summary wrong" "$out"
+grep -q '^pull_requests\[3\]{repo,number,checks,review,title}:' <<<"$out" || fail "PR table header wrong" "$out"
+grep -q '^  platform,7,passing,requested,"feat: a, b"$' <<<"$out" || fail "review-requested PR row wrong" "$out"
+grep -q '^  apps,9,failing,approved,' <<<"$out" || fail "failing PR row wrong" "$out"
+grep -q '^  apps,11,none,' <<<"$out" || fail "a PR with no checks should read 'none'" "$out"
+grep -q 'x\{57\}…' <<<"$out" || fail "long titles should be clipped" "$out"
+grep -q '^alerts\[1\]{repo,dependabot,code_scanning}:' <<<"$out" && grep -q '^  apps,3,0$' <<<"$out" \
+    || fail "alert table should list only repos with open alerts" "$out"
+# platform's code-scanning endpoint 404s: that is unmeasured, not zero.
+grep -q '^alerts_unmeasured: 1 of 2 repos' <<<"$out" || fail "an unreadable alerts endpoint must be reported" "$out"
+grep -q '^help\[' <<<"$out" || fail "status should offer next steps" "$out"
+grep -q 'user:jdwlabs' "$tmp/log" || fail "PR search not scoped to the owner"
+grep -q 'jdwillmsen' <<<"$out" && fail "status jdwlabs leaked another stream" "$out"
+
+run status jdwlabs --no-alerts
+grep -q '^alerts' <<<"$out" && fail "--no-alerts should skip alerts" "$out"
+
+run status dotablaze-tech
+[ "$rc" -eq 0 ] && grep -q '^pull_requests: 0 open' <<<"$out" && grep -q '^alerts: 0 open across 0 repos' <<<"$out" \
+    || fail "an empty stream must say so explicitly" "$out"
+
+run status
+[ "$rc" -eq 0 ] || fail "status should exit 0" "$out"
+grep -q '^streams\[3\]{stream,jira,open_prs,review_requested,failing,alerts}:' <<<"$out" || fail "overview header wrong" "$out"
+grep -q '^  jdwlabs,JDWLABS,3,1,1,3$' <<<"$out" || fail "jdwlabs overview row wrong" "$out"
+grep -q '^  jdwillmsen,JDW,1,0,0,0$' <<<"$out" || fail "jdwillmsen overview row wrong" "$out"
+grep -q '^  dotablaze-tech,DOTA,0,0,0,0$' <<<"$out" || fail "empty stream overview row wrong" "$out"
+
+STUB_GH=many run status jdwlabs --no-alerts
+grep -q '^summary: "250 open' <<<"$out" && grep -q '^truncated: "showing 3 of 250' <<<"$out" \
+    || fail "more PRs than one page must be counted and flagged" "$out"
+
+STUB_GH=fail run status jdwlabs
+[ "$rc" -eq 1 ] && grep -q '^error: "GitHub request failed: HTTP 401' <<<"$out" \
+    || fail "a gh failure must be a structured error, not empty results" "$out"
+run status nosuch
+[ "$rc" -eq 2 ] && grep -q '^error: unknown stream nosuch' <<<"$out" || fail "unknown stream must be rejected" "$out"
+run status jdwlabs --bogus
+[ "$rc" -eq 2 ] && grep -q '^error: unknown flag --bogus' <<<"$out" || fail "unknown flags must be rejected" "$out"
+rm "$stubs/gh"
+
 # ── the chezmoi trigger regenerates the allowlist only on a personal machine ──
 grep -q 'include "dot_config/streams.json" | sha256sum' "$trigger" \
     || fail "trigger must re-run when the stream map changes"

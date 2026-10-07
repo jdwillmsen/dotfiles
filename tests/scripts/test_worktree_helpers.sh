@@ -49,4 +49,43 @@ case "$resolved" in
 esac
 rm -rf "$tmp"
 
+# Behavioural check: the project namespace is <owner>/<repo> from the origin
+# remote, so two owners' same-named repos cannot share a worktree folder.
+tmp="$(mktemp -d)"
+slug_in() { (cd "$1" && bash -c '. "$0"; __wt_project' "$script"); }
+mkrepo() {
+    git init -q "$tmp/$1"
+    git -C "$tmp/$1" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+    [ -z "${2:-}" ] || git -C "$tmp/$1" remote add origin "$2"
+}
+mkrepo a git@github.com:jdwlabs/platform.git
+mkrepo b https://github.com/dotablaze-tech/platform
+mkrepo c https://github.com/jdwillmsen/career.git/
+mkrepo d ssh://git@github.com:22/jdwillmsen/gameops.git
+mkrepo e
+mkrepo f git@github.com:kunchenguid/no-mistakes.git
+git -C "$tmp/f" config stream.owner jdwillmsen
+git -C "$tmp/a" worktree add -q -b wt-inside "$tmp/inside" >/dev/null 2>&1
+
+stream_bin="$here/home/dot_local/bin/executable_stream"
+for case in "a:jdwlabs/platform" "b:dotablaze-tech/platform" "c:jdwillmsen/career" \
+    "d:jdwillmsen/gameops" "e:e" "f:jdwillmsen/no-mistakes" "inside:jdwlabs/platform"; do
+    dir="${case%%:*}" want="${case#*:}"
+    got="$(slug_in "$tmp/$dir")"
+    [ "$got" = "$want" ] || { echo "FAIL: __wt_project in $dir gave '$got', expected '$want'"; exit 1; }
+    # Two implementations of one rule: any disagreement sends a worktree and its
+    # ticket key to different streams.
+    py="$(cd "$tmp/$dir" && python3 "$stream_bin" slug)"
+    [ "$py" = "$got" ] || { echo "FAIL: stream slug '$py' disagrees with __wt_project '$got' in $dir"; exit 1; }
+done
+
+(cd "$tmp/a" && WT_BASE="$tmp/wt" bash -c '. "$0"; gwta fix/thing' "$script" >/dev/null 2>&1)
+[ -d "$tmp/wt/jdwlabs/platform/fix/thing" ] \
+    || { echo "FAIL: gwta did not create the worktree under <owner>/<repo>"; exit 1; }
+# From inside a linked worktree the namespace must still be the repo's.
+(cd "$tmp/inside" && WT_BASE="$tmp/wt" bash -c '. "$0"; gwta fix/nested' "$script" >/dev/null 2>&1)
+[ -d "$tmp/wt/jdwlabs/platform/fix/nested" ] \
+    || { echo "FAIL: gwta from a linked worktree used the wrong namespace"; exit 1; }
+rm -rf "$tmp"
+
 echo "PASS"

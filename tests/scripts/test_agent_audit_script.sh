@@ -54,6 +54,7 @@ w(".claude/CLAUDE.md", "# global\n@RTK.md\n")
 w(".claude/RTK.md", "rtk\n")
 w("AGENTS.md", "line\n" * 250)
 w("projects/jdwlabs/r1/AGENTS.md", "x" * 40000 + "\n")
+w("projects/jdwillmsen/r2/AGENTS.md", "y\n")
 
 def asst(mid, model, ts, content, usage):
     return {"type": "assistant", "timestamp": ts, "entrypoint": "cli",
@@ -235,12 +236,30 @@ check 'j["disable_candidates"]["skills"]' "['alpha:unused-skill', 'gamma:g-skill
 check 'j["previous"]["sessions"], j["previous"]["tokens"]["output"]' "(1, 1000)" "previous window from transcripts"
 check 'j["coverage"]["files_scanned"], j["coverage"]["bad_lines"]' "(3, 1)" "old files skipped by mtime, bad lines counted"
 check '[f["path"] for f in j["instructions"]["files"] if f["flag"]]' "['~/AGENTS.md']" "instruction file over 200 lines"
-check '[c["flag"] for c in j["instructions"]["combined"]]' "['', 'over_32KiB']" "combined size flag"
+check '[c["flag"] for c in j["instructions"]["combined"]]' "['', '', 'over_32KiB']" "combined size flag"
 check 'j["prs"]["current"]["prs"], j["prs"]["current"]["body_words_median"], j["prs"]["current"]["generated_with_footer"]' \
     "(3, 10, 1)" "PR hygiene excludes dependency bots"
 check 'j["prs"]["current"]["ai_coauthored_commits"], j["prs"]["current"]["missing_assisted_by_examples"]' \
     "(2, ['jdwlabs/r1@bbbbbbb'])" "missing Assisted-by among AI commits"
 grep -q -- "--created 2026-09-21..2026-09-27" "$log.gh" || fail "PR search not scoped to the window" "$(cat "$log.gh")"
+check '"~/projects/jdwillmsen/r2/AGENTS.md" in [f["path"] for f in j["instructions"]["files"]]' "True" \
+    "instruction files found under every owner folder"
+# With no stream map the audit keeps its two original owners.
+grep -q -- "--owner jdwillmsen --owner jdwlabs --created" "$log.gh" || fail "default owners changed" "$(cat "$log.gh")"
+mkdir -p "$fx/.config"
+echo '{"streams": {"jdwillmsen": {"jira": "JDW"}, "jdwlabs": {"jira": "JDWLABS"}, "dotablaze-tech": {"jira": "DOTA"}}}' \
+    >"$fx/.config/streams.json"
+: >"$log.gh"
+run --window weekly --end 2026-09-28 --no-jira --no-insights --force
+grep -q -- "--owner jdwillmsen --owner jdwlabs --owner dotablaze-tech --created" "$log.gh" \
+    || fail "PR hygiene must cover every stream in the map" "$(cat "$log.gh")"
+grep -q "user:jdwillmsen user:jdwlabs user:dotablaze-tech" "$log.gh" || fail "count query must cover every stream" "$(cat "$log.gh")"
+grep -q "^## PR hygiene (jdwillmsen, jdwlabs, dotablaze-tech)" "$md" || fail "report heading should name the streams measured"
+echo 'not json' >"$fx/.config/streams.json"
+: >"$log.gh"
+run --window weekly --end 2026-09-28 --no-jira --no-insights --force
+grep -q -- "--owner jdwillmsen --owner jdwlabs --created" "$log.gh" || fail "a broken stream map must fall back, not crash" "$out"
+rm -f "$fx/.config/streams.json"
 grep -q "Insights unavailable: --no-insights" "$md" || fail "report should say insights were skipped"
 grep -q "^| Output tokens | 160 | 1,000 | -84% |" "$md" || fail "headline delta row missing" "$(grep Output "$md")"
 

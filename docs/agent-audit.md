@@ -17,10 +17,11 @@ collected.
    commands, agents, hooks, `.mcp.json`) and `~/.claude.json` to know what is
    enabled, so it can list what went unused.
 3. Measures the instruction files and the sets each agent loads together.
-4. Searches GitHub (`gh search prs` and `gh search commits`) across the
-   `jdwillmsen` and `jdwlabs` owners for PR body length, "Generated with"
+4. Searches GitHub (`gh search prs` and `gh search commits`) across every
+   owner in `~/.config/streams.json` for PR body length, "Generated with"
    footers, and AI-co-authored default-branch commits missing an
-   `Assisted-by:` trailer. GitHub search returns at most 1000 results and
+   `Assisted-by:` trailer. A missing or invalid map marks the section errored
+   rather than measuring a guessed owner list. GitHub search returns at most 1000 results and
    does not say when it stops. A one-request count therefore comes first. Any
    range over 1000 is halved, on counts alone, until every piece fits, and
    only then fetched. If a single day is still over 1000, the report marks the

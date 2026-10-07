@@ -12,8 +12,8 @@ if sourced by a non-bash shell. PowerShell has its own implementation below.
 
 ```bash
 gwt                     # list all worktrees (with dirty indicator)
-gwta auth-jwt           # create ~/worktrees/<proj>/feat/auth-jwt
-gwta fix/null-check     # create ~/worktrees/<proj>/fix/null-check
+gwta auth-jwt           # create ~/worktrees/<owner>/<repo>/feat/auth-jwt
+gwta fix/null-check     # create ~/worktrees/<owner>/<repo>/fix/null-check
 gwta auth-jwt fix       # explicit type as second arg
 gwtr                    # jump back to root/main worktree
 wts                     # interactive switch (fzf+preview or select)

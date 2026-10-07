@@ -175,7 +175,7 @@ mode = os.environ.get("STUB_GH", "ok")
 if mode == "fail":
     sys.stderr.write("HTTP 401: Bad credentials\n"); sys.exit(1)
 def pr(repo, n, title, state, decision="REVIEW_REQUIRED"):
-    return {"number": n, "title": title, "url": f"https://github.com/x/{repo}/pull/{n}", "isDraft": False,
+    return {"number": n, "title": title, "url": f"https://github.com/x/{repo}/pull/{n}",
             "reviewDecision": decision, "repository": {"name": repo},
             "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": state} if state else None}}]}}
 if args[:2] == ["api", "graphql"]:
@@ -253,9 +253,16 @@ run status jdwlabs --bogus
 rm "$stubs/gh"
 
 # ── the chezmoi trigger regenerates the allowlist only on a personal machine ──
-grep -q 'include "dot_config/streams.json" | sha256sum' "$trigger" \
-    || fail "trigger must re-run when the stream map changes"
 chez_render "$(chez_init personal)" "$trigger" >"$tmp/trigger-personal.sh"
+# chezmoi re-runs a run_onchange script only when its rendered content changes,
+# so a different map must render a different script.
+mkdir "$tmp/src"
+cp -R "$here/.chezmoiroot" "$here/home" "$tmp/src/"
+echo '{"streams": {"jdwlabs": {"jira": "JDWLABS"}}}' >"$tmp/src/home/dot_config/streams.json"
+CHEZ_SRC="$tmp/src" chez_render "$(chez_init personal)" "$trigger" >"$tmp/trigger-other-map.sh"
+[ -s "$tmp/trigger-other-map.sh" ] || fail "trigger did not render against a second source tree"
+cmp -s "$tmp/trigger-personal.sh" "$tmp/trigger-other-map.sh" \
+    && fail "trigger must re-run when the stream map changes"
 chez_render "$(chez_init work)" "$trigger" >"$tmp/trigger-work.sh"
 shellcheck -s bash "$tmp/trigger-personal.sh" "$tmp/trigger-work.sh"
 mkdir -p "$fx/.local/bin"

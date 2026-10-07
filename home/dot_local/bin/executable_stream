@@ -44,7 +44,7 @@ PR_QUERY = """query($open: String!, $mine: String!, $n: Int!) {
   open: search(query: $open, type: ISSUE, first: $n) {
     issueCount
     nodes { ... on PullRequest {
-      number title url isDraft reviewDecision
+      number title url reviewDecision
       repository { name }
       commits(last: 1) { nodes { commit { statusCheckRollup { state } } } }
     } }
@@ -331,8 +331,8 @@ def stream_prs(owner):
 def stream_alerts(owner):
     """(rows with open alerts, repo count, repos with an unreadable endpoint).
 
-    A 403/404 means the feature is off or not readable with this token; that is
-    reported as unmeasured, because a zero would read as "nothing to fix".
+    A request that fails for any reason (feature off, token cannot read it, rate
+    limit) is reported as unmeasured, because a zero would read as "nothing to fix".
     """
     repos = gh_json(["repo", "list", owner, "--no-archived", "--limit", "200",
                      "--json", "name", "--jq", "[.[].name]"]) or []
@@ -378,7 +378,7 @@ def status_detail(owner, s, with_alerts):
         rows, repos, unmeasured = stream_alerts(owner)
         out["alerts"] = rows or f"0 open across {repos} repos"
         if unmeasured:
-            out["alerts_unmeasured"] = f"{unmeasured} of {repos} repos (alerts disabled or not readable)"
+            out["alerts_unmeasured"] = f"{unmeasured} of {repos} repos (not measured)"
     out["help"] = [f"gh pr view <number> --repo {owner}/<repo>", search]
     return out
 

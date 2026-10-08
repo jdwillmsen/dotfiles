@@ -24,14 +24,21 @@ with the `dotfiles` alias (`cd "$(chezmoi source-path)"`).
   the deployed target. Check `git status` in the source dir after any such
   change; if it's dirty, that change is not standardized yet.
 
-## Projects — `~/projects/<name>`
+## Projects — `~/projects/<owner>/<repo>`
 
-Flat, one directory per top-level project, no nested grouping folder.
+One grouping folder per GitHub owner; each owner is a separate business
+stream with its own Jira project and board (dotfiles `docs/streams.md`).
 
-- `~/projects/jdwlabs/` — the `jdwlabs` GitHub org, checked out as four
-  independent sibling repos, not a monorepo: `apps/`, `deployments/`,
-  `infrastructure/`, `platform/`. Each has its own remote; treat them as
-  unrelated repos that happen to share a parent folder.
+- `~/projects/jdwillmsen/` — personal projects and brand, `JDW`; the `career`
+  repo files to `CAREER`.
+- `~/projects/jdwlabs/` — the `jdwlabs` org, `JDWLABS`: `apps/`,
+  `deployments/`, `infrastructure/`, `platform/`. Independent sibling repos,
+  not a monorepo.
+- `~/projects/dotablaze-tech/` — the `dotablaze-tech` org, `DOTA`.
+
+A repo's folder, worktree namespace and Jira project all follow its GitHub
+owner. Streams reference each other with Jira issue links, never by sharing
+an Epic.
 
 ## Worktrees — `~/worktrees/<owner>/<repo>/<branch>`
 

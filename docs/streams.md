@@ -61,8 +61,9 @@ for the personal account, name its active repos instead:
 
 ## Jira views
 
-- Each stream has its own board in its own project, all with the same columns:
-  Backlog, Ready, In Progress, Review, Done. `CAREER` keeps Jira's defaults.
+- Each project has its own board. The `JDW`, `JDWLABS`, `DOTA` and `OPS` boards
+  share the columns Backlog, Ready, In Progress, Review, Done.
+  The `CAREER` board keeps Jira's defaults: To Do, In Progress, In Review, Done.
 - **Personal stream** filter: `project in (JDW, CAREER)`.
 - **All streams** dashboard: every project side by side, for the admin view,
   with open alerts from `OPS` in their own panel.

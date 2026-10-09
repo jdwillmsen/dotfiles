@@ -14,6 +14,7 @@ import math
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 from importlib.machinery import SourceFileLoader
 
@@ -95,14 +96,230 @@ def load_thresholds():
     return out
 
 
+# ── Store data ───────────────────────────────────────────────────────────────
+
+POPULATIONS = ("interactive", "scripted")
+TOP_N = 10
+STAMP = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
+FRICTION = ("tool_errors", "denials", "rate_limits", "api_errors", "compactions", "interrupts")
+OUTPUT = ("commits", "pushes", "prs_created")
+TIME = ("active_s", "idle_s", "wait_human_s")
+TOKEN_FIELDS = ("input", "cache_read", "cache_write_5m", "cache_write_1h")
+TOP_FIELDS = (("skills", "skills"), ("tools", "tools"), ("mcp", "mcp"), ("subagent_types", "subagent_types"))
+
+
+def bad(path, what):
+    die(EXIT_USAGE, f"{tilde(path)}: {what}", f"Fix or remove the line in {tilde(path)}")
+
+
+def check_row(r, path):
+    """A row that cannot be read as numbers stops the run: summing around it
+    would report a quiet day that was not quiet."""
+    sid = am.clean_id(r["session_id"])
+    if not STAMP.fullmatch(r["started_at"]):
+        bad(path, f"session {sid} has no usable started_at")
+    if r.get("population") not in POPULATIONS:
+        bad(path, f"session {sid} has no usable population")
+    for k in ("cost_usd", *FRICTION, *OUTPUT, *TIME):
+        if not am.is_amount(r.get(k)):
+            bad(path, f"session {sid} has no usable {k}")
+    for k in ("pipeline", "repo"):
+        if r.get(k) is not None and not isinstance(r[k], str):
+            bad(path, f"session {sid} has no usable {k}")
+    models = r.get("models")
+    if not isinstance(models, dict):
+        bad(path, f"session {sid} has no usable models")
+    for part in ("main", "subagent"):
+        if not isinstance(models.get(part), dict):
+            bad(path, f"session {sid} has no usable models.{part}")
+        for name, m in models[part].items():
+            ok = isinstance(m, dict) and all(am.is_amount(m.get(k)) for k in ("calls", *TOKEN_FIELDS)) \
+                and (m.get("cost_usd") is None or am.is_amount(m["cost_usd"]))
+            if not ok:
+                bad(path, f"session {sid} has no usable usage for model {am.clean_id(name)}")
+    for k, _ in TOP_FIELDS:
+        d = r.get(k)
+        if not isinstance(d, dict) or not all(am.is_amount(v) for v in d.values()):
+            bad(path, f"session {sid} has no usable {k}")
+    links = r.get("pr_links")
+    if not isinstance(links, list) or not all(
+            isinstance(x, dict) and isinstance(x.get("repo"), str) and isinstance(x.get("number"), int) for x in links):
+        bad(path, f"session {sid} has no usable pr_links")
+    if not isinstance(r.get("unpriced_models"), list):
+        bad(path, f"session {sid} has no usable unpriced_models")
+
+
+def series(kind, lo, hi, key, check):
+    """Rows of a month-file series whose `key` stamp falls in [lo, hi). A line
+    that is not a usable row names its file, because a gap would read as a
+    quiet period."""
+    rows = []
+    for path in sorted((am.STORE / kind).glob("*.jsonl")):
+        if not lo[:7] <= path.stem <= hi[:7]:
+            continue
+        for n, line in enumerate(path.read_text().splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                r = json.loads(line)
+                if not isinstance(r, dict):
+                    raise ValueError
+                stamp = r.get(key)
+                if not (isinstance(stamp, str) and STAMP.fullmatch(stamp)):
+                    raise ValueError
+                check(r)
+            except ValueError:
+                die(EXIT_USAGE, f"{tilde(path)} line {n} is not a usable {kind} entry",
+                    f"Fix or remove the line in {tilde(path)}")
+            if lo <= stamp < hi:
+                rows.append(r)
+    return rows
+
+
+def check_quota(r):
+    for k in ("five_hour_pct", "seven_day_pct"):
+        if r.get(k) is not None and not am.is_amount(r[k]):
+            raise ValueError
+
+
+def check_ledger(r):
+    if not am.is_amount(r.get("usd")):
+        raise ValueError
+
+
+def load_sessions(lo, hi):
+    rows = []
+    for path in sorted((am.STORE / "sessions").glob("*.jsonl")):
+        if not lo[:7] <= path.stem <= hi[:7]:
+            continue
+        for r in am.read_month(path).values():
+            if lo <= r["started_at"] < hi:
+                check_row(r, path)
+                rows.append(r)
+    return rows
+
+
+def stamp(d):
+    return f"{d.isoformat()}T00:00:00Z"
+
+
+# ── Metrics ──────────────────────────────────────────────────────────────────
+
+def top(rows, field):
+    counts = {}
+    for r in rows:
+        for name, n in r[field].items():
+            counts[am.clean_id(name)] = counts.get(am.clean_id(name), 0) + n
+    return [{"name": k, "count": v} for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:TOP_N]]
+
+
+def ratio(num, den, digits=4):
+    return round(num / den, digits) if den > 0 else None
+
+
+def summarize_population(rows):
+    cost = sum(r["cost_usd"] for r in rows)
+    by_pipeline, models, tokens = {}, {}, dict.fromkeys(TOKEN_FIELDS, 0)
+    for r in rows:
+        key = am.clean_id(r["pipeline"]) if r["pipeline"] else "none"
+        by_pipeline[key] = by_pipeline.get(key, 0) + r["cost_usd"]
+        for part in ("main", "subagent"):
+            for name, m in r["models"][part].items():
+                agg = models.setdefault(am.clean_id(name), {"main_calls": 0, "main_cost_usd": 0.0,
+                                                            "subagent_calls": 0, "subagent_cost_usd": 0.0})
+                agg[f"{part}_calls"] += m["calls"]
+                agg[f"{part}_cost_usd"] += m.get("cost_usd") or 0
+                for t in TOKEN_FIELDS:
+                    tokens[t] += m[t]
+    linked = [r for r in rows if r["pr_links"]]
+    distinct = {(x["repo"], x["number"]) for r in linked for x in r["pr_links"]}
+    covered = sum(r["cost_usd"] for r in linked)
+    write_total = tokens["cache_write_5m"] + tokens["cache_write_1h"]
+    ordered = sorted(models.items(), key=lambda kv: (-(kv[1]["main_cost_usd"] + kv[1]["subagent_cost_usd"]), kv[0]))
+    return {
+        "sessions": len(rows),
+        "cost_usd": round(cost, 4),
+        "cost_by_pipeline": {k: round(v, 4) for k, v in sorted(by_pipeline.items())},
+        "models": [{"model": k, **{f: round(v, 4) if isinstance(v, float) else v for f, v in agg.items()}}
+                   for k, agg in ordered],
+        "cache_read_share": ratio(tokens["cache_read"], tokens["cache_read"] + write_total + tokens["input"]),
+        "friction": {k: sum(r[k] for r in rows) for k in FRICTION},
+        "output": {**{k: sum(r[k] for r in rows) for k in OUTPUT}, "linked_prs": len(distinct)},
+        "linked_pr_cost": {"covered_cost_usd": round(covered, 4),
+                           "cost_per_linked_pr_usd": ratio(covered, len(distinct)),
+                           "share_of_spend": ratio(covered, cost)},
+        "time": {k: sum(r[k] for r in rows) for k in TIME},
+        "top": {name: top(rows, field) for name, field in TOP_FIELDS},
+    }
+
+
+def peak(readings, key):
+    vals = [r[key] for r in readings if r.get(key) is not None]
+    return max(vals) if vals else None
+
+
+def summarize_window(start, end):
+    lo, hi = stamp(start), stamp(end)
+    rows = load_sessions(lo, hi)
+    readings = series("quota", lo, hi, "hour", check_quota)
+    spend = series("ledger", lo, hi, "at", check_ledger)
+    return {
+        "populations": {p: summarize_population([r for r in rows if r["population"] == p]) for p in POPULATIONS},
+        "unpriced_models": sorted({am.clean_id(m) for r in rows for m in r["unpriced_models"]}),
+        "quota": {"peak_five_hour_pct": peak(readings, "five_hour_pct"),
+                  "peak_seven_day_pct": peak(readings, "seven_day_pct"), "readings": len(readings)},
+        "ledger": {"usd": round(sum(r["usd"] for r in spend), 4), "entries": len(spend)},
+    }
+
+
+def trend(window, label):
+    """Up to six earlier reports of this window, oldest first."""
+    rows = []
+    for path in sorted((am.STORE / "reports").glob(f"*-{window}.json")):
+        j = load_json_file(path)
+        if not isinstance(j.get("label_date"), str):
+            die(EXIT_USAGE, f"{tilde(path)} has no label_date")
+        if j["label_date"] >= label:
+            continue
+        try:
+            pops = j["current"]["populations"]
+            entry = {"label_date": j["label_date"],
+                     **{p: {"sessions": pops[p]["sessions"], "cost_usd": pops[p]["cost_usd"]} for p in POPULATIONS}}
+            if not all(am.is_amount(v) for p in POPULATIONS for v in entry[p].values()):
+                raise ValueError
+        except (KeyError, TypeError, ValueError):
+            die(EXIT_USAGE, f"{tilde(path)} has no usable populations", "Fix or remove the stored report")
+        rows.append(entry)
+    return sorted(rows, key=lambda r: r["label_date"])[-6:]
+
+
 # ── Report ───────────────────────────────────────────────────────────────────
 
 def build_report(opts, w):
     (cs, ce), (ps, pe) = w
-    return {"schema": SCHEMA, "window": opts.window, "start": cs.isoformat(), "end": ce.isoformat(),
-            "label_date": (ce - dt.timedelta(days=1)).isoformat(),
-            "previous_start": ps.isoformat(), "previous_end": pe.isoformat(),
-            "generated_at": am.iso(am.now().timestamp())}
+    label = (ce - dt.timedelta(days=1)).isoformat()
+    return {
+        "schema": SCHEMA, "window": opts.window, "start": cs.isoformat(), "end": ce.isoformat(),
+        "label_date": label, "generated_at": am.iso(am.now().timestamp()),
+        "current": summarize_window(cs, ce),
+        "previous": {"start": ps.isoformat(), "end": pe.isoformat(), **summarize_window(ps, pe)},
+        "trend": trend(opts.window, label),
+        "flags": [], "delivery": None, "audit": None, "insights": None,
+    }
+
+
+def write_text(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
+def write_outputs(report, directory):
+    stem = f"{report['label_date']}-{report['window']}"
+    paths = {"json": directory / f"{stem}.json"}
+    write_text(paths["json"], json.dumps(report, indent=1) + "\n")
+    return paths
 
 
 # ── Commands ─────────────────────────────────────────────────────────────────
@@ -152,8 +369,13 @@ def cmd_run(args):
         am.usage_error(f"--end must be YYYY-MM-DD, got {args.end}", USAGE_SHORT)
     am.require_store()
     load_thresholds()
-    report = build_report(args, compute_windows(args.window, end))
-    emit({"dry_run": bool(args.dry_run), **{k: report[k] for k in ("window", "start", "end", "label_date", "previous_start")}})
+    w = compute_windows(args.window, end)
+    report = build_report(args, w)
+    directory = Path(tempfile.mkdtemp(prefix="agent-report-")) if args.dry_run else am.STORE / "reports"
+    paths = write_outputs(report, directory)
+    emit({"dry_run": bool(args.dry_run), "window": report["window"], "start": report["start"],
+          "end": report["end"], "label_date": report["label_date"], "previous_start": report["previous"]["start"],
+          **{k: str(v) for k, v in paths.items()}})
     return 0
 
 

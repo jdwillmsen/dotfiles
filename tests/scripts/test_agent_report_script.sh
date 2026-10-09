@@ -229,4 +229,72 @@ run 2 --window daily --dry-run
 grep -q "session_warn_usd" "$out" || fail "a negative threshold is not named" "$(cat "$out")"
 cp "$tmp/thresholds.bak" "$tmp/config/thresholds.json"
 
+# ── Store metrics, hand-computed from the fixture ──
+run 0 --window weekly --end 2026-10-09 --dry-run --no-insights --no-github
+wjson="$(field json)"
+[ -f "$wjson" ] || fail "dry run did not print a JSON path that exists" "$(cat "$out")"
+python3 - "$wjson" <<'PY' || fail "weekly store metrics are wrong"
+import json, sys
+j = json.load(open(sys.argv[1]))
+for k in ("schema", "window", "start", "end", "label_date", "generated_at", "current", "previous", "trend",
+          "flags", "delivery", "audit", "insights"):
+    assert k in j, f"top-level key {k} missing"
+assert (j["schema"], j["window"], j["start"], j["end"], j["label_date"]) == (1, "weekly", "2026-09-28", "2026-10-05", "2026-10-04")
+cur, prev = j["current"], j["previous"]
+i, s = cur["populations"]["interactive"], cur["populations"]["scripted"]
+def eq(name, got, want):
+    assert got == want, f"{name}: got {got!r}, want {want!r}"
+# The 10-05 00:00:00 session belongs to the next window; 09-30 23:59:59 and 10-04 23:59:59 are inside.
+eq("sessions", (i["sessions"], s["sessions"]), (2, 2))
+eq("cost", (i["cost_usd"], s["cost_usd"]), (5.0, 6.0))
+eq("cost_by_pipeline", (i["cost_by_pipeline"], s["cost_by_pipeline"]), ({"none": 5.0}, {"no-mistakes": 5.0, "none": 1.0}))
+eq("models", i["models"], [
+    {"model": "claude-sonnet-5-5", "main_calls": 5, "main_cost_usd": 3.0, "subagent_calls": 0, "subagent_cost_usd": 0.0},
+    {"model": "claude-opus-5-5", "main_calls": 10, "main_cost_usd": 1.5, "subagent_calls": 0, "subagent_cost_usd": 0.0},
+    {"model": "claude-haiku-4-5-20251001", "main_calls": 0, "main_cost_usd": 0.0, "subagent_calls": 4, "subagent_cost_usd": 0.5}])
+eq("cache", (i["cache_read_share"], s["cache_read_share"]), (0.7917, 0.9))
+eq("friction i", i["friction"], {"tool_errors": 2, "denials": 1, "rate_limits": 1, "api_errors": 0, "compactions": 1, "interrupts": 1})
+eq("friction s", s["friction"], {"tool_errors": 0, "denials": 0, "rate_limits": 0, "api_errors": 3, "compactions": 0, "interrupts": 0})
+eq("output i", i["output"], {"commits": 3, "pushes": 1, "prs_created": 1, "linked_prs": 2})
+eq("linked cost", i["linked_pr_cost"], {"covered_cost_usd": 5.0, "cost_per_linked_pr_usd": 2.5, "share_of_spend": 1.0})
+eq("linked cost none", s["linked_pr_cost"], {"covered_cost_usd": 0.0, "cost_per_linked_pr_usd": None, "share_of_spend": 0.0})
+eq("time", i["time"], {"active_s": 700, "idle_s": 400, "wait_human_s": 300})
+eq("top skills", i["top"]["skills"], [{"name": "brainstorm", "count": 3}, {"name": "tdd", "count": 1}])
+eq("top tools", i["top"]["tools"], [{"name": "Bash", "count": 7}, {"name": "Read", "count": 3}])
+eq("top mcp", i["top"]["mcp"], [{"name": "jira", "count": 1}])
+eq("top subagents", i["top"]["subagent_types"], [{"name": "Explore", "count": 2}])
+# Peaks come from readings inside the window only: the 10-05 reading (99%) is outside.
+eq("quota", cur["quota"], {"peak_five_hour_pct": 90, "peak_seven_day_pct": 88, "readings": 3})
+eq("ledger", cur["ledger"], {"usd": 0.3, "entries": 2})
+pi, ps = prev["populations"]["interactive"], prev["populations"]["scripted"]
+eq("prev", (pi["sessions"], pi["cost_usd"], ps["sessions"], ps["cost_usd"]), (1, 1.0, 1, 4.0))
+eq("prev quota", prev["quota"], {"peak_five_hour_pct": None, "peak_seven_day_pct": None, "readings": 0})
+eq("prev ledger", prev["ledger"], {"usd": 0.0, "entries": 0})
+eq("prev window", (prev["start"], prev["end"]), ("2026-09-21", "2026-09-28"))
+eq("trend", j["trend"], [
+    {"label_date": "2026-09-13", "interactive": {"sessions": 4, "cost_usd": 8.0}, "scripted": {"sessions": 30, "cost_usd": 40.0}},
+    {"label_date": "2026-09-20", "interactive": {"sessions": 5, "cost_usd": 9.5}, "scripted": {"sessions": 31, "cost_usd": 41.0}}])
+PY
+
+# An empty window is reported as empty, with unknowns left null rather than zero.
+run 0 --window daily --end 2026-10-03 --dry-run --no-insights
+python3 - "$(field json)" <<'PY' || fail "an empty day is mishandled"
+import json, sys
+c = json.load(open(sys.argv[1]))["current"]
+i = c["populations"]["interactive"]
+assert i["sessions"] == 0 and i["cost_usd"] == 0.0 and i["cache_read_share"] is None, i
+assert c["quota"]["peak_seven_day_pct"] is None, c["quota"]
+PY
+
+# Store data that cannot be read as numbers is an error naming the file, never zero.
+cp "$store/sessions/2026-09.jsonl" "$tmp/sessions-09.bak"
+sed -i 's/"cost_usd": 2.0/"cost_usd": "two"/' "$store/sessions/2026-09.jsonl"
+run 2 --window weekly --end 2026-10-09 --dry-run --no-insights --no-github
+grep -q "2026-09.jsonl" "$out" || fail "a bad cost_usd does not name the file" "$(cat "$out")"
+cp "$tmp/sessions-09.bak" "$store/sessions/2026-09.jsonl"
+echo '{"hour":"2026-10-01T05:00:00Z","seven_day_pct":"high"}' >>"$store/quota/2026-10.jsonl"
+run 2 --window weekly --end 2026-10-09 --dry-run --no-insights --no-github
+grep -q "quota/2026-10.jsonl" "$out" || fail "a bad quota reading does not name the file" "$(cat "$out")"
+reset_store
+
 echo "test_agent_report_script: OK"

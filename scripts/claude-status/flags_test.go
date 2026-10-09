@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func stateWith(t *testing.T, files map[string]string) string {
@@ -132,6 +133,80 @@ func TestRenderBadgeNeverBreaksCompactWidth(t *testing.T) {
 		for _, l := range lineWithBadge(t, cols) {
 			if visibleLen(l) > max(cols-2, 1) {
 				t.Errorf("cols %d: line %q is %d wide", cols, l, visibleLen(l))
+			}
+		}
+	}
+}
+
+func TestFlagsBadgeAgreesWithNotifyValidation(t *testing.T) {
+	cases := map[string]string{
+		"bad date":         `{"date":"tomorrow","flags":[{"severity":"warn"}]}`,
+		"non-ascii digits": `{"date":"٢٠٢٦-١٠-٠٨","flags":[{"severity":"warn"}]}`,
+		"null flag":        `{"date":"2026-10-08","flags":[null]}`,
+		"null flags":       `{"date":"2026-10-08","flags":null}`,
+		"numeric severity": `{"date":"2026-10-08","flags":[{"severity":5}]}`,
+		"scalar flag":      `{"date":"2026-10-08","flags":[3]}`,
+	}
+	for name, body := range cases {
+		stateWith(t, map[string]string{"flags.json": body})
+		if got, ok := readFlagsSummary(); ok {
+			t.Errorf("%s: got %+v, want none", name, got)
+		}
+	}
+	stateWith(t, map[string]string{"flags.json": `{"date":"2026-10-08","flags":[{"id":"a"}]}`})
+	if got, ok := readFlagsSummary(); !ok || got.Worst != "info" {
+		t.Errorf("a flag without severity should count as info, got %+v ok=%v", got, ok)
+	}
+}
+
+func TestFlagsBadgeIgnoresNonRegularFiles(t *testing.T) {
+	dir := stateWith(t, nil)
+	if err := os.Symlink("/dev/zero", filepath.Join(dir, "flags.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := readFlagsSummary(); ok {
+		t.Error("read a symlink to a device")
+	}
+}
+
+func realisticPayload() Payload {
+	p := fullPayload()
+	reset := time.Now().Add(30 * time.Hour).Unix()
+	p.RateLimits.SevenDay = &struct {
+		UsedPercentage float64 `json:"used_percentage"`
+		ResetsAt       int64   `json:"resets_at"`
+	}{UsedPercentage: 61, ResetsAt: reset}
+	return p
+}
+
+func TestBadgeGivesWayBeforeAnythingElse(t *testing.T) {
+	p := realisticPayload()
+	cfg := &jiraConfig{}
+	for cols := 20; cols <= 260; cols++ {
+		activeFlags = flagsSummary{}
+		before := renderLinesWithJira(p, testGit(), cols, false, cfg)
+		activeFlags = flagsSummary{Count: 3, Worst: "critical"}
+		after := renderLinesWithJira(p, testGit(), cols, false, cfg)
+		activeFlags = flagsSummary{}
+		if len(after) != len(before) {
+			t.Errorf("cols %d: %d lines became %d", cols, len(before), len(after))
+			continue
+		}
+		for i := range after {
+			if after[i] == before[i] {
+				continue
+			}
+			stripped := stripANSI(after[i])
+			if !strings.Contains(stripped, "⚑") {
+				t.Errorf("cols %d line %d changed without the marker: %q -> %q", cols, i, before[i], after[i])
+			}
+			if w := visibleLen(after[i]); cols > 0 && w > cols-2 {
+				t.Errorf("cols %d line %d: marker made it %d wide", cols, i, w)
+			}
+			for _, keep := range []string{"5h", "7d", "ctx"} {
+				if strings.Contains(stripANSI(before[i]), keep) && !strings.Contains(stripped, keep) {
+					t.Errorf("cols %d line %d: marker displaced %q", cols, i, keep)
+				}
 			}
 		}
 	}

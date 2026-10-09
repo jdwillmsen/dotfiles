@@ -3,8 +3,11 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"regexp"
 	"slices"
+	"time"
 )
 
 // A flags file is a few hundred bytes; anything larger is not ours, and the
@@ -35,8 +38,14 @@ func readSmall(path string) ([]byte, bool) {
 	if err != nil || !st.Mode().IsRegular() || st.Size() > maxFlagsBytes {
 		return nil, false
 	}
-	raw, err := os.ReadFile(path)
-	return raw, err == nil
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	// The file may have been swapped since the stat; the cap holds regardless.
+	raw, err := io.ReadAll(io.LimitReader(f, maxFlagsBytes+1))
+	return raw, err == nil && len(raw) <= maxFlagsBytes
 }
 
 // readFlagsSummary reports the unacknowledged flags the daily report left
@@ -49,11 +58,13 @@ func readFlagsSummary() (flagsSummary, bool) {
 	}
 	var f struct {
 		Date  string `json:"date"`
-		Flags []struct {
-			Severity string `json:"severity"`
+		Flags []*struct {
+			Severity *string `json:"severity"`
 		} `json:"flags"`
 	}
-	if json.Unmarshal(raw, &f) != nil || f.Date == "" || len(f.Flags) == 0 {
+	// The same rules as agent-notify, so the marker never shows a file that
+	// `agent-notify show` would refuse to acknowledge.
+	if json.Unmarshal(raw, &f) != nil || !validDate(f.Date) || len(f.Flags) == 0 || slices.Contains(f.Flags, nil) {
 		return flagsSummary{}, false
 	}
 	// A malformed ack file acknowledges nothing: showing a flag twice is
@@ -68,11 +79,21 @@ func readFlagsSummary() (flagsSummary, bool) {
 	}
 	s := flagsSummary{Date: f.Date, Count: len(f.Flags), Worst: "info"}
 	for _, fl := range f.Flags {
-		if severityRank[fl.Severity] > severityRank[s.Worst] {
-			s.Worst = fl.Severity
+		if fl.Severity != nil && severityRank[*fl.Severity] > severityRank[s.Worst] {
+			s.Worst = *fl.Severity
 		}
 	}
 	return s, true
+}
+
+var dateShape = regexp.MustCompile(`^[0-9]{4}-[0-9]{2}-[0-9]{2}$`)
+
+func validDate(d string) bool {
+	if !dateShape.MatchString(d) {
+		return false
+	}
+	_, err := time.Parse("2006-01-02", d)
+	return err == nil
 }
 
 // flagsBadge is the status-line marker; short drops the severity word for

@@ -22,8 +22,9 @@ from pathlib import Path
 
 VERSION = "1.0.0"
 
-# Fast path before any real work: harnesses probe --version constantly.
-if len(sys.argv) == 2 and sys.argv[1] in ("-v", "-V", "--version"):
+# Fast path before any real work: harnesses probe --version constantly. Only
+# as a command: sibling tools load this file as a library for the store helpers.
+if __name__ == "__main__" and len(sys.argv) == 2 and sys.argv[1] in ("-v", "-V", "--version"):
     print(VERSION)
     sys.exit(0)
 
@@ -63,8 +64,9 @@ USAGE_FIELDS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_
 
 BASELINE_DAYS = 30
 WEEKLY_WINDOW_S = 7 * 86400
-# The only paths in the store this tool writes; anything else is someone else's.
-OWN_DIRS = ("sessions", "quota", "ledger")
+# The only paths in the store this tool and its siblings write (reports,
+# labels, the trends page, findings); anything else is someone else's.
+OWN_DIRS = ("sessions", "quota", "ledger", "reports", "labels", "site", "findings")
 QUOTA_LOCAL_KEEP_S = 35 * 86400
 QUOTA_WINDOWS = ("five_hour", "seven_day")
 LOCK_WAIT_S = int(os.environ.get("AGENT_METRICS_LOCK_WAIT", "600"))
@@ -552,6 +554,27 @@ def upsert(rows, write=True):
     return written, unchanged
 
 
+def publish(message, push=True):
+    """Commit whatever changed in the tool's own directories and push. Call
+    with the Lock held. `pushed` is True, False (the commit is kept and the
+    next publish delivers it) or a string saying why nothing was sent."""
+    own = [d for d in OWN_DIRS if (STORE / d).is_dir()]
+    out = {"committed": False}
+    if own and git("status", "--porcelain", "--", *own).stdout.strip():
+        git("add", "-A", "--", *own)
+        git("commit", "--quiet", "-m", message)
+        out["committed"] = True
+    ahead = not has_upstream() or git("rev-list", "--count", "@{u}..HEAD").stdout.strip() != "0"
+    if not push or not ahead:
+        out["pushed"] = "skipped" if ahead else "nothing to push"
+        return out
+    result = git("push", "--quiet", "-u", "origin", "HEAD", check=False)
+    out["pushed"] = result.returncode == 0
+    if result.returncode != 0:
+        out["error"] = f"git push failed: {(result.stderr or result.stdout).strip().splitlines()[-1]}"
+    return out
+
+
 class Lock:
     """One collect at a time: a timer firing during a manual run waits."""
 
@@ -771,24 +794,9 @@ def collect(args):
         emit(out)
         return 0
 
-    own = [d for d in OWN_DIRS if (STORE / d).is_dir()]
-    out["committed"] = False
-    if own and git("status", "--porcelain", "--", *own).stdout.strip():
-        git("add", "-A", "--", *own)
-        git("commit", "--quiet", "-m", f"collect: {now():%Y-%m-%d}, {written} sessions")
-        out["committed"] = True
-    ahead = not has_upstream() or git("rev-list", "--count", "@{u}..HEAD").stdout.strip() != "0"
-    if args.no_push or not ahead:
-        out["pushed"] = "skipped" if args.no_push and ahead else "nothing to push"
-        emit(out)
-        return 0
-    push = git("push", "--quiet", "-u", "origin", "HEAD", check=False)
-    out["pushed"] = push.returncode == 0
-    if push.returncode != 0:
-        # The rows are committed locally, so the next run delivers them.
-        out["error"] = f"git push failed: {(push.stderr or push.stdout).strip().splitlines()[-1]}"
+    out.update(publish(f"collect: {now():%Y-%m-%d}, {written} sessions", push=not args.no_push))
     emit(out)
-    return 0 if out["pushed"] else EXIT_FAIL
+    return EXIT_FAIL if out["pushed"] is False else 0
 
 
 def cmd_row(args):

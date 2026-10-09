@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily agent session labelling
+
+[Timer]
+# After the 06:30 collect, so the day's sessions already have rows to label.
+OnCalendar=*-*-* 06:50:00
+Unit=agent-label.service
+# A box that was off at the scheduled time labels at next boot; the run looks
+# back a week, so a few missed days lose nothing.
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

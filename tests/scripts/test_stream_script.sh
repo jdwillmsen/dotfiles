@@ -81,9 +81,19 @@ git -C "$tmp/repos/platform" config stream.owner a/b
 cwd="$tmp/repos/platform" run slug;  expect "jdwlabs/platform" "a stream.owner with a slash is ignored"
 git -C "$tmp/repos/platform" config --unset stream.owner
 
-# GitHub logins are case-insensitive, so the map lookup must be too.
+# GitHub owner and repo names are case-insensitive: a remote typed in another
+# case is the same repo, so it gets the same slug and the same key.
 mkrepo cased https://github.com/JDWLabs/Platform.git
+cwd="$tmp/repos/cased" run slug;     expect "jdwlabs/platform" "a mixed-case remote gives the lower-case slug"
 cwd="$tmp/repos/cased" run key;      expect "JDWLABS" "owner lookup ignores case"
+mkrepo casedcareer https://github.com/JDWillmsen/Career.git
+cwd="$tmp/repos/casedcareer" run slug; expect "jdwillmsen/career" "a mixed-case owner and repo give the lower-case slug"
+cwd="$tmp/repos/casedcareer" run key;  expect "CAREER" "a repo override ignores case"
+# A folder name is not GitHub's to fold, but it still names the overridden repo.
+mkrepo folder/Career
+git -C "$tmp/repos/folder/Career" config stream.owner JDWillmsen
+cwd="$tmp/repos/folder/Career" run slug; expect "jdwillmsen/Career" "stream.owner is lower-cased, the folder name is kept"
+cwd="$tmp/repos/folder/Career" run key;  expect "CAREER" "a repo override ignores the folder's case"
 
 cwd="$tmp" run slug
 [ "$rc" -eq 1 ] && grep -q '^error: ' <<<"$out" || fail "slug outside a repo must be a structured error" "$out"
@@ -226,6 +236,13 @@ grep -q 'jdwillmsen' <<<"$out" && fail "status jdwlabs leaked another stream" "$
 run status jdwlabs --no-alerts
 [ "$rc" -eq 0 ] && grep -q '^summary: ' <<<"$out" || fail "--no-alerts should still report PRs" "$out"
 grep -q '^alerts' <<<"$out" && fail "--no-alerts should skip alerts" "$out"
+
+# The owner is accepted in any case and reported in the map's spelling.
+: >"$tmp/log"
+run status JDWLabs --no-alerts
+[ "$rc" -eq 0 ] || fail "status JDWLabs should exit 0" "$out$(cat "$tmp/stderr")"
+grep -q '^stream: jdwlabs$' <<<"$out" || fail "status should name the stream as the map spells it" "$out"
+grep -q 'user:jdwlabs' "$tmp/log" || fail "a mixed-case owner must search the map's owner"
 
 run status jdwillmsen --no-alerts
 grep -q '^  gameops,3,pending,needed,"-lead"$' <<<"$out" || fail "a title starting with a hyphen must be quoted" "$out"

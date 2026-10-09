@@ -192,9 +192,11 @@ def slug(path):
     m = REMOTE_RE.match(clean_remote(git(path, "remote", "get-url", "origin")))
     if m and not (ok_segment(m.group(1)) and ok_segment(m.group(2))):
         m = None
-    name = m.group(2) if m else Path(root).name
+    # GitHub owner and repo names are case-insensitive: lower-cased, one repo
+    # cannot land in two worktree namespaces. A folder name is taken as it is.
+    name = m.group(2).lower() if m else Path(root).name
     override = git(path, "config", "--get", "stream.owner").strip()
-    owner = override if ok_segment(override) else (m.group(1) if m else "")
+    owner = (override if ok_segment(override) else (m.group(1) if m else "")).lower()
     return f"{owner}/{name}" if owner else name
 
 
@@ -205,15 +207,21 @@ def require_slug(path):
     return s
 
 
+def stream_name(streams, owner):
+    """The map's own spelling of an owner, or None. GitHub owner and repo names
+    are case-insensitive, so one typed in another case is still the same."""
+    return next((k for k in streams if k.lower() == owner.lower()), None)
+
+
 def jira_key(smap, sl):
     owner, _, repo = sl.rpartition("/")
-    # GitHub logins are case-insensitive, so a remote typed in another case is
-    # still the same owner.
-    s = next((v for k, v in smap["streams"].items() if k.lower() == owner.lower()), None)
-    if not s:
+    name = stream_name(smap["streams"], owner)
+    if not name:
         raise Fail(f"{sl}: owner {owner or '(none)'} is not a known stream",
                    ["stream", "git config stream.owner <owner>"])
-    return (s.get("repoOverrides") or {}).get(repo, s["jira"])
+    s = smap["streams"][name]
+    overrides = s.get("repoOverrides") or {}
+    return next((k for r, k in overrides.items() if r.lower() == repo.lower()), s["jira"])
 
 
 def cmd_home():
@@ -406,9 +414,10 @@ def cmd_status(args):
     with_alerts = "--no-alerts" not in flags
     streams = load_map()["streams"]
     if owners:
-        if owners[0] not in streams:
+        name = stream_name(streams, owners[0])
+        if not name:
             raise Usage(f"unknown stream {owners[0]}", [f"stream status {o}" for o in streams])
-        emit(status_detail(owners[0], streams[owners[0]], with_alerts))
+        emit(status_detail(name, streams[name], with_alerts))
         return 0
     rows = []
     for owner, s in streams.items():

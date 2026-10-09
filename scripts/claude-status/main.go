@@ -722,13 +722,14 @@ func renderLinesWithJira(p Payload, git *gitState, cols int, verbose bool, cfg *
 		joinSections(secCtx, secRate, secVer),
 	}
 
-	// The marker rides on an existing line so it never adds one.
-	if badge := flagsBadge(activeFlags, false); badge != "" {
-		if lines[1] != "" {
-			lines[1] = joinSections(lines[1], badge)
-		} else {
-			lines[0] = joinSections(lines[0], badge)
+	// The marker rides on an existing line so it never adds one, and only
+	// where it fits: a line already too wide gets nothing.
+	if activeFlags.Count > 0 {
+		i := 1
+		if lines[1] == "" {
+			i = 0
 		}
+		lines[i] = withBadge(lines[i], cols)
 	}
 
 	// ── LINE 3 (wide or verbose only — diagnostics, not glanceable) ──────────
@@ -869,11 +870,15 @@ func renderCompact(p Payload, git *gitState, cols int, cfg *jiraConfig) []string
 		}
 	}
 	// Token counts are the first thing to go: the bar and percent already say it.
-	// The flags marker goes last: it is the first thing to give way.
-	badge := flagsBadge(activeFlags, true)
-	usage := fitSections(budget, compactSep, append(append([]string{ctx + ctxTokens}, rates...), badge)...)
+	usage := fitSections(budget, compactSep, append([]string{ctx + ctxTokens}, rates...)...)
 	if visibleLen(usage) > budget || strings.Count(usage, compactSep) < len(rates) {
-		usage = fitSections(budget, compactSep, append(append([]string{ctx}, rates...), badge)...)
+		usage = fitSections(budget, compactSep, append([]string{ctx}, rates...)...)
+	}
+	// The flags marker is chosen last, from what is left, so it never costs
+	// the line a figure it would otherwise have shown.
+	if badge := flagsBadge(activeFlags, true); badge != "" && usage != "" &&
+		visibleLen(usage)+visibleLen(compactSep)+visibleLen(badge) <= budget {
+		usage += compactSep + badge
 	}
 	lines = append(lines, usage)
 
@@ -935,6 +940,18 @@ func fitSections(budget int, sep string, sections ...string) string {
 			line = s
 		case visibleLen(line)+visibleLen(sep)+visibleLen(s) <= budget:
 			line += sep + s
+		}
+	}
+	return line
+}
+
+// withBadge appends the flags marker to a line when it fits in cols-2, using
+// the short form before giving up. An unknown width (0) takes the long form.
+func withBadge(line string, cols int) string {
+	for _, short := range []bool{false, true} {
+		joined := joinSections(line, flagsBadge(activeFlags, short))
+		if cols <= 0 || visibleLen(joined) <= cols-2 {
+			return joined
 		}
 	}
 	return line

@@ -7,6 +7,7 @@
 set -euo pipefail
 here="$(cd "$(dirname "$0")/../.." && pwd)"
 report="$here/home/dot_local/bin/executable_agent-report"
+metrics="$here/home/dot_local/bin/executable_agent-metrics"
 cfgsrc="$here/home/dot_config/agent-metrics"
 
 fail() {
@@ -482,6 +483,126 @@ PY
 echo '{broken' >"$store/reports/2026-09-12-daily.json"
 run 2 --window monthly --end 2026-10-09 --dry-run --no-insights --no-github
 grep -q "2026-09-12-daily.json" "$out" || fail "an unreadable daily report is not named" "$(cat "$out")"
+reset_store
+
+# ── Insights: one capped model call for weekly and monthly only ──
+cat >"$tmp/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+{
+    echo "ARGS: $*"
+    echo "CWD: $(pwd)"
+    echo "TOKENS: $(env | grep -c 'SECRET_TOKEN' || true)"
+} >>"$CLAUDE_LOG"
+cat >"$CLAUDE_STDIN"
+case "${STUB_CLAUDE_MODE:-ok}" in
+    ok) printf '{"type":"result","is_error":false,"result":"%s","total_cost_usd":0.1234}\n' "${STUB_CLAUDE_TEXT:-Spend is up. Trim the plugin hooks.}" ;;
+    error) printf '{"type":"result","is_error":true,"subtype":"error_max_budget_usd","total_cost_usd":0.05}\n' ;;
+    fail) echo "boom" >&2; exit 1 ;;
+    sleep) sleep 5 ;;
+esac
+STUB
+chmod +x "$tmp/bin/claude"
+export CLAUDE_LOG="$tmp/claude.log" CLAUDE_STDIN="$tmp/claude.stdin"
+export MY_SECRET_TOKEN=hunter2
+ledger() { cat "$store/ledger/2026-10.jsonl"; }
+insights() { python3 -c 'import json, sys; print(json.dumps(json.load(open(sys.argv[1]))["insights"], sort_keys=True))' "$store/reports/$1.json"; }
+
+reset_store
+: >"$CLAUDE_LOG"
+run 0 --window weekly --end 2026-10-09 --no-github
+[ "$(insights 2026-10-04-weekly)" = '{"cost_usd": 0.1234, "text": "Spend is up. Trim the plugin hooks."}' ] \
+    || fail "insights not recorded" "$(insights 2026-10-04-weekly)"
+tail -1 <(ledger) | python3 -c '
+import json, sys
+e = json.loads(sys.stdin.read())
+assert (e["run"], e["usd"], e["critical"]) == ("report-weekly", 0.1234, False), e
+assert e["at"] == "2026-10-09T12:00:00Z", e
+' || fail "the insights cost is not in the ledger" "$(ledger)"
+grep -q "Trim the plugin hooks" "$store/reports/2026-10-04-weekly.md" || fail "the Markdown omits the insights"
+gs show --stat --format=%s HEAD | grep -q "ledger/2026-10.jsonl" || fail "the ledger entry was not committed with the report" "$(gs show --stat HEAD)"
+[ -z "$(gs status --porcelain)" ] || fail "store left dirty"
+args="$(grep '^ARGS:' "$CLAUDE_LOG")"
+for want in "-p" "--model sonnet" "--max-turns 1" "--max-budget-usd 0.50" "--no-session-persistence" "--output-format json" "--tools "; do
+    grep -q -- "$want" <<<"$args" || fail "claude was not called with '$want'" "$args"
+done
+cwd="$(sed -n 's/^CWD: //p' "$CLAUDE_LOG")"
+case "$cwd" in "$store"* | "$here"*) fail "claude ran inside the store or the repo: $cwd" ;; esac
+[ ! -d "$cwd" ] || fail "the temp working directory was left behind: $cwd"
+[ "$(sed -n 's/^TOKENS: //p' "$CLAUDE_LOG")" = 0 ] || fail "a credential-shaped variable reached claude"
+grep -q "hours saved" "$CLAUDE_STDIN" || fail "the prompt does not forbid hours-saved claims"
+grep -q '"populations"' "$CLAUDE_STDIN" || fail "the prompt carries no metrics"
+grep -qi "never" "$CLAUDE_STDIN" || fail "the prompt does not forbid anything"
+
+# The ledger line has the same shape `agent-metrics budget record` writes.
+"$metrics" budget record --usd 0.2 --run report-weekly >/dev/null
+python3 - "$store/ledger/2026-10.jsonl" <<'PY' || fail "the ledger entry differs in shape from budget record's"
+import json, sys
+a, b = [json.loads(l) for l in open(sys.argv[1]).read().splitlines()[-2:]]
+assert sorted(a) == sorted(b), (a, b)
+PY
+
+# Over budget: no call, and the state is recorded.
+reset_store
+: >"$CLAUDE_LOG"
+cp -r "$tmp/config" "$tmp/config-tight"
+echo '{"plan_pct": 0.0001, "hard_pct": 0.0002, "weekly_quota_cutoff_pct": 85}' >"$tmp/config-tight/budget.json"
+ledger_before="$(ledger)"
+AGENT_METRICS_CONFIG="$tmp/config-tight" run 0 --window weekly --end 2026-10-09 --no-github
+[ ! -s "$CLAUDE_LOG" ] || fail "claude was called with the budget denied" "$(cat "$CLAUDE_LOG")"
+python3 - "$store/reports/2026-10-04-weekly.json" <<'PY' || fail "a budget denial is not recorded"
+import json, sys
+i = json.load(open(sys.argv[1]))["insights"]
+assert i["skipped"] == "budget" and i["state"]["state"] == "stopped" and i["state"]["allowed"] is False, i
+PY
+[ "$ledger_before" = "$(ledger)" ] || fail "the ledger changed without a call"
+
+# A failure, an error result and a timeout are recorded; the run carries on.
+for mode in fail error sleep; do
+    reset_store
+    : >"$CLAUDE_LOG"
+    ledger_before="$(ledger)"
+    STUB_CLAUDE_MODE=$mode AGENT_REPORT_INSIGHTS_TIMEOUT=1 run 0 --window weekly --end 2026-10-09 --no-github
+    [ -f "$store/reports/2026-10-04-weekly.json" ] || fail "no report after a $mode insights call"
+    python3 - "$store/reports/2026-10-04-weekly.json" "$mode" <<'PY' || fail "insights $mode not recorded as an error"
+import json, sys
+i = json.load(open(sys.argv[1]))["insights"]
+assert set(i) == {"error"} and i["error"], i
+assert {"fail": "exited 1", "error": "error_max_budget_usd", "sleep": "timed out"}[sys.argv[2]] in i["error"], i
+PY
+    if [ "$mode" = error ]; then
+        tail -1 <(ledger) | grep -q '"usd":0.05' || fail "the cost of a failed call is not in the ledger" "$(ledger)"
+    else
+        [ "$ledger_before" = "$(ledger)" ] || fail "a $mode call left a ledger entry"
+    fi
+done
+
+# Only weekly and monthly call a model, and never on a dry run or with --no-insights.
+reset_store
+: >"$CLAUDE_LOG"
+for w in daily biweekly quarterly yearly; do
+    run 0 --window "$w" --end 2026-10-09 --no-github
+    [ "$(insights "$(field label_date)-$w")" = '{"skipped": "window"}' ] || fail "$w should not call a model" "$(insights "$(field label_date)-$w")"
+done
+run 0 --window weekly --end 2026-10-09 --no-github --no-insights
+[ "$(insights 2026-10-04-weekly)" = '{"skipped": "--no-insights"}' ] || fail "--no-insights not recorded"
+run 0 --window weekly --end 2026-10-09 --no-github --dry-run
+python3 - "$(field json)" <<'PY' || fail "dry run insights not recorded as skipped"
+import json, sys
+assert json.load(open(sys.argv[1]))["insights"] == {"skipped": "dry-run"}
+PY
+[ ! -s "$CLAUDE_LOG" ] || fail "a model was called when none should be" "$(cat "$CLAUDE_LOG")"
+run 0 --window monthly --end 2026-10-09 --no-github
+grep -q "report-monthly\|ARGS" "$CLAUDE_LOG" || fail "monthly should call a model"
+[ "$(wc -l <"$CLAUDE_LOG")" -le 3 ] || fail "monthly called the model more than once"
+long="$(python3 -c 'print("word " * 400)')"
+reset_store
+STUB_CLAUDE_TEXT="$long" run 0 --window weekly --end 2026-10-09 --no-github
+python3 - "$store/reports/2026-10-04-weekly.json" <<'PY' || fail "overlong insights are not cut"
+import json, sys
+n = len(json.load(open(sys.argv[1]))["insights"]["text"].split())
+assert n <= 260, n
+PY
+unset MY_SECRET_TOKEN
 reset_store
 
 echo "test_agent_report_script: OK"

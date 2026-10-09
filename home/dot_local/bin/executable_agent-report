@@ -13,6 +13,8 @@ import json
 import math
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -432,6 +434,114 @@ def thresholds_review(start, end, th):
     return {"daily_reports": len(daily), "thresholds": rows}
 
 
+# ── Insights (one capped model call) ─────────────────────────────────────────
+
+INSIGHTS_WINDOWS = ("weekly", "monthly")
+INSIGHTS_MODEL = "sonnet"
+INSIGHTS_BUDGET_USD = "0.50"
+INSIGHTS_NEED_USD = 0.5
+INSIGHTS_WORDS = 250
+INSIGHTS_TIMEOUT_S = int(os.environ.get("AGENT_REPORT_INSIGHTS_TIMEOUT", "240"))
+LIST_CAP = 40
+
+INSIGHTS_PROMPT = """You review one developer's AI coding-agent usage. Below is a metrics JSON for the
+current window and the previous equal window, plus earlier history and, when
+present, delivery metrics and the config inventory. Write at most {words} words
+of markdown with three short bullet groups: **Trends**, **Anomalies**,
+**Suggested changes**. Be concrete: name the model, pipeline, skill, hook or
+flag, and quantify with the numbers given. Scripted and interactive sessions
+are separate populations: never blend them. Dollar figures are list-price
+estimates, not bills. Never report "hours saved" or any other self-estimated
+time saving; state only what the numbers measure. A delivery section marked
+errored is unknown, not zero. No preamble, no closing line.
+
+METRICS:
+"""
+
+
+def capped(v):
+    if isinstance(v, dict):
+        return {k: capped(x) for k, x in v.items()}
+    if isinstance(v, list):
+        out = [capped(x) for x in v[:LIST_CAP]]
+        return out + [f"... {len(v) - LIST_CAP} more"] if len(v) > LIST_CAP else out
+    return v
+
+
+def insights_input(report):
+    return json.dumps(capped({k: v for k, v in report.items() if k != "insights"}), separators=(",", ":"))
+
+
+def record_spend(run, usd):
+    """Append to the ledger exactly as `agent-metrics budget record` does."""
+    am.ledger_spent()
+    at = am.iso(am.now().timestamp())
+    path = am.month_file("ledger", at)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {"at": at, "run": am.clean_id(run), "usd": usd, "critical": False}
+    with open(path, "a") as fh:
+        fh.write(json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n")
+
+
+def first_words(text, n):
+    words = list(re.finditer(r"\S+", text))
+    return text if len(words) <= n else text[:words[n - 1].end()] + " …"
+
+
+def run_insights(report):
+    claude = shutil.which("claude") or str(am.HOME / ".local/bin/claude")
+    if not os.access(claude, os.X_OK):
+        return {"error": "claude CLI not found"}
+    # An empty working directory and project-only settings load no user
+    # plugins, hooks or MCP servers, so the call costs what its prompt costs.
+    # No persisted session keeps it out of the next collect's numbers.
+    cmd = [claude, "-p", "--model", INSIGHTS_MODEL, "--tools", "", "--strict-mcp-config", "--setting-sources", "project",
+           "--max-turns", "1", "--max-budget-usd", INSIGHTS_BUDGET_USD, "--no-session-persistence",
+           "--output-format", "json"]
+    prompt = INSIGHTS_PROMPT.format(words=INSIGHTS_WORDS) + insights_input(report)
+    with tempfile.TemporaryDirectory(prefix="agent-report-insights-") as cwd:
+        try:
+            r = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=INSIGHTS_TIMEOUT_S,
+                               cwd=cwd, env=am.child_env())
+        except subprocess.TimeoutExpired:
+            return {"error": f"timed out after {INSIGHTS_TIMEOUT_S}s"}
+        except OSError as e:
+            return {"error": f"could not start claude: {e.strerror}"}
+    try:
+        j = json.loads(r.stdout)
+    except ValueError:
+        j = None
+    j = j if isinstance(j, dict) else {}
+    cost = j.get("total_cost_usd")
+    # Money the call spent is recorded whether or not it produced text.
+    if am.is_amount(cost) and cost > 0:
+        record_spend(f"report-{report['window']}", cost)
+    if r.returncode != 0:
+        return {"error": f"claude exited {r.returncode}"}
+    if not j:
+        return {"error": "claude returned non-JSON output"}
+    if j.get("is_error") or not isinstance(j.get("result"), str) or not j["result"].strip():
+        return {"error": f"claude reported an error ({j.get('subtype') or j.get('terminal_reason') or 'no result'})"}
+    return {"text": first_words(j["result"].strip(), INSIGHTS_WORDS), "cost_usd": round(cost, 4) if am.is_amount(cost) else None}
+
+
+def insights(opts, report):
+    if opts.window not in INSIGHTS_WINDOWS:
+        return {"skipped": "window"}
+    if opts.no_insights:
+        return {"skipped": "--no-insights"}
+    if opts.dry_run:
+        return {"skipped": "dry-run"}
+    state = am.budget_state(need=INSIGHTS_NEED_USD)
+    if not state["allowed"]:
+        return {"skipped": "budget", "state": state}
+    log("requesting insights (one capped claude call)")
+    out = run_insights(report)
+    if "error" in out:
+        log(f"insights failed: {out['error']}")
+    return out
+
+
 # ── Report ───────────────────────────────────────────────────────────────────
 
 def build_report(opts, w, th):
@@ -586,7 +696,17 @@ def render_thresholds(r):
     return lines + [""]
 
 
-SECTION_RENDERERS = [render_audit, render_thresholds]
+def render_insights(r):
+    i = r["insights"]
+    if i.get("text"):
+        return ["## Insights", "", "Written by a model from the numbers above; check them before acting.", "", i["text"], ""]
+    if i.get("skipped") == "window":
+        return []
+    why = f"skipped ({i['skipped']})" if "skipped" in i else f"failed ({i.get('error')})"
+    return ["## Insights", "", f"Not generated: {why}.", ""]
+
+
+SECTION_RENDERERS = [render_audit, render_thresholds, render_insights]
 
 
 def render(r):
@@ -666,11 +786,13 @@ def cmd_run(args):
     w = compute_windows(args.window, end)
     if args.dry_run:
         report = build_report(args, w, th)
+        report["insights"] = insights(args, report)
         paths = write_outputs(report, Path(tempfile.mkdtemp(prefix="agent-report-")))
         result = {"dry_run": True}
     else:
         with am.Lock():
             report = build_report(args, w, th)
+            report["insights"] = insights(args, report)
             paths = write_outputs(report, am.STORE / "reports")
             if args.window == "daily":
                 write_flags_file(report)

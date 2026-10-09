@@ -31,9 +31,13 @@ DAY = 86400
 DEFAULT_DAYS = 90
 FAMILIES = ("opus", "sonnet", "haiku", "other")
 POPULATIONS = ("interactive", "scripted")
-REPORT_NAME = re.compile(r"(\d{4}-\d{2}-\d{2})-(daily|weekly|biweekly|monthly|quarterly|yearly)\.json")
+REPORT_NAME = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2})-(daily|weekly|biweekly|monthly|quarterly|yearly)\.json", re.ASCII)
 MAX_FLAG_ROWS = 30
 TOP_N = 8
+MAX_DAYS = 180
+# Nothing in the store is anywhere near this; a larger value is corruption, and
+# summing two of them would overflow a float.
+PLAUSIBLE_MAX = 1e15
 ID_SHOW = 64
 
 
@@ -82,8 +86,8 @@ def amount(d, key, path, default=0.0):
     v = d.get(key)
     if v is None:
         return default
-    if not am.is_amount(v):
-        unreadable(path, f"{key} is {v!r}, not a non-negative number")
+    if not am.is_amount(v) or v > PLAUSIBLE_MAX:
+        unreadable(path, f"{key} is {v!r}, not a plausible non-negative number")
     return float(v)
 
 
@@ -112,7 +116,11 @@ def load_sessions(lo_month):
                                    "input": amount(u, "input", path), "cache_read": amount(u, "cache_read", path),
                                    "cw": amount(u, "cache_write_5m", path) + amount(u, "cache_write_1h", path)})
             links = r.get("pr_links") if isinstance(r.get("pr_links"), list) else []
-            prs = {(str(x.get("repo")), x.get("number")) for x in links if isinstance(x, dict) and x.get("number") is not None}
+            prs = set()
+            for x in links:
+                if not isinstance(x, dict) or isinstance(x.get("number"), bool) or not isinstance(x.get("number"), int):
+                    unreadable(path, f"session {sid} has a pr_links entry without an integer number")
+                prs.add((str(x.get("repo")), x["number"]))
             pop = r.get("population")
             sessions.append({"ts": ts, "date": dt.datetime.fromtimestamp(ts, dt.timezone.utc).date(),
                              "pop": pop if pop in POPULATIONS else "scripted",
@@ -129,8 +137,7 @@ def load_quota(lo_month):
             ts = am.parse_ts(r.get("hour"))
             if ts is None:
                 unreadable(path, f"reading has hour {r.get('hour')!r}")
-            readings.append({"ts": ts, "five": r.get("five_hour_pct") if am.is_amount(r.get("five_hour_pct")) else None,
-                             "seven": r.get("seven_day_pct") if am.is_amount(r.get("seven_day_pct")) else None})
+            readings.append({"ts": ts, "five": amount(r, "five_hour_pct", path, None), "seven": amount(r, "seven_day_pct", path, None)})
     return readings
 
 
@@ -166,7 +173,9 @@ def plain(v):
 
 
 def number(v):
-    return v if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
+    """A report figure fit to draw: finite and not absurdly large."""
+    ok = isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and abs(v) <= PLAUSIBLE_MAX
+    return v if ok else None
 
 
 def change(cur, prev):
@@ -235,7 +244,7 @@ def stacked_bars(labels, series, matrix, tips, fmt_axis):
     ymax, step = nice_ceiling(max(totals))
     n = len(labels)
     slot = (W - ML - MR) / n
-    bw = min(24.0, slot - 2)
+    bw = max(1.0, min(24.0, slot - 2))
     plot_h = H - MT - MB
     out = [axes(labels, ymax, step, fmt_axis)]
     for i in range(n):
@@ -580,15 +589,15 @@ def write_page(directory, page):
 
 def build_page(days):
     now = am.now()
-    start = now.date() - dt.timedelta(days=max(days, 14) + 7)
+    start = now.date() - dt.timedelta(days=max(days, 30) + 7)
     lo_month = start.strftime("%Y-%m")
     page, count = render(load_sessions(lo_month), load_quota(lo_month), load_reports(), days, now)
     return page, count
 
 
 def cmd_build(args):
-    if not 1 <= args.days <= 366:
-        usage_error("--days must be between 1 and 366")
+    if not 1 <= args.days <= MAX_DAYS:
+        usage_error(f"--days must be between 1 and {MAX_DAYS}")
     if args.out and args.dry_run:
         usage_error("--out and --dry-run both pick the destination; use one")
     am.require_store()
@@ -601,11 +610,12 @@ def cmd_build(args):
         if am.has_upstream():
             pulled = am.git("pull", "--ff-only", "--quiet", check=False)
             if pulled.returncode != 0:
-                am.die(am.EXIT_FAIL, f"git pull failed: {(pulled.stderr or pulled.stdout).strip().splitlines()[-1:]}",
+                detail = (pulled.stderr or pulled.stdout).strip().splitlines()
+                am.die(am.EXIT_FAIL, f"git pull failed: {detail[-1] if detail else pulled.returncode}",
                        f"Resolve it in {am.tilde(am.STORE)} and re-run")
         page, count = build_page(args.days)
         target = write_page(am.STORE / "site", page)
-        result = am.publish(f"site: {am.now().strftime('%Y-%m-%d')}")
+        result = am.publish(f"site: {am.now().strftime('%Y-%m-%d')}", dirs=("site",))
     am.emit({"path": am.tilde(target), "sessions_charted": count, **result})
     return 1 if "error" in result else 0
 
@@ -622,7 +632,7 @@ def build_parser():
     sub = p.add_subparsers(metavar="command", parser_class=Parser)
     b = sub.add_parser("build", help="render the trends page; publish it unless --out or --dry-run")
     b.set_defaults(func=cmd_build)
-    b.add_argument("--days", type=int, default=DEFAULT_DAYS, metavar="N", help="chart range in days (default 90)")
+    b.add_argument("--days", type=int, default=DEFAULT_DAYS, metavar="N", help=f"chart range in days, 1 to {MAX_DAYS} (default 90)")
     b.add_argument("--dry-run", action="store_true", help="write to a temp dir, print the path, publish nothing")
     b.add_argument("--out", metavar="DIR", help="write DIR/index.html instead of the store; publish nothing")
     return p
@@ -630,7 +640,12 @@ def build_parser():
 
 def main(argv):
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (ArithmeticError, TypeError, ValueError, KeyError, AttributeError) as e:
+        # A store value the checks above did not foresee: report it, no traceback, no page.
+        am.die(am.EXIT_USAGE, f"the store holds a value agent-trends cannot render: {type(e).__name__}: {e}",
+               "Run with a different --out to inspect, or check the newest session, quota and report files")
 
 
 if __name__ == "__main__":

@@ -1,0 +1,712 @@
+#!/usr/bin/env python3
+"""agent-propose — turn audit findings into one reviewable pull request.
+
+Derives findings from the newest stored agent-report with fixed arithmetic,
+has a tool-restricted model edit one file per finding, checks, commits and
+tests each edit itself, has a second model approve or reject each commit, and
+opens one labelled pull request. `verify` later compares each merged finding's
+metric before and after the merge.
+Agent-facing: stdout is TOON, diagnostics go to stderr.
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import urllib.parse
+from pathlib import Path
+from importlib.machinery import SourceFileLoader
+
+VERSION = "1.0.0"
+
+if __name__ == "__main__" and len(sys.argv) == 2 and sys.argv[1] in ("-v", "-V", "--version"):
+    print(VERSION)
+    sys.exit(0)
+
+_here = Path(__file__).resolve().parent
+# The deployed file is agent-metrics; in the source tree it carries chezmoi's prefix.
+am = SourceFileLoader("agent_metrics", str(next(p for p in (_here / "agent-metrics", _here / "executable_agent-metrics")
+                                                if p.exists()))).load_module()
+
+EXIT_FAIL, EXIT_USAGE, EXIT_DENIED = am.EXIT_FAIL, am.EXIT_USAGE, am.EXIT_DENIED
+emit, die, tilde = am.emit, am.die, am.tilde
+
+WINDOWS = ("daily", "weekly", "monthly")
+USAGE_SHORT = "agent-propose [run --window daily|weekly|monthly [--dry-run] | verify [--dry-run]] [--help]"
+CRITICAL_EFFECT_PCT = 5
+# The documented limits for a file loaded into every session.
+INSTRUCTION_MAX_LINES = 200
+MEMORY_MAX_BYTES = 25 * 1024
+# A share of fewer sessions than this swings on one of them.
+MIN_SHARE_SESSIONS = 5
+# A merged finding is not raised again until verify has had its fortnight and
+# the next reports reflect the change; a machine rejection is not retried
+# sooner, so a finding the author cannot fix does not spend every run.
+MERGED_QUIET_DAYS = 30
+REJECTED_QUIET_DAYS = 30
+PENDING_GRACE_S = 86400
+LABEL, LABEL_STRICT = "agent-audit", "strict-review"
+GH_TIMEOUT_S = 60
+
+DATE = re.compile(r"\d{4}-\d\d-\d\d")
+STAMP = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ")
+SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}")
+REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,100}")
+REL_PATH = re.compile(r"[A-Za-z0-9_.][A-Za-z0-9_.@+/-]{0,200}")
+HOME_PATH = re.compile(r"~/[A-Za-z0-9_.@/-]{1,200}")
+PLUGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,63}")
+MODEL_ID = re.compile(r"[a-z0-9][a-z0-9.-]{0,63}")
+MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9 .-]{0,63}")
+FINDING_ID = re.compile(r"[a-z][a-z-]{0,40}:[A-Za-z0-9_.@/-]{1,200}")
+AUDIT_BRANCH = re.compile(r"chore/agent-audit-\d{4}-\d\d-\d\d")
+METRIC = re.compile(r"[a-z_]{1,40}")
+OUTCOMES = ("pending", "open", "merged", "dropped", "closed", "rejected")
+REJECT_REASONS = ("timeout", "spawn_failed", "claude_exit", "claude_error", "no_change", "no_effect", "shape",
+                  "outside_worktree", "checker_error", "tests_failed", "review_rejected", "review_failed",
+                  "patch_conflict", "pr_failed",
+                  # The checker's own codes.
+                  "protected_path", "protected_settings_block", "invisible_unicode", "non_ascii", "instruction_growth",
+                  "instruction_import", "hook_change", "env_change", "mcp_change", "mode_change", "symlink", "binary",
+                  "too_large", "outside_target", "policy_unreadable")
+
+
+def log(msg):
+    print(f"agent-propose: {msg}", file=sys.stderr)
+
+
+# ── Config ───────────────────────────────────────────────────────────────────
+
+def safe_rel(v):
+    return isinstance(v, str) and REL_PATH.fullmatch(v) and ".." not in v.split("/") and not v.startswith("/")
+
+
+def load_cfg():
+    """propose.json, with every value that reaches a command line checked
+    here. A value that does not fit is a setup error naming the key."""
+    c = am.load_config("propose.json")
+    path = tilde(am.CONFIG / "propose.json")
+
+    def need(key, ok):
+        if not ok:
+            die(EXIT_USAGE, f"{path}: {key} is missing or not usable")
+
+    pos = lambda v: am.is_amount(v) and v > 0
+    whole = lambda v: isinstance(v, int) and not isinstance(v, bool) and v > 0
+    need("repo_path", isinstance(c.get("repo_path"), str) and c["repo_path"])
+    need("repo_slug", isinstance(c.get("repo_slug"), str) and SLUG.fullmatch(c["repo_slug"]))
+    need("base_branch", isinstance(c.get("base_branch"), str) and REF.fullmatch(c["base_branch"])
+         and ".." not in c["base_branch"])
+    for k in ("checker_path", "settings_source", "workflow_instruction_file"):
+        need(k, safe_rel(c.get(k)))
+    src = c.get("instruction_sources")
+    need("instruction_sources", isinstance(src, dict) and all(
+        isinstance(k, str) and HOME_PATH.fullmatch(k) and safe_rel(v) for k, v in src.items()))
+    caps = c.get("caps_usd")
+    need("caps_usd", isinstance(caps, dict) and all(pos(caps.get(w)) for w in WINDOWS))
+    for k in ("per_finding_usd", "review_usd", "review_min_usd"):
+        need(k, pos(c.get(k)))
+    need("review_min_usd", c["review_min_usd"] <= c["review_usd"])
+    for k in ("max_findings", "max_changed_lines", "max_turns", "call_timeout_s", "test_timeout_s", "rejection_memory_days"):
+        need(k, whole(c.get(k)))
+    for k in ("author_model", "review_model"):
+        m = c.get(k)
+        need(k, isinstance(m, dict) and isinstance(m.get("id"), str) and MODEL_ID.fullmatch(m["id"])
+             and isinstance(m.get("name"), str) and MODEL_NAME.fullmatch(m["name"]))
+    need("unattributed_share_threshold", am.is_amount(c.get("unattributed_share_threshold"))
+         and 0 < c["unattributed_share_threshold"] < 1)
+    need("strict_finders", isinstance(c.get("strict_finders"), list) and all(f in FINDER_NAMES for f in c["strict_finders"]))
+    need("test_globs", isinstance(c.get("test_globs"), list) and all(safe_rel(g.replace("*", "x")) if isinstance(g, str) else False
+                                                                   for g in c["test_globs"]))
+    need("protected_paths", isinstance(c.get("protected_paths"), list) and all(isinstance(p, str) and p for p in c["protected_paths"]))
+    c["repo"] = Path(c["repo_path"].replace("~", str(am.HOME), 1) if c["repo_path"].startswith("~/") else c["repo_path"])
+    need("repo_path", c["repo"].is_absolute())
+    return c
+
+
+# ── GitHub ───────────────────────────────────────────────────────────────────
+
+class GhError(RuntimeError):
+    """A failed GitHub call, as one of a fixed set of codes. GitHub's own
+    text goes to stderr only."""
+
+    def __init__(self, code, stderr=""):
+        super().__init__(code)
+        self.code = code
+        self.not_found = bool(re.search(r"HTTP 404", stderr))
+        first = (stderr.strip().splitlines() or [""])[0]
+        if first:
+            log(f"github {code}: {am.ID_CREDENTIAL.sub('_redacted', first)[:200]}")
+
+
+def gh(args):
+    if not shutil.which("gh"):
+        raise GhError("not_installed")
+    env = {k: v for k, v in os.environ.items()
+           if k in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN") or not am.CRED_ENV.search(k)}
+    env.update(GH_PROMPT_DISABLED="1", NO_COLOR="1")
+    try:
+        r = subprocess.run(["gh", *args], capture_output=True, text=True, env=env, timeout=GH_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        raise GhError("timeout")
+    if r.returncode != 0:
+        code = "rate_limited" if re.search(r"rate limit|HTTP 429", r.stderr, re.I) else \
+            "auth" if re.search(r"HTTP 40[13]|bad credentials|gh auth login", r.stderr, re.I) else "http_error"
+        raise GhError(code, r.stderr)
+    return r.stdout
+
+
+def gh_json(args, kind):
+    try:
+        data = json.loads(gh(args))
+    except ValueError:
+        raise GhError("bad_output")
+    if not isinstance(data, kind):
+        raise GhError("bad_output")
+    return data
+
+
+def open_audit_prs(cfg):
+    """(number, head branch or None) for every open audit PR. A head branch
+    this tool would not have created comes back as None."""
+    out = []
+    for p in gh_json(["pr", "list", "--repo", cfg["repo_slug"], "--label", LABEL, "--state", "open",
+                      "--json", "number,headRefName", "--limit", "20"], list):
+        if not (isinstance(p, dict) and isinstance(p.get("number"), int) and not isinstance(p["number"], bool) and p["number"] > 0):
+            raise GhError("bad_output")
+        head = p.get("headRefName")
+        out.append((p["number"], head if isinstance(head, str) and AUDIT_BRANCH.fullmatch(head) else None))
+    return out
+
+
+def approval_required(cfg):
+    """Whether the base branch demands an approving review, from rulesets and
+    from classic protection. Anything but a clear answer raises."""
+    slug, base = cfg["repo_slug"], urllib.parse.quote(cfg["base_branch"], safe="")
+    for rule in gh_json(["api", f"repos/{slug}/rules/branches/{base}"], list):
+        if not isinstance(rule, dict):
+            raise GhError("bad_output")
+        p = rule.get("parameters") if isinstance(rule.get("parameters"), dict) else {}
+        if rule.get("type") == "pull_request" and (p.get("required_approving_review_count") or p.get("require_code_owner_review")):
+            return True
+    try:
+        prot = gh_json(["api", f"repos/{slug}/branches/{base}/protection"], dict)
+    except GhError as e:
+        if e.not_found:
+            return False
+        raise
+    reviews = prot.get("required_pull_request_reviews")
+    return isinstance(reviews, dict) and bool(reviews.get("required_approving_review_count") or reviews.get("require_code_owner_reviews"))
+
+
+# ── Store ────────────────────────────────────────────────────────────────────
+
+def sync_store():
+    """Call with the Lock held: refuse a store with changes this tool did not
+    make, then fast-forward, so a later push is not rejected."""
+    try:
+        foreign = [l for l in am.git("status", "--porcelain").stdout.splitlines()
+                   if not l[3:].startswith(tuple(d + "/" for d in am.OWN_DIRS))]
+        if foreign:
+            die(EXIT_FAIL, "the store has changes this run did not make", f"Inspect with `git -C {tilde(am.STORE)} status`")
+        if am.has_upstream() and am.git("pull", "--quiet", "--ff-only", check=False).returncode != 0:
+            die(EXIT_FAIL, "git pull --ff-only failed in the store", f"Reconcile by hand in {tilde(am.STORE)}")
+    except RuntimeError:
+        die(EXIT_FAIL, "git failed in the store", f"Inspect with `git -C {tilde(am.STORE)} status`")
+
+
+def publish(message):
+    """Commit and push findings and ledger. Returns False when the push failed."""
+    with am.Lock():
+        sync_store()
+        try:
+            return am.publish(message, dirs=("findings", "ledger")).get("pushed") is not False
+        except RuntimeError:
+            return False
+
+
+def bad_report(path):
+    die(EXIT_USAGE, f"{tilde(path)} is not a usable stored report", "Fix or remove the stored report")
+
+
+def load_report(path, window, stored=True):
+    """A report read back for the finders. Every value they use is checked
+    here or where it is read: a damaged file must not become a finding."""
+    try:
+        j = json.loads(Path(path).read_text())
+        label = j["label_date"]
+        ok = isinstance(label, str) and DATE.fullmatch(label) and j["window"] == window \
+            and (not stored or Path(path).name == f"{label}-{window}.json")
+        for k in ("label_date", "start", "end"):
+            dt.date.fromisoformat(j[k])
+        ok = ok and isinstance(j["current"]["quota"], dict) and isinstance(j["previous"]["quota"], dict)
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        ok = False
+    if not ok:
+        bad_report(path)
+    return j
+
+
+def inventory_of(j):
+    a = j.get("audit") if isinstance(j, dict) else None
+    try:
+        ok = all(isinstance(h, dict) for h in a["hooks"]) and all(isinstance(p, dict) for p in a["disable_candidates"]["plugins"]) \
+            and all(isinstance(f, dict) for f in a["instructions"]["files"])
+    except (KeyError, TypeError):
+        ok = False
+    return a if ok else None
+
+
+def newest_inventory(not_after):
+    """The config inventory of the newest stored report that has one. Daily
+    reports embed none, so a daily run reads the last longer window's."""
+    best = None
+    for path in sorted((am.STORE / "reports").glob("*.json")):
+        try:
+            j = json.loads(path.read_text())
+            label = j["label_date"]
+            if not (isinstance(label, str) and DATE.fullmatch(label) and label <= not_after):
+                continue
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        inv = inventory_of(j)
+        if inv and (best is None or label >= best[0]):
+            best = (label, inv)
+    return best
+
+
+def window_rows(lo_date, hi_date):
+    lo, hi = f"{lo_date}T00:00:00Z", f"{hi_date}T00:00:00Z"
+    rows = []
+    for path in sorted((am.STORE / "sessions").glob("*.jsonl")):
+        if lo[:7] <= path.stem <= hi[:7]:
+            rows += [r for r in am.read_month(path).values() if lo <= r["started_at"] < hi]
+    return rows
+
+
+# ── Findings ─────────────────────────────────────────────────────────────────
+
+def finding(finder, slug, metric, value, baseline, effect, evidence, change):
+    effect = round(float(effect), 2)
+    return {"id": f"{finder}:{slug}", "kind": "arithmetic", "finder": finder, "metric": metric, "value": value,
+            "baseline": baseline, "estimated_effect_pct": effect, "critical": effect >= CRITICAL_EFFECT_PCT,
+            "evidence": evidence, "change": change, "needs_human": change is None, "status": None, "reason": None}
+
+
+def invoked(plugin, rows):
+    for r in rows:
+        for field, prefix in (("skills", f"{plugin}:"), ("subagent_types", f"{plugin}:"), ("mcp", f"plugin_{plugin}_")):
+            names = r.get(field)
+            if isinstance(names, dict) and any(isinstance(n, str) and n.startswith(prefix) for n in names):
+                return True
+    return False
+
+
+def find_unused_plugins(ctx):
+    """An enabled plugin nobody invoked in the window whose hooks still inject
+    context. The effect is its share of all injected bytes."""
+    inv = ctx.get("inventory")
+    if not inv:
+        return []
+    total = sum(h["bytes"] for h in inv["hooks"] if am.is_amount(h.get("bytes")))
+    out = []
+    for p in inv["disable_candidates"]["plugins"]:
+        name, b = p.get("plugin"), p.get("hook_bytes")
+        if not (isinstance(name, str) and PLUGIN.fullmatch(name)) or not am.is_amount(b) or b <= 0 or total <= 0 or b > total:
+            continue
+        if invoked(name, ctx["rows"]):
+            continue
+        out.append(finding("unused-plugin", name, "hook_injected_bytes", b, total, b / total * 100,
+                           {"plugin": name, "hook_bytes": b, "all_hook_bytes": total, "invocations": 0,
+                            "inventory": ctx["inventory_label"]},
+                           {"action": "disable_plugin", "file": ctx["cfg"]["settings_source"], "plugin": name}))
+    return out
+
+
+def find_oversize_instructions(ctx):
+    """An always-loaded instruction file over the documented limits. The
+    effect is the share of the file that sits above the limit."""
+    inv = ctx.get("inventory")
+    if not inv:
+        return []
+    out = []
+    for f in inv["instructions"]["files"]:
+        path, lines, size = f.get("path"), f.get("lines"), f.get("bytes")
+        if not (isinstance(path, str) and HOME_PATH.fullmatch(path)) or ".." in path.split("/"):
+            continue
+        if am.is_amount(lines) and lines > INSTRUCTION_MAX_LINES:
+            metric, value, limit = "instruction_lines", lines, INSTRUCTION_MAX_LINES
+        elif path.endswith("/MEMORY.md") and am.is_amount(size) and size > MEMORY_MAX_BYTES:
+            metric, value, limit = "instruction_bytes", size, MEMORY_MAX_BYTES
+        else:
+            continue
+        src = ctx["cfg"]["instruction_sources"].get(path)
+        out.append(finding("oversize-instructions", path[2:], metric, value, limit, (value - limit) / value * 100,
+                           {"path": path, "lines": lines, "bytes": size, "inventory": ctx["inventory_label"]},
+                           # Only files this repo deploys can be edited here.
+                           {"action": "trim_instructions", "file": src, "limit": limit, "unit": metric.split("_")[1]} if src else None))
+    return out
+
+
+def find_unattributed_sessions(ctx):
+    """Interactive sessions started outside any repo, above the threshold.
+    The effect is the distance to the threshold, in percentage points."""
+    inter = [r for r in ctx["rows"] if r.get("population") == "interactive"]
+    n = len(inter)
+    if n < MIN_SHARE_SESSIONS:
+        return []
+    lost = sum(1 for r in inter if not r.get("repo"))
+    share, limit = lost / n, ctx["cfg"]["unattributed_share_threshold"]
+    if share <= limit:
+        return []
+    return [finding("unattributed-sessions", "interactive", "interactive_unattributed_share", round(share, 4), limit,
+                    (share - limit) * 100, {"interactive_sessions": n, "unattributed": lost},
+                    {"action": "steer_worktrees", "file": ctx["cfg"]["workflow_instruction_file"]})]
+
+
+def find_quota_peak(ctx):
+    """The weekly plan quota peaked at or above the cut-off in this window and
+    the one before. Lowering a default is a decision for a person."""
+    cut = ctx["budget"]["weekly_quota_cutoff_pct"]
+    cur = ctx["report"]["current"]["quota"].get("peak_seven_day_pct")
+    prev = ctx["report"]["previous"]["quota"].get("peak_seven_day_pct")
+    if not (am.is_amount(cur) and am.is_amount(prev) and cur >= cut and prev >= cut):
+        return []
+    return [finding("weekly-quota-peak", ctx["report"]["window"], "weekly_quota_peak_pct", cur, cut, cur - cut,
+                    {"peak_pct": cur, "previous_peak_pct": prev, "cutoff_pct": cut}, None)]
+
+
+def find_trends(_ctx):
+    """Trend-based findings wait until the store holds a month of variance to
+    judge a movement against; until then there is nothing sound to return."""
+    return []
+
+
+FINDERS = (find_unused_plugins, find_oversize_instructions, find_unattributed_sessions, find_quota_peak, find_trends)
+FINDER_NAMES = ("unused-plugin", "oversize-instructions", "unattributed-sessions", "weekly-quota-peak")
+
+
+def run_finders(ctx):
+    out = []
+    for fn in FINDERS:
+        out += fn(ctx)
+    ids = set()
+    # One finding per id: the first wins, so a duplicated inventory entry cannot double a proposal.
+    return [f for f in out if FINDING_ID.fullmatch(f["id"]) and not (f["id"] in ids or ids.add(f["id"]))]
+
+
+# ── History ──────────────────────────────────────────────────────────────────
+
+def history_path():
+    return am.STORE / "findings" / "history.jsonl"
+
+
+def load_history():
+    """Every finding ever proposed. A line that is not a row stops the run:
+    reading around it would forget a rejection."""
+    path = history_path()
+    rows = []
+    if not path.is_file():
+        return rows
+    for n, line in enumerate(path.read_text().splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            r = json.loads(line)
+            ok = isinstance(r["id"], str) and FINDING_ID.fullmatch(r["id"]) and r["outcome"] in OUTCOMES \
+                and isinstance(r["proposed_at"], str) and STAMP.fullmatch(r["proposed_at"]) \
+                and (r.get("pr") is None or (isinstance(r["pr"], int) and not isinstance(r["pr"], bool) and r["pr"] > 0)) \
+                and (r.get("branch") is None or (isinstance(r["branch"], str) and AUDIT_BRANCH.fullmatch(r["branch"]))) \
+                and all(r.get(k) is None or (isinstance(r[k], str) and STAMP.fullmatch(r[k])) for k in ("resolved_at", "merged_at", "judged_at")) \
+                and (r.get("reason") is None or r["reason"] in REJECT_REASONS)
+        except (ValueError, KeyError, TypeError):
+            ok = False
+        if not ok:
+            die(EXIT_USAGE, f"{tilde(path)} line {n} is not a history row", f"Fix or remove the line in {tilde(path)}")
+        rows.append(r)
+    return rows
+
+
+def save_history(rows):
+    am.write_lines(history_path(), rows)
+
+
+def stamp_or(v, fallback):
+    return v if isinstance(v, str) and STAMP.fullmatch(v) else fallback
+
+
+def refresh_history(cfg, rows):
+    """Bring unresolved rows up to date from GitHub; returns whether any
+    changed. Merged with the finding's commit still in the PR is merged;
+    merged without it means the owner removed it, which is a rejection."""
+    now = am.iso(am.now().timestamp())
+    changed = False
+    views = {}
+    for r in rows:
+        if r["outcome"] not in ("pending", "open"):
+            continue
+        if r.get("pr") is None:
+            found = gh_json(["pr", "list", "--repo", cfg["repo_slug"], "--head", r["branch"], "--state", "all",
+                             "--json", "number", "--limit", "5"], list) if r.get("branch") else []
+            numbers = [p.get("number") for p in found if isinstance(p, dict)]
+            if numbers and all(isinstance(n, int) and not isinstance(n, bool) and n > 0 for n in numbers):
+                r["pr"], r["outcome"] = max(numbers), "open"
+            elif am.now().timestamp() - am.parse_ts(r["proposed_at"]) > PENDING_GRACE_S:
+                r.update(outcome="rejected", reason="pr_failed", resolved_at=now)
+                changed = True
+                continue
+            else:
+                continue
+            changed = True
+        n = r["pr"]
+        if n not in views:
+            views[n] = gh_json(["pr", "view", str(n), "--repo", cfg["repo_slug"], "--json", "state,mergedAt,closedAt,commits"], dict)
+        v = views[n]
+        state = v.get("state")
+        if state == "OPEN":
+            new = {"outcome": "open"}
+        elif state == "CLOSED":
+            new = {"outcome": "closed", "resolved_at": stamp_or(v.get("closedAt"), now)}
+        elif state == "MERGED":
+            commits = v.get("commits")
+            if not isinstance(commits, list):
+                raise GhError("bad_output")
+            trailer = f"Finding: {r['id']}"
+            kept = any(isinstance(c, dict) and isinstance(c.get("messageBody"), str) and trailer in c["messageBody"].splitlines()
+                       for c in commits)
+            at = stamp_or(v.get("mergedAt"), now)
+            new = {"outcome": "merged", "merged_at": at, "resolved_at": at} if kept else {"outcome": "dropped", "resolved_at": at}
+        else:
+            raise GhError("bad_output")
+        if any(r.get(k) != x for k, x in new.items()):
+            r.update(new)
+            changed = True
+    return changed
+
+
+def remembered(fid, rows, cfg):
+    """Why a finding must not be proposed now, or None."""
+    now = am.now().timestamp()
+    age = lambda r, key: (now - am.parse_ts(r.get(key) or r["proposed_at"])) / 86400
+    for r in rows:
+        if r["id"] != fid:
+            continue
+        o = r["outcome"]
+        if o in ("pending", "open"):
+            return "open"
+        if o in ("dropped", "closed") and age(r, "resolved_at") <= cfg["rejection_memory_days"]:
+            return o
+        if o == "merged" and age(r, "merged_at") <= MERGED_QUIET_DAYS:
+            return "merged"
+        if o == "rejected" and age(r, "proposed_at") <= REJECTED_QUIET_DAYS:
+            return "rejected"
+    return None
+
+
+def select(findings, history, window, cfg):
+    """Mark what this run takes: by effect, minus what the memory rules out,
+    critical only on a daily run, at most the configured number."""
+    take = sorted([f for f in findings if not f["needs_human"]], key=lambda f: (-f["estimated_effect_pct"], f["id"]))
+    taken = 0
+    for f in take:
+        why = remembered(f["id"], history, cfg)
+        if why:
+            f["status"], f["reason"] = "skipped", why
+        elif window == "daily" and not f["critical"]:
+            f["status"], f["reason"] = "skipped", "not-critical"
+        elif taken >= cfg["max_findings"]:
+            f["status"], f["reason"] = "skipped", "over-max"
+        else:
+            f["status"] = "planned"
+            taken += 1
+    rest = sorted([f for f in findings if f["needs_human"]], key=lambda f: (-f["estimated_effect_pct"], f["id"]))
+    for f in rest:
+        f["status"] = "needs_human"
+    return take + rest
+
+
+# ── Run ──────────────────────────────────────────────────────────────────────
+
+def finding_rows(findings):
+    return [{"id": f["id"], "critical": f["critical"], "effect_pct": f["estimated_effect_pct"], "metric": f["metric"],
+             "value": f["value"], "baseline": f["baseline"], "status": f["status"], "reason": f["reason"]} for f in findings]
+
+
+class Stop(Exception):
+    """A gate closed. Not an error: the run ends cleanly and says which."""
+
+    def __init__(self, code, help_line=None):
+        super().__init__(code)
+        self.code, self.help_line = code, help_line
+
+
+def gate(gates, name, ok, detail):
+    gates.append({"gate": name, "result": "ok" if ok else "stop", "detail": detail})
+
+
+def cmd_run(args):
+    if args.report and not args.dry_run:
+        am.usage_error("--report previews a report outside the store and needs --dry-run", USAGE_SHORT)
+    am.require_store()
+    cfg = load_cfg()
+    budget_cfg = am.budget_config()
+    dry = args.dry_run
+    if not dry:
+        with am.Lock():
+            sync_store()
+    if args.report:
+        report = load_report(args.report, args.window, stored=False)
+    else:
+        stored = sorted((am.STORE / "reports").glob(f"*-{args.window}.json"))
+        if not stored:
+            die(EXIT_FAIL, f"no stored {args.window} report", f"Run `agent-report --window {args.window}` first")
+        report = load_report(stored[-1], args.window)
+    label = report["label_date"]
+    inv, inv_label = inventory_of(report), f"{label}-{args.window}"
+    if not inv:
+        newest = newest_inventory(label)
+        if newest:
+            inv_label, inv = f"{newest[0]}", newest[1]
+    gates = []
+    gate(gates, "store", True, "present")
+
+    history = load_history()
+    try:
+        if refresh_history(cfg, history) and not dry:
+            with am.Lock():
+                save_history(history)
+    except GhError as e:
+        die(EXIT_FAIL, f"history refresh failed ({e.code}): the rejection memory is unknown",
+            "Check `gh auth status`, then run again")
+
+    ctx = {"cfg": cfg, "budget": budget_cfg, "report": report, "inventory": inv, "inventory_label": inv_label,
+           "rows": window_rows(report["start"], report["end"])}
+    findings = select(run_finders(ctx), history, args.window, cfg)
+    planned = [f for f in findings if f["status"] == "planned"]
+    cap = cfg["caps_usd"][args.window]
+    out = {"window": args.window, "label_date": label, "dry_run": bool(dry)}
+    plan = {"mode": "new", "pr": None, "branch": None}
+    caps = None
+    try:
+        try:
+            prs = open_audit_prs(cfg)
+        except GhError as e:
+            die(EXIT_FAIL, f"open-pr gate: the GitHub query failed ({e.code})", "Check `gh auth status`, then run again")
+        if prs:
+            number, head = prs[0]
+            if len(prs) == 1 and head and args.window == "daily" and planned:
+                plan = {"mode": "append", "pr": number, "branch": head}
+                gate(gates, "open-pr", True, f"append to #{number}")
+            else:
+                gate(gates, "open-pr", False, f"#{number} open" if len(prs) == 1 else f"{len(prs)} open")
+                raise Stop("open-pr", "Merge or close the open audit PR; the next run proposes again")
+        else:
+            gate(gates, "open-pr", True, "none open")
+        if not planned:
+            raise Stop("no-findings")
+
+        # The review must still fit after the edits, so that many findings fit and no more.
+        room = int((cap - cfg["review_min_usd"]) / cfg["per_finding_usd"] + 1e-9)
+        for f in planned[max(room, 0):]:
+            f["status"], f["reason"] = "skipped", "over-cap"
+        planned = planned[:max(room, 0)]
+        if not planned:
+            raise Stop("cap-too-small", f"Raise caps_usd.{args.window} in {tilde(am.CONFIG / 'propose.json')}")
+        authoring = len(planned) * cfg["per_finding_usd"]
+        caps = {"run_usd": cap, "per_finding_usd": cfg["per_finding_usd"], "review_usd": min(cfg["review_usd"], round(cap - authoring, 2)),
+                "planned_max_usd": round(authoring + min(cfg["review_usd"], cap - authoring), 2)}
+
+        critical = any(f["critical"] for f in planned)
+        state = am.budget_state(need=cap, critical=critical)
+        gate(gates, "budget", state["allowed"], state["reason"])
+        if not state["allowed"]:
+            raise Stop("budget")
+
+        if plan["mode"] == "new":
+            try:
+                required = approval_required(cfg)
+            except GhError as e:
+                gate(gates, "review-gate", False, f"could not be read ({e.code})")
+                raise Stop("review-gate-unknown", "An access error is not a no; check `gh auth status` and the token's scopes")
+            gate(gates, "review-gate", not required, "an approving review is required" if required else "no approving review required")
+            if required:
+                raise Stop("review-required", "A PR that needs an approving review must be opened as the bot; "
+                                              "see docs/bot-authored-prs.md in the dotfiles repo")
+    except Stop as s:
+        for f in findings:
+            if f["status"] == "planned":
+                f["status"], f["reason"] = "not-attempted", s.code
+        out.update(gates=gates, findings=finding_rows(findings) or "none", result="stopped", stopped=s.code)
+        if caps:
+            out["caps"] = caps
+        if s.help_line:
+            out["help"] = [s.help_line]
+        emit(out)
+        return 0
+
+    out.update(gates=gates, findings=finding_rows(findings), caps=caps)
+    if dry:
+        out.update(result="dry-run", help=[f"Run `agent-propose run --window {args.window}` to author, review and open the PR"])
+        emit(out)
+        return 0
+    die(EXIT_FAIL, "authoring is not implemented yet")
+
+
+def cmd_home(_args):
+    out = {"bin": tilde(Path(sys.argv[0]).resolve()),
+           "description": "Turns audit findings into one reviewable pull request; verify judges merged ones later",
+           "store": tilde(am.STORE)}
+    if not am.store_exists():
+        out["status"] = "store not cloned"
+        out["help"] = ["Run `agent-metrics init` to clone the store"]
+        emit(out)
+        return 0
+    counts = {}
+    for r in load_history():
+        counts[r["outcome"]] = counts.get(r["outcome"], 0) + 1
+    out["history"] = {o: counts[o] for o in OUTCOMES if o in counts} or "no findings proposed yet"
+    out["help"] = ["Run `agent-propose run --window weekly --dry-run` to see findings, gates and caps",
+                   "Run `agent-propose verify --dry-run` to judge merged findings",
+                   "Run `agent-propose --help` for all commands"]
+    emit(out)
+    return 0
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        am.usage_error(message, f"Run `{self.prog} --help`")
+
+
+def build_parser():
+    p = Parser(prog="agent-propose", description=__doc__.split("\n\n")[1],
+               formatter_class=argparse.RawDescriptionHelpFormatter,
+               epilog="examples:\n  agent-propose run --window weekly --dry-run   findings, gates and planned caps; changes nothing\n"
+                      "  agent-propose run --window weekly             author, review and open the PR\n"
+                      "  agent-propose verify                          judge findings merged 14 or more days ago")
+    p.set_defaults(func=cmd_home)
+    sub = p.add_subparsers(metavar="command", parser_class=Parser)
+    r = sub.add_parser("run", help="propose the window's findings as one pull request")
+    r.add_argument("--window", required=True, choices=WINDOWS)
+    r.add_argument("--dry-run", action="store_true", help="print findings, gates and caps; no model call, worktree, push, PR or store change")
+    r.add_argument("--report", metavar="FILE", help="with --dry-run: read this report JSON, not the newest stored one")
+    r.set_defaults(func=cmd_run)
+    return p
+
+
+def main(argv):
+    args = build_parser().parse_args(argv)
+    try:
+        return args.func(args)
+    except (KeyError, TypeError, ValueError, AttributeError) as e:
+        # Reached only by data the checks above did not foresee; the type is
+        # enough to find it, and a message could quote the data.
+        die(EXIT_FAIL, f"unexpected data ({type(e).__name__})", "Re-run with --dry-run and inspect the store")
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)

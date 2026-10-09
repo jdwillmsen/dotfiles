@@ -8,12 +8,14 @@ Agent-facing: stdout is TOON, diagnostics go to stderr.
 """
 import argparse
 import datetime as dt
+import fcntl
 import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -51,6 +53,23 @@ OUTPUT_CMDS = (("commits", re.compile(r"\bgit\b[^|;&\n]*\bcommit\b")),
                ("pushes", re.compile(r"\bgit\b[^|;&\n]*\bpush\b")),
                ("prs_created", re.compile(r"\bgh\s+pr\s+create\b")))
 USAGE_FIELDS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
+
+LOCK_WAIT_S = int(os.environ.get("AGENT_METRICS_LOCK_WAIT", "600"))
+
+README = """# agent-metrics store
+
+Machine-written by `agent-metrics collect`; do not edit by hand.
+
+- `sessions/YYYY-MM.jsonl`: one row per Claude Code session, filed by the UTC
+  month it started in, sorted by start time. Numbers and identifiers only.
+- `quota/YYYY-MM.jsonl`: plan-quota readings, at most one per hour.
+- `ledger/YYYY-MM.jsonl`: the audit's own model spend.
+
+Costs are estimates at API list prices, an index of relative use and not a
+bill. Forked or resumed sessions are not de-duplicated, and a session resumed
+across months stays in the month it started. Field reference: the dotfiles
+repo, `docs/agent-metrics.md`.
+"""
 
 USAGE_SHORT = "agent-metrics [init | collect | budget [check|record]] [--help]"
 
@@ -433,6 +452,91 @@ def store_exists():
     return (STORE / ".git").exists()
 
 
+def require_store():
+    if not store_exists():
+        die(EXIT_USAGE, f"no store at {tilde(STORE)}", "Run `agent-metrics init` to clone it")
+
+
+def has_upstream():
+    return git("rev-parse", "--abbrev-ref", "@{u}", check=False).returncode == 0
+
+
+def month_file(kind, stamp):
+    return STORE / kind / f"{stamp[:7]}.jsonl"
+
+
+def read_month(path):
+    rows = {}
+    if path.is_file():
+        for line in path.read_text().splitlines():
+            if line.strip():
+                r = json.loads(line)
+                rows[r["session_id"]] = r
+    return rows
+
+
+def write_month(path, rows):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ordered = sorted(rows.values(), key=lambda r: (r["started_at"], r["session_id"]))
+    tmp = path.with_suffix(".tmp")
+    # Sorted keys and a fixed order keep a one-session change a one-line diff.
+    tmp.write_text("".join(json.dumps(r, sort_keys=True, separators=(",", ":")) + "\n" for r in ordered))
+    os.replace(tmp, path)
+
+
+def upsert(rows, write=True):
+    """Merge rows into their month files; rows for other sessions are kept,
+    which is how history outlives the transcripts."""
+    by_month = {}
+    for r in rows:
+        by_month.setdefault(month_file("sessions", r["started_at"]), []).append(r)
+    written = unchanged = 0
+    for path, new in by_month.items():
+        have = read_month(path)
+        changed = 0
+        for r in new:
+            if have.get(r["session_id"]) == r:
+                unchanged += 1
+            else:
+                have[r["session_id"]] = r
+                changed += 1
+        written += changed
+        if changed and write:
+            write_month(path, have)
+    return written, unchanged
+
+
+def iter_sessions(start, end):
+    """Rows whose start time falls in [start, end), both UTC datetimes."""
+    lo, hi = iso(start.timestamp()), iso(end.timestamp())
+    for path in sorted((STORE / "sessions").glob("*.jsonl")):
+        if lo[:7] <= path.stem <= hi[:7]:
+            for r in read_month(path).values():
+                if lo <= r["started_at"] < hi:
+                    yield r
+
+
+class Lock:
+    """One collect at a time: a timer firing during a manual run waits."""
+
+    def __enter__(self):
+        STATE.mkdir(parents=True, exist_ok=True)
+        self.fh = open(STATE / "collect.lock", "w")
+        deadline = time.monotonic() + LOCK_WAIT_S
+        while True:
+            try:
+                fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except OSError:
+                if time.monotonic() >= deadline:
+                    self.fh.close()
+                    die(EXIT_FAIL, f"another collect still holds the lock after {LOCK_WAIT_S}s")
+                time.sleep(min(2, LOCK_WAIT_S))
+
+    def __exit__(self, *_exc):
+        self.fh.close()
+
+
 # ── Commands ─────────────────────────────────────────────────────────────────
 
 def cmd_home(_args):
@@ -451,6 +555,83 @@ def cmd_home(_args):
                        "Run `agent-metrics --help` for all commands"]
     emit(out)
     return 0
+
+
+def cmd_init(_args):
+    if store_exists():
+        emit({"store": tilde(STORE), "status": "already cloned"})
+        return 0
+    remote = load_config("config.json").get("store_remote")
+    if not remote:
+        die(EXIT_USAGE, f"{tilde(CONFIG / 'config.json')} has no store_remote")
+    STORE.parent.mkdir(parents=True, exist_ok=True)
+    r = subprocess.run(["git", "clone", "--quiet", str(remote), str(STORE)], capture_output=True, text=True,
+                       env=child_env())
+    if r.returncode != 0:
+        die(EXIT_FAIL, f"git clone failed: {r.stderr.strip()}",
+            "Create the private repo first: `gh repo create jdwillmsen/agent-metrics --private`")
+    seeded = False
+    if not (STORE / "README.md").exists():
+        (STORE / "README.md").write_text(README)
+        try:
+            git("add", "README.md")
+            git("commit", "--quiet", "-m", "init: describe the store")
+            git("push", "--quiet", "-u", "origin", "HEAD")
+        except RuntimeError as e:
+            die(EXIT_FAIL, str(e))
+        seeded = True
+    emit({"store": tilde(STORE), "status": "cloned", "readme_written": seeded,
+          "help": ["Run `agent-metrics collect --since 90` for the one-time backfill"]})
+    return 0
+
+
+def cmd_collect(args):
+    require_store()
+    if args.since < 1:
+        usage_error("--since needs a whole number of days, 1 or more")
+    with Lock():
+        dirty = git("status", "--porcelain").stdout.strip()
+        if dirty:
+            die(EXIT_FAIL, f"the store has changes this run did not make: {dirty.splitlines()[0]}",
+                f"Inspect with `git -C {tilde(STORE)} status`")
+        if has_upstream():
+            pull = git("pull", "--quiet", "--ff-only", check=False)
+            if pull.returncode != 0:
+                die(EXIT_FAIL, f"git pull --ff-only failed: {(pull.stderr or pull.stdout).strip()}",
+                    f"Reconcile by hand in {tilde(STORE)}")
+
+        sessions = find_sessions(args.since)
+        rows, skipped = [], 0
+        for main, subs in sessions:
+            row = build_row(main, subs)
+            if row is None:
+                skipped += 1
+            else:
+                rows.append(row)
+        written, unchanged = upsert(rows, write=not args.dry_run)
+        out = {"files_scanned": len(sessions), "sessions_written": written, "sessions_unchanged": unchanged,
+               "files_skipped": skipped, "dry_run": bool(args.dry_run)}
+        if args.dry_run:
+            emit(out)
+            return 0
+
+        out["committed"] = False
+        if git("status", "--porcelain").stdout.strip():
+            git("add", "-A")
+            git("commit", "--quiet", "-m", f"collect: {now():%Y-%m-%d}, {written} sessions")
+            out["committed"] = True
+        ahead = not has_upstream() or git("rev-list", "--count", "@{u}..HEAD").stdout.strip() != "0"
+        if args.no_push or not ahead:
+            out["pushed"] = "skipped" if args.no_push and ahead else "nothing to push"
+            emit(out)
+            return 0
+        push = git("push", "--quiet", "-u", "origin", "HEAD", check=False)
+        out["pushed"] = push.returncode == 0
+        if push.returncode != 0:
+            # The rows are committed locally, so the next run delivers them.
+            out["error"] = f"git push failed: {(push.stderr or push.stdout).strip().splitlines()[-1]}"
+        emit(out)
+        return 0 if out["pushed"] else EXIT_FAIL
 
 
 def cmd_row(args):
@@ -479,8 +660,9 @@ def build_parser():
                       "  agent-metrics budget check --need 5   exit 0 when $5 may be spent, 3 when not")
     p.set_defaults(func=cmd_home)
     sub = p.add_subparsers(metavar="command", parser_class=Parser)
-    sub.add_parser("init", help="clone the store repo into place")
+    sub.add_parser("init", help="clone the store repo into place").set_defaults(func=cmd_init)
     c = sub.add_parser("collect", help="write rows for recently changed sessions, then commit and push")
+    c.set_defaults(func=cmd_collect)
     c.add_argument("--since", type=int, default=3, metavar="DAYS")
     c.add_argument("--dry-run", action="store_true")
     c.add_argument("--no-push", action="store_true")

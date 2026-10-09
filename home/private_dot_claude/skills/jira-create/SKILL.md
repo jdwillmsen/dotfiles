@@ -22,8 +22,8 @@ Determine from conversation context:
 
 | Decision | How |
 |----------|-----|
-| **Issue type** | Bug = broken thing; Task = concrete work item; Spike = time-boxed investigation that ends in a decision or tickets, not a merge; Epic = multi-issue goal. These projects have no Story type — file new capability as a Task |
-| **Project** | Run `stream key` in the repo the work is for; its output is `<PROJECT>` for every step below. The project follows the repo's GitHub owner (`jdwillmsen` → `JDW`, with `career` → `CAREER`; `jdwlabs` → `JDWLABS`; `dotablaze-tech` → `DOTA`), not the directory the session happens to be in. If it exits 1, or the work belongs to no repo, ask which stream — never default. |
+| **Issue type** | Bug = broken thing; Task = concrete work item; Spike = time-boxed investigation that ends in a decision or tickets, not a merge; Epic = multi-issue goal. Issue types differ per project: `JDWLABS` has Spike and no Story, while `JDW`, `DOTA` and `CAREER` have Story and Feature and no Spike. File new capability as a Task everywhere; where the type you need does not exist in the project, stop and ask, as the next step says |
+| **Project** | Run `stream key` in the repo the work is for; its output is `<PROJECT>` for every step below. The project follows the repo's GitHub owner (`jdwillmsen` → `JDW`, with `career` → `CAREER`; `jdwlabs` → `JDWLABS`; `dotablaze-tech` → `DOTA`), not the directory the session happens to be in. If it exits 1, or the work belongs to no repo, ask which stream — never default. Never file into `OPS`: that project holds only the alert tickets the AI-SRE relay creates, and follow-up work from an alert goes in the owning stream's project with a link to the `OPS` ticket. |
 | **Priority** | Derive from impact: P1=cluster down/data loss, P2=degraded service, P3=improvement, P4=low-impact cleanup |
 | **Summary draft** | `<Action verb> <specific noun> <context>` — ≤80 chars, no filler words |
 

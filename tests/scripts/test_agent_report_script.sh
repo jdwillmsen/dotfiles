@@ -605,4 +605,188 @@ PY
 unset MY_SECRET_TOKEN
 reset_store
 
+# ── Delivery: GitHub merged PRs and no-mistakes runs ──
+gh_fx="$tmp/gh-fixtures"
+mkdir -p "$gh_fx"
+python3 - "$gh_fx" "$AGENT_REPORT_NM_DB" <<'PY'
+import json, os, sqlite3, sys, datetime as dt
+fxdir, db = sys.argv[1:]
+ok = lambda s: {"statusCheckRollup": None if s is None else {"state": s}}
+def pr(number, repo, created, merged, add, dele, files, commits, head, ref="feat/x", title="t", changed=None):
+    return {"number": number, "createdAt": created, "mergedAt": merged, "additions": add, "deletions": dele,
+            "changedFiles": changed if changed is not None else len(files), "headRefName": ref, "title": title,
+            "repository": {"nameWithOwner": repo}, "files": {"nodes": [{"path": p} for p in files]},
+            "allCommits": {"totalCount": len(commits), "nodes": [{"commit": ok(c)} for c in commits]},
+            "head": {"nodes": [{"commit": ok(head)}]}}
+merged = [
+    pr(1, "acme/app", "2026-09-28T10:00:00Z", "2026-09-28T12:00:00Z", 40, 10, ["src/a.py", "README.md", "uv.lock"], ["SUCCESS", "SUCCESS"], "SUCCESS"),
+    pr(2, "acme/app", "2026-09-29T00:00:00Z", "2026-09-30T00:00:00Z", 100, 20, ["src/b.py", "src/c.py"], ["FAILURE", "SUCCESS"], "SUCCESS"),
+    pr(3, "acme/lib", "2026-10-01T00:00:00Z", "2026-10-01T10:00:00Z", 5, 5, ["lib/x.py"], ["FAILURE"], "FAILURE"),
+    pr(4, "acme/lib", "2026-10-02T00:00:00Z", "2026-10-04T00:00:00Z", 200, 0, ["lib/y.py"], [None, "SUCCESS"], "SUCCESS"),
+]
+def fu(number, ref, title, merged_at, files):
+    return {"number": number, "mergedAt": merged_at, "headRefName": ref, "title": title, "changedFiles": len(files),
+            "repository": {"nameWithOwner": "acme/app"}, "files": {"nodes": [{"path": p} for p in files]}}
+followups = {"acme__app": [
+    fu(10, "fix/b-bug", "Fix b", "2026-10-03T00:00:00Z", ["src/b.py"]),
+    fu(11, "revert-12", 'Revert "A"', "2026-10-08T00:00:00Z", ["src/a.py", "README.md"]),
+    fu(12, "feat/x", "Feature", "2026-10-01T00:00:00Z", ["src/b.py", "src/c.py"]),
+    fu(13, "fix/early", "Fix early", "2026-09-28T06:00:00Z", ["src/a.py"]),
+    fu(14, "fix/other", "Fix other", "2026-10-02T00:00:00Z", ["docs/z.py"]),
+], "acme__lib": []}
+json.dump(merged, open(os.path.join(fxdir, "merged.json"), "w"))
+for k, v in followups.items():
+    json.dump(v, open(os.path.join(fxdir, f"followup-{k}.json"), "w"))
+
+ts = lambda d: int(dt.datetime.fromisoformat(d + "+00:00").timestamp())
+if os.path.exists(db):
+    os.remove(db)
+c = sqlite3.connect(db)
+c.executescript("""
+create table runs (id text primary key, status text not null, created_at integer not null);
+create table step_results (id text primary key, run_id text not null);
+create table step_rounds (id text primary key, step_result_id text not null, trigger_type text not null);
+""")
+runs = [("r1", "completed", "2026-09-29T10:00:00", 0), ("r2", "completed", "2026-09-30T10:00:00", 1),
+        ("r3", "completed", "2026-10-01T10:00:00", 0), ("r4", "failed", "2026-10-02T10:00:00", 2),
+        ("r5", "cancelled", "2026-10-03T10:00:00", 0), ("r6", "running", "2026-10-04T10:00:00", 0),
+        ("r7", "completed", "2026-10-06T10:00:00", 0), ("r8", "completed", "2026-09-20T10:00:00", 0)]
+for rid, st, at, fixes in runs:
+    c.execute("insert into runs values (?,?,?)", (rid, st, ts(at)))
+    c.execute("insert into step_results values (?,?)", (rid + "-s", rid))
+    c.execute("insert into step_rounds values (?,?,?)", (rid + "-i", rid + "-s", "initial"))
+    for n in range(fixes):
+        c.execute("insert into step_rounds values (?,?,?)", (f"{rid}-f{n}", rid + "-s", "auto_fix"))
+c.commit()
+PY
+cat >"$tmp/bin/gh" <<'STUB'
+#!/usr/bin/env python3
+import json, os, re, sys
+args = sys.argv[1:]
+with open(os.environ["GH_LOG"], "a") as log:
+    log.write(" ".join(args) + "\n")
+mode = os.environ.get("STUB_GH_MODE", "ok")
+fx = os.environ["GH_FIXTURES"]
+if mode == "fail":
+    sys.stderr.write("HTTP 502: Bad Gateway\n"); sys.exit(1)
+if mode == "ratelimit":
+    sys.stderr.write("API rate limit exceeded for user\n"); sys.exit(1)
+if args[:2] == ["api", "user"]:
+    print("tester"); sys.exit(0)
+assert args[:2] == ["api", "graphql"], args
+v = {}
+for flag, val in zip(args, args[1:]):
+    if flag in ("-f", "-F") and "=" in val:
+        k, _, x = val.partition("=")
+        v[k] = x
+q, first, after = v["q"], int(v.get("first", "100")), int(v.get("after", "0") or 0)
+if "author:" in q:
+    nodes = json.load(open(os.path.join(fx, "merged.json")))
+    lo, hi = re.search(r"merged:(\S+)\.\.(\S+)", q).groups()
+    nodes = [n for n in nodes if lo <= n["mergedAt"][:10] <= hi]
+    if mode == "empty":
+        nodes = []
+    days = (__import__("datetime").date.fromisoformat(hi) - __import__("datetime").date.fromisoformat(lo)).days + 1
+    count = 1500 if (mode == "big" and days > 1) or mode == "huge" else len(nodes)
+    if mode == "big" and days > 1:
+        nodes = []
+else:
+    repo = re.search(r"repo:(\S+)", q).group(1).replace("/", "__")
+    nodes = json.load(open(os.path.join(fx, f"followup-{repo}.json")))
+    count = len(nodes)
+page = nodes[after:after + first]
+print(json.dumps({"data": {"search": {"issueCount": count,
+    "pageInfo": {"hasNextPage": after + first < len(nodes), "endCursor": str(after + first)}, "nodes": page}}}))
+STUB
+chmod +x "$tmp/bin/gh"
+export GH_LOG="$tmp/gh.log" GH_FIXTURES="$gh_fx"
+: >"$GH_LOG"
+
+# deliver [env...] run-args: a weekly window whose PRs have been watched for different lengths of time.
+deliver() { AGENT_METRICS_NOW="2026-10-14T00:00:00+00:00" run 0 --window weekly --end 2026-10-05 --dry-run --no-insights "$@"; }
+dj() { python3 -c 'import json, sys; d = json.load(open(sys.argv[1]))["delivery"]; print(json.dumps(eval(sys.argv[2], {"d": d}), sort_keys=True))' "$(field json)" "$1"; }
+
+deliver
+python3 - "$(field json)" <<'PY' || fail "delivery metrics are wrong"
+import json, sys
+d = json.load(open(sys.argv[1]))["delivery"]
+g, n = d["github"], d["no_mistakes"]
+assert g["available"] is True and g["owners"] == ["acme", "acme-labs"], g
+assert g["merged"] == 4, g
+assert g["open_to_merge_hours"] == {"median": 17.0, "p90": 48.0}, g["open_to_merge_hours"]
+assert g["lines_changed_median"] == 85.0, g["lines_changed_median"]
+assert (g["failed_check_share"], g["red_head_share"]) == (0.5, 0.25), g
+# At the fixture clock all four PRs have been watched for 7 days, only the two oldest for 14.
+assert g["followup"] == {"d7": {"eligible": 4, "followed_up": 1, "rate": 0.25},
+                         "d14": {"eligible": 2, "followed_up": 2, "rate": 1.0}}, g["followup"]
+assert g["truncated"] is False
+assert n == {"available": True, "runs": 5, "completed": 3, "failed": 1, "cancelled": 1, "in_progress": 1,
+             "first_pass_runs": 2, "first_pass_rate": 0.4}, n
+PY
+q1="$(grep 'author:' "$GH_LOG" | head -1)"
+for want in "author:tester" "is:pr" "is:merged" "user:acme user:acme-labs" "merged:2026-09-28..2026-10-04"; do
+    grep -q -- "$want" <<<"$q1" || fail "the merged-PR search lacks '$want'" "$q1"
+done
+grep -q "repo:acme/app" "$GH_LOG" && grep -q "repo:acme/lib" "$GH_LOG" || fail "follow-ups were not searched per repo" "$(cat "$GH_LOG")"
+grep -q "Merged PRs" "$(field md)" || fail "the Markdown omits the delivery section" "$(cat "$(field md)")"
+
+# Pagination returns the same numbers from more requests.
+: >"$GH_LOG"
+deliver
+single="$(wc -l <"$GH_LOG")"
+: >"$GH_LOG"
+AGENT_REPORT_GH_PAGE=2 deliver
+[ "$(dj 'd["github"]["merged"]')" = 4 ] || fail "paged fetch lost PRs"
+[ "$(wc -l <"$GH_LOG")" -gt "$single" ] || fail "page size had no effect on request count"
+
+# A range over the search cap is halved until it fits; one day over it is marked truncated.
+STUB_GH_MODE=big deliver
+[ "$(dj 'd["github"]["merged"]')" = 4 ] && [ "$(dj 'd["github"]["truncated"]')" = false ] || fail "splitting a large range lost PRs" "$(dj 'd["github"]')"
+STUB_GH_MODE=huge deliver
+[ "$(dj 'd["github"]["truncated"]')" = true ] || fail "a day over the search cap is not marked truncated"
+
+# Failures are errored with a reason, never zero; the local section is unaffected.
+STUB_GH_MODE=fail deliver
+python3 - "$(field json)" <<'PY' || fail "a GitHub failure is not recorded as errored"
+import json, sys
+d = json.load(open(sys.argv[1]))["delivery"]
+g = d["github"]
+assert g["errored"] is True and "502" in g["reason"] and "merged" not in g, g
+assert d["no_mistakes"]["available"] is True
+PY
+grep -qi "errored" "$(field md)" || fail "the Markdown does not show the errored section"
+STUB_GH_MODE=ratelimit deliver
+[ "$(dj '"rate limit" in d["github"]["reason"]')" = true ] || fail "a rate limit is not named" "$(dj 'd["github"]')"
+STUB_GH_MODE=empty deliver
+python3 - "$(field json)" <<'PY' || fail "a window with no merged PRs must be a real zero with unknown rates"
+import json, sys
+g = json.load(open(sys.argv[1]))["delivery"]["github"]
+assert g["available"] is True and g["merged"] == 0 and g["open_to_merge_hours"] == {"median": None, "p90": None}, g
+assert g["failed_check_share"] is None and g["followup"]["d7"] == {"eligible": 0, "followed_up": 0, "rate": None}, g
+PY
+AGENT_REPORT_GH_MAX_REQUESTS=2 deliver
+python3 - "$(field json)" <<'PY' || fail "the request cap is not enforced per section"
+import json, sys
+g = json.load(open(sys.argv[1]))["delivery"]["github"]
+assert g["merged"] == 4 and g["followup"]["errored"] is True and "request cap" in g["followup"]["reason"], g
+PY
+AGENT_REPORT_GH_MAX_SECONDS=0 deliver
+[ "$(dj '"wall time" in d["github"]["reason"]')" = true ] || fail "the wall-time cap is not enforced" "$(dj 'd["github"]')"
+mv "$fx/.config/streams.json" "$fx/.config/streams.json.bak"
+deliver
+[ "$(dj '"streams.json" in d["github"]["reason"]')" = true ] || fail "an unreadable stream map is not named" "$(dj 'd["github"]')"
+mv "$fx/.config/streams.json.bak" "$fx/.config/streams.json"
+AGENT_REPORT_NM_DB="$tmp/nope.sqlite" deliver
+[ "$(dj 'd["no_mistakes"]["errored"]')" = true ] || fail "a missing no-mistakes database is not errored" "$(dj 'd["no_mistakes"]')"
+
+# --no-github and the daily window skip GitHub; the daily window skips delivery altogether.
+: >"$GH_LOG"
+deliver --no-github
+[ "$(dj 'd["github"]')" = '{"skipped": "--no-github"}' ] && [ "$(dj 'd["no_mistakes"]["available"]')" = true ] || fail "--no-github not honoured"
+[ ! -s "$GH_LOG" ] || fail "gh was called with --no-github" "$(cat "$GH_LOG")"
+run 0 --window daily --end 2026-10-09 --dry-run --no-insights
+[ "$(dj 'd')" = '{"skipped": "daily window"}' ] || fail "a daily report should skip delivery" "$(dj 'd')"
+[ ! -s "$GH_LOG" ] || fail "a daily run called gh"
+unset STUB_GH_MODE
+
 echo "test_agent_report_script: OK"

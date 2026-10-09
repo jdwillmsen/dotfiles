@@ -569,6 +569,31 @@ echo stray >"$store/stray.txt"
 run 1 collect --since 1
 rm "$store/stray.txt"
 
+# ── Library use: sibling tools load this file for the store helpers ──
+# The sentinel proves the script ran to its end: an early exit 0 would pass otherwise.
+lib_out="$(python3 - "$metrics" "$store" <<'PY'
+import subprocess, sys
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+path, store = sys.argv[1], Path(sys.argv[2])
+sys.argv = ["sibling", "--version"]          # a sibling's own flag must not trip this file's fast path
+am = SourceFileLoader("agent_metrics", path).load_module()
+assert set(("sessions", "quota", "ledger", "reports", "labels", "site", "findings")) <= set(am.OWN_DIRS), am.OWN_DIRS
+(store / "reports").mkdir(exist_ok=True)
+(store / "reports" / "probe.md").write_text("probe\n")
+with am.Lock():
+    out = am.publish("report: probe")
+assert out == {"committed": True, "pushed": True}, out
+head = subprocess.run(["git", "-C", str(store), "log", "-1", "--format=%s"], capture_output=True, text=True).stdout.strip()
+assert head == "report: probe", head
+with am.Lock():
+    assert am.publish("report: nothing") == {"committed": False, "pushed": "nothing to push"}
+print("LIB-OK")
+PY
+)" || fail "publish does not commit and push a sibling tool's files" "$lib_out"
+[ "$lib_out" = "LIB-OK" ] || fail "loading agent-metrics as a library ran its command line" "$lib_out"
+[ "$(sg rev-parse HEAD)" = "$(git -C "$remote" rev-parse main)" ] || fail "publish did not push"
+
 # ── Units: one daily collect ──
 svc="$units/agent-metrics-collect.service"
 timer="$units/agent-metrics-collect.timer"

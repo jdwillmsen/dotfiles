@@ -1,0 +1,16 @@
+[Unit]
+Description=Agent metrics daily flag notification
+Documentation=file://%h/.local/share/chezmoi/docs/agent-notify.md
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/agent-notify send
+# A user manager starts with a bare PATH; gh lives in /usr/bin.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# One issue lookup and one comment; a hung network call must not pile up
+# behind tomorrow's run.
+TimeoutStartSec=5min
+NoNewPrivileges=yes
+PrivateTmp=yes
+Nice=10
+IOSchedulingClass=idle

@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily agent metrics flag notification
+
+[Timer]
+# After the 07:00 daily report has written the flags file.
+OnCalendar=*-*-* 07:20:00
+Unit=agent-notify.service
+# A box that was off at the scheduled time sends at next boot; the flags file
+# holds the latest daily report, so one missed day is still announced.
+Persistent=true
+RandomizedDelaySec=2min
+
+[Install]
+WantedBy=timers.target

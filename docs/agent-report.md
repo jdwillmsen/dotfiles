@@ -9,7 +9,11 @@ The design is in
 
 ## What a run does
 
-1. Computes the window and an equal previous one, all in UTC (below).
+0. The service first runs `agent-metrics collect`, so a catch-up run after
+   downtime never reports from stale data.
+1. Computes the window and an equal previous one, all in UTC (below). The
+   timers assume the box runs in UTC; the windows are UTC either way, but the
+   calendar slots are in local time.
 2. Reads session rows by `started_at`, quota readings and ledger entries for
    both windows, and summarises them per population, `interactive` and
    `scripted`, never blended.
@@ -19,13 +23,21 @@ The design is in
    inventory when its JSON exists.
 6. Weekly and monthly: one capped model call for commentary, after the budget
    gate. Its actual cost goes to the ledger as `report-<window>`.
-7. Under the store lock, writes `reports/<label_date>-<window>.json` and
-   `.md`, commits them with any ledger entry, and pushes.
+7. Writes `reports/<label_date>-<window>.json` and `.md`, commits them with
+   any ledger entry, and pushes.
+
+The store lock is held only to refuse a store with changes the tool did not
+make and pull fast-forward only (as `collect` does), and again to write and
+publish. The GitHub fetch and the model call run outside it, so queued runs do
+not time out behind them. Everything that can fail, including rendering the
+full Markdown, happens before the model is called; afterwards only the
+commentary is spliced in, and both files are written atomically.
 
 A failed push exits 1 with the commit kept. Re-running a window overwrites its
-report; with no new data the files are byte-identical (the clock is the only
-input that changes) and nothing is committed. A re-run does call the model
-again unless `--no-insights` is given.
+report. When nothing but the clock changed, the stored `generated_at` is kept,
+so the files are byte-identical and nothing is committed. A re-run does not
+spend again: if the stored report already has commentary it is reused, unless
+`--force-insights` is given.
 
 ## Windows
 
@@ -48,6 +60,7 @@ agent-report --window weekly                   # write, commit and push
 agent-report --window weekly --end 2026-10-05  # the week before that Monday
 agent-report --window monthly --no-github      # skip GitHub delivery metrics
 agent-report --window weekly --no-insights     # no model call
+agent-report --window weekly --force-insights  # ask the model again
 ```
 
 `--dry-run` prints the paths of both files in a temp directory. It touches
@@ -83,25 +96,38 @@ Top level: `schema` (1), `window`, `start`, `end` (exclusive), `label_date`,
   `instructions`, or null when the audit has not written that window's JSON.
   Strings that are not identifiers are replaced by `_invalid`.
 - **`insights`**: `{"text", "cost_usd"}`, `{"skipped": "budget", "state": ...}`,
-  `{"skipped": "window" | "--no-insights" | "dry-run"}` or `{"error": reason}`.
+  `{"skipped": "window" | "--no-insights" | "dry-run"}` or `{"error": code}`,
+  where the code is one of `not_found`, `timeout`, `spawn_failed`,
+  `claude_exit`, `bad_output`, `claude_error`.
 
 Dollar figures are list-price estimates, not bills.
 
 ## Delivery metrics
 
-GitHub, via batched `gh api graphql` pages, for PRs authored by the logged-in
-user and merged in the window across every owner in `~/.config/streams.json`:
+GitHub, via batched `gh api graphql` pages, for PRs merged in the window
+across every owner in `~/.config/streams.json` and authored by the logins in
+`github_authors` in `~/.config/agent-metrics/config.json` (default: the
+authenticated user and `jdwlabs-agent-bot`):
 merged count, open-to-merge hours (median, p90), lines changed per PR
 (median), the share of merged PRs with any failed-check commit and with a red
 head commit, and the follow-up fix rate at 7 and 14 days. A follow-up is a
 later merged `fix/` or `revert` PR in the same repo touching at least half of
 the PR's files, ignoring lockfiles and Markdown. Only PRs merged long enough
-ago count in each rate's denominator (`eligible`).
+ago count in each rate's denominator (`eligible`), and each figure is shown
+with that count. The current window's 7-day figure is biased early in the
+week, so `followup_previous` repeats both rates for the previous window, where
+the 7-day figure is settled. A rate that cannot be measured yet is null.
 
-Search returns at most 1000 results and says nothing when it stops, so a range
-whose count exceeds that is halved until it fits; a single day over it sets
-`truncated`. A run spends at most 60 requests and 300 seconds, spaced against
-the 30-a-minute limit. Environment overrides: `AGENT_REPORT_GH_MAX_REQUESTS`,
+Search returns at most 1000 results and says nothing when it stops, so the
+count is asked for first (one result), the range is halved until every piece
+is under 1000, and only then are pages fetched; a single day over it sets
+`truncated`. Requests are spaced against the 30-a-minute limit, and the caps
+grow with the window (requests, seconds): weekly 120, 360; biweekly 160, 480;
+monthly 300, 800; quarterly 600, 1500; yearly 1200, 2700. Each section that
+hits a cap is errored. A failure's `reason` is always one of `rate_limited`,
+`auth`, `timeout`, `http_error`, `graphql_error`, `request_cap`, `time_cap`,
+`bad_output`, `bad_config`, `not_installed` (no-mistakes: `not_found`,
+`unreadable`); GitHub's own text is logged to stderr only. Environment overrides: `AGENT_REPORT_GH_MAX_REQUESTS`,
 `AGENT_REPORT_GH_MAX_SECONDS`, `AGENT_REPORT_GH_GAP`, `AGENT_REPORT_GH_PAGE`.
 
 no-mistakes numbers come from `~/.no-mistakes/state.sqlite`, opened read-only
@@ -127,9 +153,15 @@ A flag is `{id, severity, metric, message, value, baseline}`; the message is
 built only from numbers and store identifiers. No flag is raised for spend
 when the trailing week had none, since there is no average to multiply.
 
-The daily run writes `~/.local/state/agent-metrics/flags.json` as
-`{"date": "<label_date>", "window": "daily", "flags": [...]}` and removes it
-when there are none. Other tools read that file.
+The spend baseline is the sum of the seven calendar days before the day,
+divided by seven, whether or not each had sessions.
+
+Only the default daily run (no `--end`) touches
+`~/.local/state/agent-metrics/flags.json`. It removes the file first, so a
+failed run leaves no previous day's flags behind, and writes it at the end as
+`{"date": "<label_date>", "window": "daily", "flags": [...]}`, leaving it
+absent when there are none. A back-dated run (`--end`) never touches it. Other
+tools read that file.
 
 The monthly report ends with a thresholds review: every threshold in
 `thresholds.json` and `budget.json` with how often it fired, counted from the
@@ -141,7 +173,10 @@ state). With no daily report in the month the count is null, not zero.
 One `claude -p` call: model sonnet, no tools, one turn, at most $0.50, a
 240-second timeout (`AGENT_REPORT_INSIGHTS_TIMEOUT`), JSON output, no persisted
 session, run in an empty temp directory with credential-shaped environment
-variables removed, so claude must be logged in by itself. The prompt forbids
+variables removed, so claude must be logged in by itself. Before the call the
+cap ($0.50) is booked in the ledger as `report-<window>`; the real cost
+replaces it when known, so a timeout, a reply with no cost or a kill leaves the
+cap on the books. The prompt forbids
 reporting hours saved or any other self-estimated time saving. It runs only
 for weekly and monthly reports, and only if `agent-metrics budget check`
 would allow $0.50. A failure or timeout is recorded and the run goes on.
@@ -158,11 +193,12 @@ enables the timers on a home apply without running a report.
 | weekly | Monday 08:40 |
 | biweekly | every Monday 08:50 (the tool picks the last complete fortnight) |
 | monthly | the 1st, 09:10 |
-| quarterly | 1 Jan, Apr, Jul, Oct, 09:20 |
-| yearly | 1 Jan, 09:30 |
+| quarterly | 1 Jan, Apr, Jul, Oct, 09:45 |
+| yearly | 1 Jan, 09:55 |
 
 All are `Persistent=true`. They sit after the 06:30 collect and the audit
-timers. Like the others they need linger to run without a login session.
+timers; the quarterly audit starts at 09:00 with a 20-minute limit, hence the
+later slots. The slots are local time: the box is assumed to run in UTC. Like the others they need linger to run without a login session.
 
 ```sh
 systemctl --user list-timers 'agent-report-*'

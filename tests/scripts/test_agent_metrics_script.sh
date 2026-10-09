@@ -209,6 +209,25 @@ printf '%s\n' '{"type":"user","sessionId":"t3","cwd":"/x","entrypoint":"sdk-ts",
 run 0 row "$tmp/t3.jsonl"
 grep -q '"population": "interactive"' "$out" || fail "an sdk-ts session should count as interactive" "$(cat "$out")"
 
+# A credential prefix inside an ordinary word is not a credential.
+python3 - "$fx" "$tmp/word.jsonl" <<'PY'
+import json, sys
+fx, path = sys.argv[1:]
+rec = lambda t, **kw: {"sessionId": "w", "cwd": fx + "/projects/acme/task-runner-service-api", "entrypoint": "cli",
+                       "timestamp": f"2026-10-08T{t}.000Z", **kw}
+skills = ["desk-organizer-skill-pack", "team/sk-" + "a" * 20]
+open(path, "w").write("".join(json.dumps(r) + "\n" for r in [
+    rec("09:00:00", type="assistant", message={"id": "w1", "model": "claude-opus-5-5", "usage": {}, "content": [
+        {"type": "tool_use", "id": f"t{i}", "name": "Skill", "input": {"skill": s}} for i, s in enumerate(skills)]})]))
+PY
+run 0 row "$tmp/word.jsonl"
+python3 - "$out" <<'PY' || fail "credential matching is not anchored to a token boundary" "$(cat "$out")"
+import json, sys
+r = json.load(open(sys.argv[1]))
+assert r["repo"] == "acme/task-runner-service-api", r["repo"]
+assert r["skills"] == {"desk-organizer-skill-pack": 1, "_redacted": 1}, r["skills"]
+PY
+
 for f in -c/cccc-3 -d/dddd-4; do
     run 0 row "$P/$f.jsonl"
     [ "$(cat "$out")" = "null" ] || fail "a transcript with no timestamped record should give no row ($f)" "$(cat "$out")"

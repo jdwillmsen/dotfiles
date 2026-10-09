@@ -21,7 +21,7 @@ import unicodedata
 EXIT_FAIL, EXIT_USAGE = 1, 2
 REASONS = ("protected_path", "protected_settings_block", "invisible_unicode", "non_ascii", "instruction_growth",
            "instruction_import", "hook_change", "env_change", "mcp_change", "mode_change", "symlink", "binary",
-           "too_large", "outside_target", "policy_unreadable")
+           "too_large", "outside_target", "shape", "no_effect", "no_change", "unknown_finding", "policy_unreadable")
 STRICT_REASONS = ("hook_change", "env_change", "mcp_change")
 STRICT_MARKER = re.compile(r"(?<!\S)\[!strict\](?!\S)")
 POLICY_PATH = "home/dot_config/agent-metrics/propose.json"
@@ -54,6 +54,9 @@ ENV_LINE = re.compile(r"anthropic_|claude_code_use_|_proxy\b|proxy_|base[-_]?url
 MCP_KEY = re.compile(r"mcp_?(?:json)?_?servers?", re.I)
 MCP_LINE = re.compile(r"mcp_?servers|claude\s+mcp\s|\.mcp\.json|--mcp-config", re.I)
 KEY = re.compile(r'"((?:[^"\\]|\\.)*)"\s*:')
+FINDING = re.compile(r"([a-z][a-z-]{0,40}):([A-Za-z0-9_.@/-]{1,200})")
+PLUGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,63}")
+PLUGIN_ENTRY = re.compile(r'[ \t]*"[A-Za-z0-9._-]+@[A-Za-z0-9._-]+": (?:true|false)')
 
 
 class GitError(RuntimeError):
@@ -97,10 +100,19 @@ def is_hook_path(path):
     return any(plain_name(part).lstrip(".") == "hooks" for part in path.split("/")[:-1])
 
 
+def lines_of(text):
+    """Lines as git and a shell see them: only a line feed ends one. Python's
+    splitlines also breaks on a carriage return, a form feed, U+2028 and
+    others, which would hide those characters and whatever follows them."""
+    out = text.split("\n")
+    return out[:-1] if out[-1] == "" else out
+
+
 def invisible(ch):
-    """Characters that change what text means without being seen."""
+    """Characters that change what text means without being seen, including
+    every control and line-separator character but the tab."""
     o = ord(ch)
-    if ch in "\t\n":
+    if ch == "\t":
         return False
     cat = unicodedata.category(ch)
     if cat in ("Cc", "Cf", "Co", "Cs", "Cn", "Zl", "Zp"):
@@ -160,31 +172,91 @@ def changed_lines(old, new):
 
 
 def load_policy(rev):
-    """Extra protected patterns from the config at a revision the author did
-    not write. Absent is fine; present and unreadable fails the run."""
+    """The config at a revision the author did not write: extra protected
+    patterns and the per-finding rules. {} when absent, None when present and
+    unreadable, which fails the run."""
     if git("cat-file", "-e", f"{rev}:{POLICY_PATH}", check=False).returncode != 0:
-        return []
+        return {}
     try:
         cfg = json.loads(git("show", f"{rev}:{POLICY_PATH}").stdout.decode())
-        extra = cfg.get("protected_paths", [])
-        if not isinstance(extra, list) or not all(isinstance(p, str) and p for p in extra):
+        text = lambda v: isinstance(v, str) and v
+        ok = isinstance(cfg, dict) and all(text(p) for p in cfg.setdefault("protected_paths", [])) \
+            and all(text(cfg.get(k)) for k in ("settings_source", "workflow_instruction_file") if k in cfg) \
+            and all(text(k) and text(v) for k, v in cfg.setdefault("instruction_sources", {}).items()) \
+            and all(text(f) for f in cfg.setdefault("strict_finders", [])) \
+            and ("max_changed_lines" not in cfg or (type(cfg["max_changed_lines"]) is int and cfg["max_changed_lines"] > 0))
+        if not ok:
             raise ValueError
-    except (ValueError, AttributeError, UnicodeDecodeError):
+    except (ValueError, AttributeError, TypeError, UnicodeDecodeError):
         return None
-    return [p.lower() for p in extra]
+    return cfg
 
 
-def check(base, head, subject, policy_rev, only=None, max_lines=None):
+def finding_rules(fid, policy):
+    """(finder, target file, shape) for a finding id, from the policy. None
+    when the id names no finder that edits, or the policy lacks its rules."""
+    m = FINDING.fullmatch(fid or "")
+    if not m or "max_changed_lines" not in policy:
+        return None
+    finder, slug = m.groups()
+    if finder == "unused-plugin" and PLUGIN.fullmatch(slug):
+        return finder, policy.get("settings_source"), ("plugin", slug)
+    if finder == "oversize-instructions":
+        # A memory file is limited in bytes as well as lines; any other only in lines.
+        return finder, policy["instruction_sources"].get(f"~/{slug}"), ("shrink", slug.lower().endswith("memory.md"))
+    if finder == "unattributed-sessions" and slug == "interactive":
+        return finder, policy.get("workflow_instruction_file"), (None, None)
+    return None
+
+
+def shape_problem(shape, old, new, removed_idx, added_idx, old_size, new_size):
+    """A reason code when an edit is not the kind its finding calls for. The
+    settings source is a script that the repo's tests and a later apply
+    execute, so an edit there must be the one data line and nothing else."""
+    kind, plugin = shape
+    if kind == "shrink":
+        by_bytes = plugin
+        return None if len(new) < len(old) or (by_bytes and new_size < old_size) else "no_effect"
+    if kind != "plugin":
+        return None
+    key = rf'[ \t]*"{re.escape(plugin)}@[A-Za-z0-9._-]+": '
+    removed, hits = [old[i] for i in removed_idx], 0
+    for line in (new[i] for i in added_idx):
+        if re.fullmatch(key + r"false,?", line):
+            hits += 1
+            continue
+        # The entry before the new one gains a comma and is otherwise untouched.
+        bare = line[:-1] if line.endswith(",") else None
+        if bare is not None and bare in removed and PLUGIN_ENTRY.fullmatch(bare):
+            removed.remove(bare)
+            continue
+        return "shape"
+    if any(not re.fullmatch(key + r"true,?", line) for line in removed):
+        return "shape"
+    return None if hits == 1 else "shape"
+
+
+def check(base, head, subject, policy_rev, finding=None):
     """Failures as (reason, path) for the diff base..head, and whether the
-    strict marker was needed and present."""
+    strict marker was needed and present. With a finding id, the diff must
+    also be that finding's edit: its one file, within the line cap, in its
+    shape."""
     failures = []
-    extra = load_policy(policy_rev)
-    if extra is None:
+    policy = load_policy(policy_rev)
+    if policy is None or (finding is not None and not policy):
         return [("policy_unreadable", POLICY_PATH)], False
-    protected = PROTECTED + tuple(extra)
+    protected = PROTECTED + tuple(p.lower() for p in policy.get("protected_paths", []))
     marked = bool(STRICT_MARKER.search(subject))
+    rules = None
+    if finding is not None:
+        rules = finding_rules(finding, policy)
+        if not rules or not rules[1]:
+            return [("unknown_finding", "-")], False
+        # The marker is the tool's to set, and only for a finder the policy trusts with it.
+        marked = marked and rules[0] in policy["strict_finders"]
     strict_used = False
     total = 0
+    shape_checks = []
     raw = git("diff", "--raw", "-z", "--no-renames", "--no-abbrev", base, head).stdout.split(b"\0")
     for meta, name in zip(raw[0::2], raw[1::2]):
         old_mode, new_mode, old_sha, new_sha, status = meta.decode().lstrip(":").split()
@@ -193,7 +265,7 @@ def check(base, head, subject, policy_rev, only=None, max_lines=None):
         low = path.lower()
         if any(fnmatch.fnmatchcase(low, pat) for pat in protected):
             reasons.add("protected_path")
-        if only is not None and path not in only:
+        if rules and path != rules[1]:
             reasons.add("outside_target")
         if new_mode in ("120000", "160000"):
             reasons.add("symlink")
@@ -208,8 +280,8 @@ def check(base, head, subject, policy_rev, only=None, max_lines=None):
         except UnicodeDecodeError:
             reasons.add("binary")
             new_text = ""
-        old = old_raw.decode("utf-8", errors="replace").splitlines()
-        new = new_text.splitlines()
+        old = lines_of(old_raw.decode("utf-8", errors="replace"))
+        new = lines_of(new_text)
         removed, added = changed_lines(old, new)
         total += len(removed) + len(added)
         added_text = [new[i] for i in added]
@@ -222,6 +294,8 @@ def check(base, head, subject, policy_rev, only=None, max_lines=None):
                 reasons.add("instruction_growth")
             if any(IMPORT.search(line) for line in added_text):
                 reasons.add("instruction_import")
+        if rules and path == rules[1]:
+            shape_checks.append((path, old, new, removed, added, len(old_raw), len(new_raw)))
         strict = set()
         if is_hook_path(path):
             strict.add("hook_change")
@@ -242,8 +316,17 @@ def check(base, head, subject, policy_rev, only=None, max_lines=None):
             if not marked:
                 reasons |= strict
         failures += [(r, path) for r in REASONS if r in reasons]
-    if max_lines is not None and total > max_lines:
-        failures.append(("too_large", "-"))
+    if rules:
+        if total > policy["max_changed_lines"]:
+            failures.append(("too_large", "-"))
+        if not shape_checks:
+            failures.append(("no_change", "-"))
+        # A strict commit changes what executes by design; it is labelled for a
+        # person and not held to the data-line shape.
+        for path, *rest in shape_checks if not (strict_used and marked) else []:
+            why = shape_problem(rules[2], *rest)
+            if why:
+                failures.append((why, path))
     return failures, strict_used and marked
 
 
@@ -252,12 +335,13 @@ def subject_of(rev):
     return r.stdout.decode(errors="replace").strip() if r.returncode == 0 else ""
 
 
-def finding_commits(base, head):
+def commits_with_findings(base, head):
+    """(sha, finding ids, parent count) for every commit in base..head."""
     out = []
     for sha in git("rev-list", "--reverse", f"{base}..{head}").stdout.decode().split():
         body = git("log", "-1", "--format=%B", sha).stdout.decode(errors="replace")
-        if re.search(r"^Finding: \S", body, re.M):
-            out.append(sha)
+        parents = len(git("log", "-1", "--format=%P", sha).stdout.decode().split())
+        out.append((sha, re.findall(r"^Finding: (\S.*)$", body, re.M), parents))
     return out
 
 
@@ -270,10 +354,12 @@ def main(argv):
     p.add_argument("head", help="a commit, or a tree when --subject is given")
     p.add_argument("--subject", help="commit subject to read the [!strict] marker from (default: HEAD's)")
     p.add_argument("--policy-rev", metavar="REV", help="revision whose config adds protected paths (default: BASE)")
-    p.add_argument("--only", action="append", metavar="PATH", help="fail any changed file not named here")
-    p.add_argument("--max-lines", type=int, metavar="N", help="fail when more than N lines are added or removed")
+    p.add_argument("--finding", metavar="ID", help="also hold the diff to this finding's file, line cap and shape")
     p.add_argument("--each-commit", action="store_true",
-                   help="judge every commit in BASE..HEAD that carries a Finding trailer, each against its parent")
+                   help="judge every commit in BASE..HEAD that carries a Finding trailer, each against its parent "
+                        "and by its own finding's rules")
+    p.add_argument("--require-finding", action="store_true",
+                   help="with --each-commit: fail any commit that is a merge or carries no Finding trailer")
     p.add_argument("--json", action="store_true")
     args = p.parse_args(argv)
     try:
@@ -283,15 +369,20 @@ def main(argv):
         policy = args.policy_rev or args.base
         failures, strict, judged = [], False, 1
         if args.each_commit:
-            commits = finding_commits(args.base, args.head)
-            judged = len(commits)
-            for sha in commits:
-                f, s = check(f"{sha}^", sha, subject_of(sha), policy, args.only, args.max_lines)
+            judged = 0
+            for sha, ids, parents in commits_with_findings(args.base, args.head):
+                if not ids and not args.require_finding:
+                    continue
+                judged += 1
+                if len(ids) != 1 or parents != 1:
+                    failures.append(("unknown_finding", "-"))
+                    continue
+                f, s = check(f"{sha}^", sha, subject_of(sha), policy, ids[0])
                 failures += f
                 strict = strict or s
         else:
             subject = args.subject if args.subject is not None else subject_of(args.head)
-            failures, strict = check(args.base, args.head, subject, policy, args.only, args.max_lines)
+            failures, strict = check(args.base, args.head, subject, policy, args.finding)
     except GitError as e:
         print(f"check-agent-diff: {e}", file=sys.stderr)
         return EXIT_USAGE

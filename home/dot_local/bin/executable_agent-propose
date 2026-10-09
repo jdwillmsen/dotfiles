@@ -10,7 +10,6 @@ Agent-facing: stdout is TOON, diagnostics go to stderr.
 """
 import argparse
 import datetime as dt
-import difflib
 import fcntl
 import json
 import math
@@ -76,7 +75,7 @@ REJECT_REASONS = ("timeout", "spawn_failed", "claude_exit", "claude_error", "no_
                   # The checker's own codes.
                   "protected_path", "protected_settings_block", "invisible_unicode", "non_ascii", "instruction_growth",
                   "instruction_import", "hook_change", "env_change", "mcp_change", "mode_change", "symlink", "binary",
-                  "too_large", "outside_target", "policy_unreadable")
+                  "too_large", "outside_target", "unknown_finding", "policy_unreadable")
 
 
 def log(msg):
@@ -732,39 +731,6 @@ def parse_reviews(reply, ids):
     return out if set(out) == set(ids) else None
 
 
-def shape_problem(change, old_text, new_text):
-    """A reason code when an edit is not the kind its finding calls for. The
-    settings source is a script that the repo's tests and a later apply
-    execute, so an edit there must be the one data line and nothing else."""
-    old, new = old_text.splitlines(), new_text.splitlines()
-    removed, added = [], []
-    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
-        if tag != "equal":
-            removed += old[i1:i2]
-            added += new[j1:j2]
-    if change["action"] == "trim_instructions":
-        smaller = len(new) < len(old) if change["unit"] == "lines" else len(new_text.encode()) < len(old_text.encode())
-        return None if smaller else "no_effect"
-    if change["action"] != "disable_plugin":
-        return None
-    key = rf'\s*"{re.escape(change["plugin"])}@[A-Za-z0-9._-]+": '
-    entry = re.compile(r'\s*"[A-Za-z0-9._-]+@[A-Za-z0-9._-]+": (?:true|false)')
-    hits = 0
-    for line in added:
-        if re.fullmatch(key + r"false,?\s*", line):
-            hits += 1
-            continue
-        # The entry before the new one gains a comma and is otherwise untouched.
-        bare = line.rstrip()[:-1] if line.rstrip().endswith(",") else None
-        if bare is not None and bare in removed and entry.fullmatch(bare):
-            removed.remove(bare)
-            continue
-        return "shape"
-    if any(not re.fullmatch(key + r"true,?\s*", line) for line in removed):
-        return "shape"
-    return None if hits == 1 else "shape"
-
-
 def pr_title(n, window, label):
     return f"{SUBJECT_PREFIX}{n} finding{'' if n == 1 else 's'} from the {window} report {label}"
 
@@ -951,21 +917,20 @@ class Session:
     def head(self):
         return self.git("rev-parse", "HEAD").stdout.strip()
 
-    def blob(self, rev, path):
-        r = self.git("show", f"{rev}:{path}", check=False, text=False)
-        return r.stdout.decode("utf-8", "replace") if r.returncode == 0 else ""
-
-    def check(self, base, head, subject=None, only=None):
-        """(reason codes, strict). The checker's file names are the author's
-        text and are dropped here; only its fixed codes are kept."""
+    def check(self, base, head, subject=None, finding=None, gitdir=None):
+        """(reason codes, strict). With a subject, one edit is held to its
+        finding's rules; without, every commit in the range must be a finding
+        commit that passes, which is the pass CI makes. The checker's file
+        names are the author's text and are dropped here; only its fixed
+        codes are kept."""
         argv = [sys.executable, "-I", str(self.checker), "--json", "--policy-rev", self.base_sha]
         if subject is None:
-            argv += ["--each-commit"]
+            argv += ["--each-commit", "--require-finding"]
         else:
-            argv += ["--subject", subject, "--only", only, "--max-lines", str(self.cfg["max_changed_lines"])]
+            argv += ["--subject", subject, "--finding", finding]
         try:
-            r = subprocess.run([*argv, base, head], capture_output=True, text=True, timeout=120, cwd=self.root,
-                               env={**am.child_env(), "GIT_DIR": self.gitdir})
+            r = subprocess.run([*argv, base, head], capture_output=True, text=True, timeout=120, cwd=self.home,
+                               env={**am.child_env(), "GIT_DIR": gitdir or self.gitdir})
             j = json.loads(r.stdout)
             reasons = [x["reason"] for x in j["failures"]]
             if (r.returncode == 0) != (not reasons) or r.returncode not in (0, 1) or not all(x in REJECT_REASONS for x in reasons):
@@ -1027,15 +992,15 @@ class Session:
         if tree == self.git("rev-parse", "HEAD^{tree}").stdout.strip():
             return "rejected", "no_change"
         subject = SUBJECT_PREFIX + change_facts(f, self.window, self.label)[0]
-        reasons, strict = self.check(head, tree, subject, target)
-        if reasons and set(reasons) <= STRICT_REASONS and f["finder"] in cfg["strict_finders"]:
+        # The checker holds the edit to its finding: the one file, the line
+        # cap, and for the settings script the single data line.
+        reasons, strict = self.check(head, tree, subject, f["id"])
+        if reasons and set(reasons) <= STRICT_REASONS | {"shape"} and set(reasons) & STRICT_REASONS \
+                and f["finder"] in cfg["strict_finders"]:
             subject += STRICT_SUFFIX
-            reasons, strict = self.check(head, tree, subject, target)
+            reasons, strict = self.check(head, tree, subject, f["id"])
             if not reasons and not strict:
                 reasons = ["checker_error"]
-        if not reasons and not strict:
-            why = shape_problem(f["change"], self.blob(head, target), self.blob(tree, target))
-            reasons = [why] if why else []
         if reasons:
             self.discard()
             return "rejected", reasons[0]

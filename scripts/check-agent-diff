@@ -1,0 +1,312 @@
+#!/usr/bin/env python3
+"""check-agent-diff — judge a diff written by an automated author.
+
+Compares two revisions and fails, naming the file and a fixed reason code,
+when the change touches a protected path, hides characters, grows an
+always-loaded instruction file, changes what runs or where the API points
+without the strict marker, or changes file modes. Used by agent-propose
+before it commits an edit and by CI on pull requests that carry its commits.
+
+usage: check-agent-diff [options] BASE HEAD
+"""
+import argparse
+import difflib
+import fnmatch
+import json
+import re
+import subprocess
+import sys
+import unicodedata
+
+EXIT_FAIL, EXIT_USAGE = 1, 2
+REASONS = ("protected_path", "protected_settings_block", "invisible_unicode", "non_ascii", "instruction_growth",
+           "instruction_import", "hook_change", "env_change", "mcp_change", "mode_change", "symlink", "binary",
+           "too_large", "outside_target", "policy_unreadable")
+STRICT_REASONS = ("hook_change", "env_change", "mcp_change")
+STRICT_MARKER = re.compile(r"(?<!\S)\[!strict\](?!\S)")
+POLICY_PATH = "home/dot_config/agent-metrics/propose.json"
+NULL_SHA = re.compile(r"0+")
+
+# Matched against the lower-cased path. A config at the policy revision can
+# add to this list and never take away from it.
+PROTECTED = (
+    ".github/*", ".claude/*", ".mcp.json", ".gitattributes", ".gitmodules", "*.chezmoi*",
+    "*ruleset*",
+    "*budget.json", "*propose.json", "*thresholds.json",
+    "scripts/check-agent-diff",
+    "*.age", "*.pem", "*.key", "*.p12", "*.pfx", "*.gpg", "*.asc", "*.kdbx", "*.env", "*/.env*", ".env*",
+    "*id_rsa*", "*id_ed25519*", "*id_ecdsa*", "*id_dsa*", "*secret*", "*credential*", "*token*", "*password*",
+    "*encrypted_*", "*private_key*", "*netrc*", "*authorized_keys*", "*known_hosts*", "*ssh/*", "*gnupg*",
+)
+CHEZMOI_PREFIX = re.compile(r"^(?:private_|readonly_|executable_|encrypted_|empty_|exact_|create_|modify_|remove_|"
+                            r"run_|once_|onchange_|before_|after_|symlink_|literal_)+")
+INSTRUCTION_NAMES = ("claude.md", "claude.local.md", "agents.md", "memory.md", "rtk.md", "gemini.md",
+                     "copilot-instructions.md")
+PROSE = (".md", ".mdx", ".markdown", ".txt", ".rst")
+IMPORT = re.compile(r"(?:^|\s)@[A-Za-z0-9_~./-]+")
+PERMISSION_KEYS = {"permissions", "allow", "deny", "ask", "sandbox"}
+PERMISSION_LINE = re.compile(r'permission|"(?:allow|deny|ask)"|defaultMode|additionalDirectories|sandbox|dangerous', re.I)
+# Settings whose value is a command the agent runs.
+COMMAND_KEYS = {"hooks", "statusLine", "subagentStatusLine", "apiKeyHelper", "fileSuggestion", "awsAuthRefresh",
+                "awsCredentialExport", "otelHeadersHelper"}
+COMMAND_LINE = re.compile(r'"command"\s*:')
+ENV_LINE = re.compile(r"anthropic_|claude_code_use_|_proxy\b|proxy_|base[-_]?url|api[-_]?base|apikeyhelper", re.I)
+MCP_KEY = re.compile(r"mcp_?(?:json)?_?servers?", re.I)
+MCP_LINE = re.compile(r"mcp_?servers|claude\s+mcp\s|\.mcp\.json|--mcp-config", re.I)
+KEY = re.compile(r'"((?:[^"\\]|\\.)*)"\s*:')
+
+
+class GitError(RuntimeError):
+    pass
+
+
+def git(*args, check=True):
+    r = subprocess.run(["git", "-c", "core.quotepath=off", *args], capture_output=True)
+    if check and r.returncode != 0:
+        raise GitError(r.stderr.decode(errors="replace").strip()[:200])
+    return r
+
+
+def shown(path):
+    """A file name is the author's text: only printable ASCII leaves here."""
+    return "".join(c if 0x21 <= ord(c) < 0x7F else "?" for c in path) or "?"
+
+
+def plain_name(path):
+    name = path.rsplit("/", 1)[-1]
+    name = CHEZMOI_PREFIX.sub("", name)
+    if name.startswith("dot_"):
+        name = "." + name[4:]
+    return name[:-5] if name.endswith(".tmpl") else name
+
+
+def is_instruction(path):
+    return plain_name(path).lower() in INSTRUCTION_NAMES
+
+
+def is_prose(path):
+    return plain_name(path).lower().endswith(PROSE)
+
+
+def is_settings(path):
+    name = plain_name(path).lower()
+    return "settings" in name or name in (".claude.json", "claude.json")
+
+
+def is_hook_path(path):
+    return any(plain_name(part).lstrip(".") == "hooks" for part in path.split("/")[:-1])
+
+
+def invisible(ch):
+    """Characters that change what text means without being seen."""
+    o = ord(ch)
+    if ch in "\t\n":
+        return False
+    cat = unicodedata.category(ch)
+    if cat in ("Cc", "Cf", "Co", "Cs", "Cn", "Zl", "Zp"):
+        return True
+    if cat == "Zs" and ch != " ":
+        return True
+    return 0xFE00 <= o <= 0xFE0F or 0xE0100 <= o <= 0xE01EF or o in (0x115F, 0x1160, 0x3164, 0xFFA0, 0x034F)
+
+
+def key_stacks(lines):
+    """For each line, the JSON keys that enclose it or sit on it. The settings
+    source embeds JSON in a shell script, so this follows braces and quoted
+    keys wherever they appear and does not need the file to be JSON."""
+    stack, out, pending = [], [], None
+    for line in lines:
+        seen = {k for k in stack if k}
+        i = 0
+        while i < len(line):
+            c = line[i]
+            if c == '"':
+                m = KEY.match(line, i)
+                if m:
+                    pending = m.group(1)
+                    seen.add(pending)
+                    i = m.end()
+                    continue
+                j = i + 1
+                while j < len(line) and line[j] != '"':
+                    j += 2 if line[j] == "\\" else 1
+                i = j + 1
+                continue
+            if c in "{[":
+                stack.append(pending)
+                pending = None
+            elif c in "}]":
+                if stack:
+                    stack.pop()
+            elif c == ",":
+                pending = None
+            i += 1
+        out.append(seen)
+    return out
+
+
+def blob(sha):
+    return b"" if NULL_SHA.fullmatch(sha) else git("cat-file", "blob", sha).stdout
+
+
+def changed_lines(old, new):
+    """(removed indexes into old, added indexes into new)."""
+    removed, added = [], []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
+        if tag != "equal":
+            removed += range(i1, i2)
+            added += range(j1, j2)
+    return removed, added
+
+
+def load_policy(rev):
+    """Extra protected patterns from the config at a revision the author did
+    not write. Absent is fine; present and unreadable fails the run."""
+    if git("cat-file", "-e", f"{rev}:{POLICY_PATH}", check=False).returncode != 0:
+        return []
+    try:
+        cfg = json.loads(git("show", f"{rev}:{POLICY_PATH}").stdout.decode())
+        extra = cfg.get("protected_paths", [])
+        if not isinstance(extra, list) or not all(isinstance(p, str) and p for p in extra):
+            raise ValueError
+    except (ValueError, AttributeError, UnicodeDecodeError):
+        return None
+    return [p.lower() for p in extra]
+
+
+def check(base, head, subject, policy_rev, only=None, max_lines=None):
+    """Failures as (reason, path) for the diff base..head, and whether the
+    strict marker was needed and present."""
+    failures = []
+    extra = load_policy(policy_rev)
+    if extra is None:
+        return [("policy_unreadable", POLICY_PATH)], False
+    protected = PROTECTED + tuple(extra)
+    marked = bool(STRICT_MARKER.search(subject))
+    strict_used = False
+    total = 0
+    raw = git("diff", "--raw", "-z", "--no-renames", "--no-abbrev", base, head).stdout.split(b"\0")
+    for meta, name in zip(raw[0::2], raw[1::2]):
+        old_mode, new_mode, old_sha, new_sha, status = meta.decode().lstrip(":").split()
+        path = name.decode(errors="surrogateescape")
+        reasons = set()
+        low = path.lower()
+        if any(fnmatch.fnmatchcase(low, pat) for pat in protected):
+            reasons.add("protected_path")
+        if only is not None and path not in only:
+            reasons.add("outside_target")
+        if new_mode in ("120000", "160000"):
+            reasons.add("symlink")
+        elif status != "D" and (old_mode != new_mode and (status != "A" or new_mode != "100644")):
+            reasons.add("mode_change")
+        old_raw = blob(old_sha) if old_mode in ("100644", "100755") else b""
+        new_raw = blob(new_sha) if new_mode in ("100644", "100755") else b""
+        try:
+            if b"\0" in new_raw:
+                raise UnicodeDecodeError("utf-8", b"", 0, 1, "nul")
+            new_text = new_raw.decode("utf-8")
+        except UnicodeDecodeError:
+            reasons.add("binary")
+            new_text = ""
+        old = old_raw.decode("utf-8", errors="replace").splitlines()
+        new = new_text.splitlines()
+        removed, added = changed_lines(old, new)
+        total += len(removed) + len(added)
+        added_text = [new[i] for i in added]
+        if any(invisible(ch) for line in added_text for ch in line):
+            reasons.add("invisible_unicode")
+        elif not is_prose(path) and any(not line.isascii() for line in added_text):
+            reasons.add("non_ascii")
+        if is_instruction(path):
+            if status != "D" and (len(new) > len(old) or len(new_raw) > len(old_raw)):
+                reasons.add("instruction_growth")
+            if any(IMPORT.search(line) for line in added_text):
+                reasons.add("instruction_import")
+        strict = set()
+        if is_hook_path(path):
+            strict.add("hook_change")
+        if not is_prose(path):
+            old_keys, new_keys = key_stacks(old), key_stacks(new)
+            touched = [(old[i], old_keys[i]) for i in removed] + [(new[i], new_keys[i]) for i in added]
+            for line, keys in touched:
+                if keys & COMMAND_KEYS or COMMAND_LINE.search(line):
+                    strict.add("hook_change")
+                if ENV_LINE.search(line):
+                    strict.add("env_change")
+                if MCP_LINE.search(line) or any(MCP_KEY.search(k) for k in keys):
+                    strict.add("mcp_change")
+                if is_settings(path) and (keys & PERMISSION_KEYS or PERMISSION_LINE.search(line)):
+                    reasons.add("protected_settings_block")
+        if strict:
+            strict_used = True
+            if not marked:
+                reasons |= strict
+        failures += [(r, path) for r in REASONS if r in reasons]
+    if max_lines is not None and total > max_lines:
+        failures.append(("too_large", "-"))
+    return failures, strict_used and marked
+
+
+def subject_of(rev):
+    r = git("log", "-1", "--format=%s", rev, "--", check=False)
+    return r.stdout.decode(errors="replace").strip() if r.returncode == 0 else ""
+
+
+def finding_commits(base, head):
+    out = []
+    for sha in git("rev-list", "--reverse", f"{base}..{head}").stdout.decode().split():
+        body = git("log", "-1", "--format=%B", sha).stdout.decode(errors="replace")
+        if re.search(r"^Finding: \S", body, re.M):
+            out.append(sha)
+    return out
+
+
+def main(argv):
+    p = argparse.ArgumentParser(prog="check-agent-diff", description=__doc__.split("\n\n")[1],
+                                formatter_class=argparse.RawDescriptionHelpFormatter,
+                                epilog="exit codes: 0 passes, 1 a rule failed, 2 usage or git error\n"
+                                       "reason codes: " + " ".join(REASONS))
+    p.add_argument("base")
+    p.add_argument("head", help="a commit, or a tree when --subject is given")
+    p.add_argument("--subject", help="commit subject to read the [!strict] marker from (default: HEAD's)")
+    p.add_argument("--policy-rev", metavar="REV", help="revision whose config adds protected paths (default: BASE)")
+    p.add_argument("--only", action="append", metavar="PATH", help="fail any changed file not named here")
+    p.add_argument("--max-lines", type=int, metavar="N", help="fail when more than N lines are added or removed")
+    p.add_argument("--each-commit", action="store_true",
+                   help="judge every commit in BASE..HEAD that carries a Finding trailer, each against its parent")
+    p.add_argument("--json", action="store_true")
+    args = p.parse_args(argv)
+    try:
+        for rev in (args.base, args.head):
+            if rev.startswith("-") or git("rev-parse", "--verify", "--quiet", f"{rev}^{{tree}}", check=False).returncode != 0:
+                raise GitError(f"not a revision: {shown(rev)}")
+        policy = args.policy_rev or args.base
+        failures, strict, judged = [], False, 1
+        if args.each_commit:
+            commits = finding_commits(args.base, args.head)
+            judged = len(commits)
+            for sha in commits:
+                f, s = check(f"{sha}^", sha, subject_of(sha), policy, args.only, args.max_lines)
+                failures += f
+                strict = strict or s
+        else:
+            subject = args.subject if args.subject is not None else subject_of(args.head)
+            failures, strict = check(args.base, args.head, subject, policy, args.only, args.max_lines)
+    except GitError as e:
+        print(f"check-agent-diff: {e}", file=sys.stderr)
+        return EXIT_USAGE
+    if args.json:
+        print(json.dumps({"ok": not failures, "strict": strict,
+                          "failures": [{"reason": r, "path": shown(path)} for r, path in failures]}))
+    else:
+        for r, path in failures:
+            print(f"FAIL {r} {shown(path)}")
+        if not failures:
+            print(f"OK {judged} commit(s) judged" if args.each_commit else "OK")
+            if strict:
+                print("STRICT")
+    return EXIT_FAIL if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

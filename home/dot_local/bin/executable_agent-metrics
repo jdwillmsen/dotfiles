@@ -554,11 +554,12 @@ def upsert(rows, write=True):
     return written, unchanged
 
 
-def publish(message, push=True):
+def publish(message, push=True, dirs=None):
     """Commit whatever changed in the tool's own directories and push. Call
     with the Lock held. `pushed` is True, False (the commit is kept and the
-    next publish delivers it) or a string saying why nothing was sent."""
-    own = [d for d in OWN_DIRS if (STORE / d).is_dir()]
+    next publish delivers it) or a string saying why nothing was sent. `dirs`
+    narrows what is staged, so one tool does not commit another's work in progress."""
+    own = [d for d in (OWN_DIRS if dirs is None else dirs) if (STORE / d).is_dir()]
     out = {"committed": False}
     if own and git("status", "--porcelain", "--", *own).stdout.strip():
         git("add", "-A", "--", *own)

@@ -9,6 +9,8 @@ here="$(cd "$(dirname "$0")/../.." && pwd)"
 report="$here/home/dot_local/bin/executable_agent-report"
 metrics="$here/home/dot_local/bin/executable_agent-metrics"
 cfgsrc="$here/home/dot_config/agent-metrics"
+units="$here/home/dot_config/systemd/user"
+trigger="$here/home/run_onchange_54-enable-agent-report.sh.tmpl"
 
 fail() {
     echo "FAIL: $1"
@@ -788,5 +790,66 @@ run 0 --window daily --end 2026-10-09 --dry-run --no-insights
 [ "$(dj 'd')" = '{"skipped": "daily window"}' ] || fail "a daily report should skip delivery" "$(dj 'd')"
 [ ! -s "$GH_LOG" ] || fail "a daily run called gh"
 unset STUB_GH_MODE
+
+# ── Units: one template service and six calendar timers ──
+svc="$units/agent-report@.service"
+grep -qx 'ExecStart=%h/.local/bin/agent-report --window %i' "$svc" || fail "service ExecStart"
+grep -qx 'NoNewPrivileges=yes' "$svc" && grep -qx 'PrivateTmp=yes' "$svc" || fail "service hardening missing"
+grep -qx 'Nice=10' "$svc" && grep -qx 'IOSchedulingClass=idle' "$svc" || fail "service scheduling hints missing"
+grep -q '^TimeoutStartSec=' "$svc" || fail "service needs a hard timeout"
+grep -q '^Environment=PATH=.*/usr/bin' "$svc" || fail "service needs a PATH: a user manager starts with a bare one"
+declare -A cal=([daily]="*-*-* 07:00:00" [weekly]="Mon *-*-* 08:40:00" [biweekly]="Mon *-*-* 08:50:00"
+    [monthly]="*-*-01 09:10:00" [quarterly]="*-01,04,07,10-01 09:20:00" [yearly]="*-01-01 09:30:00")
+for w in "${!cal[@]}"; do
+    t="$units/agent-report-$w.timer"
+    [ -f "$t" ] || fail "missing $(basename "$t")"
+    grep -qxF "OnCalendar=${cal[$w]}" "$t" || fail "$w timer calendar"
+    grep -qx "Unit=agent-report@$w.service" "$t" || fail "$w timer target"
+    grep -qx "Persistent=true" "$t" || fail "$w timer must catch up after downtime"
+    grep -qx "WantedBy=timers.target" "$t" || fail "$w timer install target"
+    if command -v systemd-analyze >/dev/null 2>&1; then
+        systemd-analyze calendar "${cal[$w]}" >/dev/null || fail "$w calendar rejected by systemd"
+    fi
+done
+if command -v systemd-analyze >/dev/null 2>&1; then
+    systemd-analyze verify --user "$svc" 2>&1 | grep -i "agent-report" | grep -iv "no such file\|not-found" && fail "systemd rejects the service" || true
+fi
+
+# ── Trigger: stubbed systemctl/loginctl ──
+shellcheck -s bash "$trigger"
+trig="$tmp/trig"
+mkdir -p "$trig/bin" "$trig/home/.config/systemd/user"
+cp "$svc" "$trig/home/.config/systemd/user/"
+cat >"$trig/bin/systemctl" <<'STUB'
+#!/bin/sh
+if [ "$2" = "show-environment" ]; then echo "HOME=$STUB_MANAGER_HOME"; exit 0; fi
+echo "$*" >>"$CALL_LOG"
+STUB
+cat >"$trig/bin/loginctl" <<'STUB'
+#!/bin/sh
+echo "${STUB_LINGER:-no}"
+STUB
+chmod +x "$trig/bin"/*
+run_trigger() {  # $1 manager home, $2 linger
+    : >"$trig/calls"
+    trig_out="$(PATH="$trig/bin:/usr/bin:/bin" HOME="$trig/home" USER=tester BASH_ENV=/dev/null \
+        XDG_CONFIG_HOME="$trig/home/.config" CALL_LOG="$trig/calls" STUB_MANAGER_HOME="$1" \
+        STUB_LINGER="$2" bash "$trigger" 2>&1)"
+}
+run_trigger /elsewhere no
+grep -q "skipping enable" <<<"$trig_out" && [ ! -s "$trig/calls" ] || fail "trigger must skip a scratch-dest apply" "$trig_out"
+run_trigger "$trig/home" no
+grep -qx -- "--user daemon-reload" "$trig/calls" || fail "trigger never reloads systemd"
+for w in "${!cal[@]}"; do
+    grep -q -- "--user enable .*agent-report-$w.timer" "$trig/calls" || fail "trigger does not enable the $w timer" "$(cat "$trig/calls")"
+done
+grep -q "start" "$trig/calls" && fail "trigger must not start a run"
+grep -q "agent-report@" "$trig/calls" && fail "trigger must only touch the timers, never the service" "$(cat "$trig/calls")"
+grep -q "linger is off" <<<"$trig_out" || fail "trigger should warn when linger is off"
+run_trigger "$trig/home" yes
+grep -q "linger is off" <<<"$trig_out" && fail "no linger warning expected when linger is on"
+rm "$trig/home/.config/systemd/user/agent-report@.service"
+run_trigger "$trig/home" yes
+grep -q "not a home apply" <<<"$trig_out" && [ ! -s "$trig/calls" ] || fail "trigger must skip when the unit is absent" "$trig_out"
 
 echo "test_agent_report_script: OK"

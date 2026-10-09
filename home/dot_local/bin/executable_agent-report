@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""agent-report — periodic engineering-metrics reports from the agent-metrics store.
+
+Turns the store's session rows, quota readings and ledger into a daily,
+weekly, biweekly, monthly, quarterly or yearly report with deltas, flags and,
+for longer windows, delivery metrics from GitHub and no-mistakes. Weekly and
+monthly reports add one capped model call for commentary.
+Agent-facing: stdout is TOON, diagnostics go to stderr.
+"""
+import argparse
+import datetime as dt
+import json
+import math
+import os
+import re
+import sys
+from pathlib import Path
+from importlib.machinery import SourceFileLoader
+
+VERSION = "1.0.0"
+
+if __name__ == "__main__" and len(sys.argv) == 2 and sys.argv[1] in ("-v", "-V", "--version"):
+    print(VERSION)
+    sys.exit(0)
+
+_here = Path(__file__).resolve().parent
+# The deployed file is agent-metrics; in the source tree it carries chezmoi's prefix.
+am = SourceFileLoader("agent_metrics", str(next(p for p in (_here / "agent-metrics", _here / "executable_agent-metrics")
+                                                if p.exists()))).load_module()
+
+EXIT_FAIL, EXIT_USAGE, EXIT_DENIED = am.EXIT_FAIL, am.EXIT_USAGE, am.EXIT_DENIED
+emit, die, tilde = am.emit, am.die, am.tilde
+
+WINDOWS = ("daily", "weekly", "biweekly", "monthly", "quarterly", "yearly")
+USAGE_SHORT = "agent-report --window daily|weekly|biweekly|monthly|quarterly|yearly [--end YYYY-MM-DD] [--dry-run]"
+# Fortnights are counted from this fixed Monday, the grid agent-audit uses.
+FORTNIGHT_ANCHOR = dt.date(1970, 1, 5)
+SCHEMA = 1
+HOME_REPORTS = 8
+THRESHOLD_KEYS = ("spend_warn_multiple", "spend_critical_multiple", "session_warn_usd",
+                  "runaway_session_usd", "runaway_session_calls", "weekly_quota_warn_pct")
+
+
+def log(msg):
+    print(f"agent-report: {msg}", file=sys.stderr)
+
+
+# ── Windows ──────────────────────────────────────────────────────────────────
+
+def add_months(d, n):
+    m = d.year * 12 + d.month - 1 + n
+    return dt.date(m // 12, m % 12 + 1, 1)
+
+
+def compute_windows(window, end):
+    """((start, end), (prev_start, prev_end)) as dates, end exclusive. `end` is
+    the day the run is anchored to: the window is the last complete one
+    before it."""
+    one = dt.timedelta
+    if window in ("daily", "weekly", "biweekly"):
+        monday = end - one(days=end.weekday())
+        if window == "daily":
+            e, span = end, one(days=1)
+        elif window == "weekly":
+            e, span = monday, one(days=7)
+        else:
+            # Snapping back to a grid Monday, not ISO-week parity: a 53-week
+            # year puts two odd weeks back to back and parity would skip a
+            # fortnight.
+            e = monday - one(days=7 * (((monday - FORTNIGHT_ANCHOR).days // 7) % 2))
+            span = one(days=14)
+        return (e - span, e), (e - 2 * span, e - span)
+    months = {"monthly": 1, "quarterly": 3, "yearly": 12}[window]
+    first = dt.date(end.year, end.month, 1)
+    if window == "quarterly":
+        first = add_months(first, -((end.month - 1) % 3))
+    elif window == "yearly":
+        first = dt.date(end.year, 1, 1)
+    return (add_months(first, -months), first), (add_months(first, -2 * months), add_months(first, -months))
+
+
+# ── Config ───────────────────────────────────────────────────────────────────
+
+def load_thresholds():
+    cfg = am.load_config("thresholds.json")
+    path = tilde(am.CONFIG / "thresholds.json")
+    out = {}
+    for k in THRESHOLD_KEYS:
+        v = cfg.get(k)
+        if not am.is_amount(v) or v <= 0:
+            die(EXIT_USAGE, f"{path}: {k} must be a number above 0")
+        out[k] = v
+    if out["spend_warn_multiple"] > out["spend_critical_multiple"]:
+        die(EXIT_USAGE, f"{path}: spend_warn_multiple must not exceed spend_critical_multiple")
+    return out
+
+
+# ── Report ───────────────────────────────────────────────────────────────────
+
+def build_report(opts, w):
+    (cs, ce), (ps, pe) = w
+    return {"schema": SCHEMA, "window": opts.window, "start": cs.isoformat(), "end": ce.isoformat(),
+            "label_date": (ce - dt.timedelta(days=1)).isoformat(),
+            "previous_start": ps.isoformat(), "previous_end": pe.isoformat(),
+            "generated_at": am.iso(am.now().timestamp())}
+
+
+# ── Commands ─────────────────────────────────────────────────────────────────
+
+def load_json_file(path):
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError) as e:
+        die(EXIT_USAGE, f"cannot read {tilde(path)}: {getattr(e, 'strerror', None) or e}")
+    if not isinstance(data, dict):
+        die(EXIT_USAGE, f"{tilde(path)} must hold a JSON object")
+    return data
+
+
+def total_cost(rep):
+    pops = ((rep.get("current") or {}).get("populations")) or {}
+    return round(sum(p.get("cost_usd", 0) for p in pops.values()), 4)
+
+
+def cmd_home():
+    out = {"bin": tilde(Path(sys.argv[0]).resolve()),
+           "description": "Periodic engineering-metrics reports from the agent-metrics store; writes JSON and Markdown under the store's reports/",
+           "store": tilde(am.STORE)}
+    if not am.store_exists():
+        out["status"] = "store not cloned"
+        out["help"] = ["Run `agent-metrics init` to clone the store"]
+        emit(out)
+        return 0
+    files = sorted((am.STORE / "reports").glob("*.json"), reverse=True)
+    rows = []
+    for p in files[:HOME_REPORTS]:
+        j = load_json_file(p)
+        rows.append({"report": p.stem, "cost_usd": total_cost(j), "flags": len(j.get("flags") or [])})
+    out["count"] = f"{len(rows)} of {len(files)} reports"
+    out["reports"] = rows if rows else "0 reports yet"
+    out["help"] = ["Run `agent-report --window daily --dry-run` to preview a report",
+                   "Run `agent-report --window weekly` to write and publish one",
+                   "Run `agent-report --help` for all flags"]
+    emit(out)
+    return 0
+
+
+def cmd_run(args):
+    try:
+        end = dt.date.fromisoformat(args.end) if args.end else am.now().date()
+    except ValueError:
+        am.usage_error(f"--end must be YYYY-MM-DD, got {args.end}", USAGE_SHORT)
+    am.require_store()
+    load_thresholds()
+    report = build_report(args, compute_windows(args.window, end))
+    emit({"dry_run": bool(args.dry_run), **{k: report[k] for k in ("window", "start", "end", "label_date", "previous_start")}})
+    return 0
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        am.usage_error(message, f"Run `{self.prog} --help`")
+
+
+def build_parser():
+    p = Parser(prog="agent-report", description=__doc__.split("\n\n")[1],
+               formatter_class=argparse.RawDescriptionHelpFormatter,
+               epilog="examples:\n  agent-report --window daily --dry-run            preview yesterday's report\n"
+                      "  agent-report --window weekly --end 2026-10-05    the week before that Monday\n"
+                      "  agent-report --window monthly --no-github        skip GitHub delivery metrics")
+    p.add_argument("--window", required=True, choices=WINDOWS)
+    p.add_argument("--end", metavar="YYYY-MM-DD", help="report the window ending before this date (default: today, UTC)")
+    p.add_argument("--dry-run", action="store_true", help="write to a temp dir; touch no store, flag file or ledger; no model call")
+    p.add_argument("--no-insights", action="store_true", help="skip the model commentary")
+    p.add_argument("--no-github", action="store_true", help="skip the GitHub delivery metrics")
+    return p
+
+
+def main(argv):
+    if not argv:
+        return cmd_home()
+    return cmd_run(build_parser().parse_args(argv))
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)

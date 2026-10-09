@@ -1,0 +1,8 @@
+{
+  "spend_warn_multiple": 1.5,
+  "spend_critical_multiple": 3,
+  "session_warn_usd": 50,
+  "runaway_session_usd": 100,
+  "runaway_session_calls": 500,
+  "weekly_quota_warn_pct": 85
+}

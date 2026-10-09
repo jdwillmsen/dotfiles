@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+"""agent-metrics — per-session metrics store for this box's coding agents.
+
+Reads Claude Code transcripts and writes one row of numbers per session into
+a git repo, rolls up the plan-quota log the status line keeps, and answers
+whether a model spend fits the audit's budget. Calls no model itself.
+Agent-facing: stdout is TOON, diagnostics go to stderr.
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+VERSION = "1.0.0"
+
+# Fast path before any real work: harnesses probe --version constantly.
+if len(sys.argv) == 2 and sys.argv[1] in ("-v", "-V", "--version"):
+    print(VERSION)
+    sys.exit(0)
+
+EXIT_FAIL, EXIT_USAGE, EXIT_DENIED = 1, 2, 3
+
+HOME = Path.home()
+CLAUDE_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR", HOME / ".claude"))
+STORE = Path(os.environ.get("AGENT_METRICS_STORE",
+                            Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / "agent-metrics/store"))
+STATE = Path(os.environ.get("AGENT_METRICS_STATE",
+                            Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "agent-metrics"))
+CONFIG = Path(os.environ.get("AGENT_METRICS_CONFIG",
+                             Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "agent-metrics"))
+
+# Children get the environment minus anything credential-shaped; git reaches
+# its remote through the ssh agent or a credential helper, not through these.
+CRED_ENV = re.compile(r"TOKEN|SECRET|PASSW|API_KEY|PRIVATE_KEY|CREDENTIAL", re.I)
+
+USAGE_SHORT = "agent-metrics [init | collect | budget [check|record]] [--help]"
+
+
+def log(msg):
+    print(f"agent-metrics: {msg}", file=sys.stderr)
+
+
+def now():
+    fixed = os.environ.get("AGENT_METRICS_NOW")
+    if fixed:
+        return dt.datetime.fromisoformat(fixed).astimezone(dt.timezone.utc)
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def tilde(p):
+    return str(p).replace(str(HOME), "~", 1)
+
+
+# ── TOON output ──────────────────────────────────────────────────────────────
+
+def toon_scalar(v):
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    s = str(v)
+    if s == "" or s != s.strip() or re.search(r'[,:"\\\n\[\]{}]', s) or s in ("true", "false", "null") \
+            or re.fullmatch(r"-?\d+(\.\d+)?", s):
+        return json.dumps(s, ensure_ascii=False)
+    return s
+
+
+def toon(obj, indent=0):
+    pad = "  " * indent
+    out = []
+    for k, v in obj.items():
+        if isinstance(v, dict):
+            out.append(f"{pad}{k}:")
+            out.append(toon(v, indent + 1))
+        elif isinstance(v, list) and v and all(isinstance(x, dict) for x in v):
+            keys = list(v[0].keys())
+            out.append(f"{pad}{k}[{len(v)}]{{{','.join(keys)}}}:")
+            for row in v:
+                out.append(pad + "  " + ",".join(toon_scalar(row.get(c)) for c in keys))
+        elif isinstance(v, list):
+            out.append(f"{pad}{k}[{len(v)}]:")
+            for x in v:
+                out.append(pad + "  " + toon_scalar(x))
+        else:
+            out.append(f"{pad}{k}: {toon_scalar(v)}")
+    return "\n".join(out)
+
+
+def emit(obj):
+    print(toon(obj))
+
+
+def die(code, msg, help_line=None):
+    out = {"error": msg}
+    if help_line:
+        out["help"] = help_line
+    emit(out)
+    sys.exit(code)
+
+
+def usage_error(msg, help_line=None):
+    die(EXIT_USAGE, msg, help_line or USAGE_SHORT)
+
+
+# ── Config and pricing ───────────────────────────────────────────────────────
+
+def load_config(name):
+    """Read one config file; unreadable config is a setup error, never a default."""
+    path = CONFIG / name
+    try:
+        data = json.loads(path.read_text())
+    except OSError as e:
+        die(EXIT_USAGE, f"cannot read {tilde(path)}: {e.strerror}", "Run `chezmoi apply` to deploy the config")
+    except ValueError as e:
+        die(EXIT_USAGE, f"{tilde(path)} is not valid JSON: {e}")
+    if not isinstance(data, dict):
+        die(EXIT_USAGE, f"{tilde(path)} must hold a JSON object")
+    return data
+
+
+_pricing = None
+
+
+def pricing():
+    global _pricing
+    if _pricing is None:
+        p = load_config("pricing.json")
+        try:
+            models = {k: tuple(float(x) for x in v) for k, v in p["models"].items()}
+            if any(len(v) != 3 for v in models.values()):
+                raise ValueError("each model needs [input, output, cache_read]")
+            _pricing = {"models": models,
+                        # Longest prefix first, so a dated id resolves to its own family.
+                        "keys": sorted(models, key=len, reverse=True),
+                        "w5m": float(p["cache_write_5m"]), "w1h": float(p["cache_write_1h"]),
+                        "as_of": str(p["as_of"])}
+        except (KeyError, TypeError, ValueError, AttributeError) as e:
+            die(EXIT_USAGE, f"{tilde(CONFIG / 'pricing.json')} is malformed: {e!r}")
+    return _pricing
+
+
+def price_for(model):
+    p = pricing()
+    for k in p["keys"]:
+        if model.startswith(k):
+            return p["models"][k]
+    return None
+
+
+def cost_of(model, u):
+    """USD at list prices, or None for a model the pricing file does not know."""
+    rates = price_for(model)
+    if not rates:
+        return None
+    i, o, cr = rates
+    p = pricing()
+    return (u["input"] * i + u["output"] * o + u["cache_read"] * cr
+            + u["cache_write_5m"] * i * p["w5m"] + u["cache_write_1h"] * i * p["w1h"]) / 1e6
+
+
+# ── Store ────────────────────────────────────────────────────────────────────
+
+def child_env():
+    return {k: v for k, v in os.environ.items() if not CRED_ENV.search(k)}
+
+
+def git(*args, check=True):
+    r = subprocess.run(["git", "-C", str(STORE), *args], capture_output=True, text=True, env=child_env())
+    if check and r.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)}: {(r.stderr or r.stdout).strip()}")
+    return r
+
+
+def store_exists():
+    return (STORE / ".git").exists()
+
+
+# ── Commands ─────────────────────────────────────────────────────────────────
+
+def cmd_home(_args):
+    out = {"bin": tilde(Path(sys.argv[0]).resolve()),
+           "description": "Per-session agent metrics store: collect rows from transcripts, log plan quota, gate model spend",
+           "store": tilde(STORE)}
+    if store_exists():
+        last = git("log", "-1", "--format=%cs %s", check=False).stdout.strip()
+        out["last_commit"] = last or "none yet"
+        out["help"] = ["Run `agent-metrics collect --dry-run` to see what a run would write",
+                       "Run `agent-metrics budget` for the spend the audit is allowed",
+                       "Run `agent-metrics --help` for all commands"]
+    else:
+        out["status"] = "store not cloned"
+        out["help"] = ["Run `agent-metrics init` to clone the store",
+                       "Run `agent-metrics --help` for all commands"]
+    emit(out)
+    return 0
+
+
+def cmd_budget(_args):
+    b = load_config("budget.json")
+    emit({"pricing_as_of": pricing()["as_of"], "plan_pct": b.get("plan_pct"), "hard_pct": b.get("hard_pct")})
+    return 0
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        usage_error(message, f"Run `{self.prog} --help`")
+
+
+def build_parser():
+    p = Parser(prog="agent-metrics", description=__doc__.split("\n\n")[1],
+               formatter_class=argparse.RawDescriptionHelpFormatter,
+               epilog="examples:\n  agent-metrics collect --since 90      one-time backfill\n"
+                      "  agent-metrics collect --dry-run       preview a daily run\n"
+                      "  agent-metrics budget check --need 5   exit 0 when $5 may be spent, 3 when not")
+    p.set_defaults(func=cmd_home)
+    sub = p.add_subparsers(metavar="command", parser_class=Parser)
+    sub.add_parser("init", help="clone the store repo into place")
+    c = sub.add_parser("collect", help="write rows for recently changed sessions, then commit and push")
+    c.add_argument("--since", type=int, default=3, metavar="DAYS")
+    c.add_argument("--dry-run", action="store_true")
+    c.add_argument("--no-push", action="store_true")
+    b = sub.add_parser("budget", help="show the budget, or check and record a spend")
+    b.set_defaults(func=cmd_budget)
+    return p
+
+
+def main(argv):
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

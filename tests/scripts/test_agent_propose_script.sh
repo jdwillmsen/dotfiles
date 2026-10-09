@@ -800,7 +800,6 @@ assert len(body.split()) <= 165, len(body.split())
 for banned in ("Generated", "generated", "Claude", "Co-Authored", "Assisted", "\U0001F916", "noreply"):
     assert banned not in body, banned
 PY
-if [ -n "${KEEP_PR_BODY:-}" ]; then cp "$stub/pr-body" "$KEEP_PR_BODY"; fi
 # History and ledger, committed and pushed.
 [ "$(hist unused-plugin:caveman outcome) $(hist unused-plugin:caveman pr) $(hist unused-plugin:caveman branch)" = "\"open\" 41 \"$branch\"" ] || fail "caveman history" "$(cat "$hist")"
 [ "$(hist unused-plugin:caveman commit_subject)" = '"chore(agent-audit): disable unused plugin caveman"' ] || fail "history subject" "$(cat "$hist")"
@@ -1116,5 +1115,75 @@ grep -q "^judged: " "$out" || fail "an idle verify should say it judged nothing"
 rm "$stub/gh/pr-view-34.json"
 run 0 verify --dry-run
 has "revert_candidates" "verify needs GitHub only to learn of new merges"
+
+# ── systemd units ──
+units="$here/home/dot_config/systemd/user"
+trigger="$here/home/run_onchange_57-enable-agent-propose.sh.tmpl"
+svc="$units/agent-propose@.service"
+[ -f "$svc" ] || fail "missing agent-propose@.service"
+grep -qx 'Type=oneshot' "$svc" || fail "service must be oneshot"
+grep -qx 'ExecStartPre=%h/.local/bin/agent-report --window %i' "$svc" || fail "the report a run reads must be made first"
+grep -qx 'ExecStart=%h/.local/bin/agent-propose run --window %i' "$svc" || fail "service ExecStart"
+grep -qx 'ExecStartPost=%h/.local/bin/agent-propose verify' "$svc" || fail "merged findings are judged after each run"
+grep -qx 'NoNewPrivileges=yes' "$svc" && grep -qx 'PrivateTmp=yes' "$svc" || fail "service hardening missing"
+grep -qx 'Nice=10' "$svc" && grep -qx 'IOSchedulingClass=idle' "$svc" || fail "service scheduling hints missing"
+grep -q '^TimeoutStartSec=' "$svc" || fail "service needs a start timeout"
+grep -q '^Environment=PATH=.*/usr/bin' "$svc" || fail "service needs a PATH: a user manager starts with a bare one"
+declare -A cal=([daily]="*-*-* 07:40:00" [weekly]="Mon *-*-* 10:00:00" [monthly]="*-*-01 10:30:00")
+for w in "${!cal[@]}"; do
+    t="$units/agent-propose-$w.timer"
+    [ -f "$t" ] || fail "missing $(basename "$t")"
+    grep -qxF "OnCalendar=${cal[$w]}" "$t" || fail "$w timer calendar"
+    grep -qx "Unit=agent-propose@$w.service" "$t" || fail "$w timer target"
+    grep -qx "Persistent=true" "$t" || fail "$w timer must catch up after downtime"
+    grep -qx "WantedBy=timers.target" "$t" || fail "$w timer install target"
+    if command -v systemd-analyze >/dev/null 2>&1; then
+        systemd-analyze calendar "${cal[$w]}" >/dev/null || fail "$w calendar rejected by systemd"
+    fi
+done
+[ "$(find "$units" -name 'agent-propose-*.timer' | wc -l)" = 3 ] || fail "exactly the daily, weekly and monthly timers"
+if command -v systemd-analyze >/dev/null 2>&1; then
+    systemd-analyze verify --user "$svc" 2>&1 | grep -i "agent-propose" | grep -iv "no such file\|not-found" && fail "systemd rejects the service" || true
+fi
+
+# ── Trigger: stubbed systemctl/loginctl ──
+shellcheck -s bash "$trigger"
+for u in agent-propose@.service agent-propose-daily.timer agent-propose-weekly.timer agent-propose-monthly.timer; do
+    grep -qF "include \"dot_config/systemd/user/$u\" | sha256sum" "$trigger" || fail "the trigger does not re-run when $u changes"
+done
+trig="$tmp/trig"
+mkdir -p "$trig/bin" "$trig/home/.config/systemd/user"
+cp "$svc" "$trig/home/.config/systemd/user/"
+cat >"$trig/bin/systemctl" <<'STUB'
+#!/bin/sh
+if [ "$2" = "show-environment" ]; then echo "HOME=$STUB_MANAGER_HOME"; exit 0; fi
+echo "$*" >>"$CALL_LOG"
+STUB
+cat >"$trig/bin/loginctl" <<'STUB'
+#!/bin/sh
+echo "${STUB_LINGER:-no}"
+STUB
+chmod +x "$trig/bin"/*
+run_trigger() {  # $1 manager home, $2 linger
+    : >"$trig/calls"
+    trig_out="$(PATH="$trig/bin:/usr/bin:/bin" HOME="$trig/home" USER=tester BASH_ENV=/dev/null \
+        XDG_CONFIG_HOME="$trig/home/.config" CALL_LOG="$trig/calls" STUB_MANAGER_HOME="$1" \
+        STUB_LINGER="$2" bash "$trigger" 2>&1)"
+}
+run_trigger /elsewhere no
+grep -q "skipping enable" <<<"$trig_out" && [ ! -s "$trig/calls" ] || fail "trigger must skip a scratch-dest apply" "$trig_out"
+run_trigger "$trig/home" no
+grep -qx -- "--user daemon-reload" "$trig/calls" || fail "trigger never reloads systemd"
+for w in "${!cal[@]}"; do
+    grep -q -- "--user enable .*agent-propose-$w.timer" "$trig/calls" || fail "trigger does not enable the $w timer" "$(cat "$trig/calls")"
+done
+grep -q "start" "$trig/calls" && fail "trigger must not start a run"
+grep -q "agent-propose@" "$trig/calls" && fail "trigger must only touch the timers, never the service" "$(cat "$trig/calls")"
+grep -q "linger is off" <<<"$trig_out" || fail "trigger should warn when linger is off"
+run_trigger "$trig/home" yes
+grep -q "linger is off" <<<"$trig_out" && fail "no linger warning expected when linger is on"
+rm "$trig/home/.config/systemd/user/agent-propose@.service"
+run_trigger "$trig/home" yes
+grep -q "not a home apply" <<<"$trig_out" && [ ! -s "$trig/calls" ] || fail "trigger must skip when the unit is absent" "$trig_out"
 
 echo "test_agent_propose_script: OK"

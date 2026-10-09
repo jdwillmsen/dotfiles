@@ -1,0 +1,23 @@
+[Unit]
+Description=Agent audit proposal (%i window)
+Documentation=file://%h/.local/share/chezmoi/docs/agent-propose.md
+
+[Service]
+Type=oneshot
+# The run reads the newest stored report for its window, so make sure there is
+# one; a report that already exists is rewritten without a second model call.
+ExecStartPre=%h/.local/bin/agent-report --window %i
+ExecStart=%h/.local/bin/agent-propose run --window %i
+# Judging merged findings needs no model and is due on no schedule of its own.
+ExecStartPost=%h/.local/bin/agent-propose verify
+# A user manager starts with a bare PATH; claude lives in ~/.local/bin, and gh
+# and git in /usr/bin.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Bounds the whole run: the report, up to four authoring calls and one review
+# (five minutes each), the script tests after each commit (ten minutes each at
+# most), the store lock waits and two pushes.
+TimeoutStartSec=90min
+NoNewPrivileges=yes
+PrivateTmp=yes
+Nice=10
+IOSchedulingClass=idle

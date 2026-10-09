@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Reload trigger — systemd caches unit files, so a chezmoi-applied edit stays
+# inert until daemon-reload runs. Re-run whenever a unit changes.
+# {{ include "dot_config/systemd/user/agent-propose@.service" | sha256sum }}
+# {{ include "dot_config/systemd/user/agent-propose-daily.timer" | sha256sum }}
+# {{ include "dot_config/systemd/user/agent-propose-weekly.timer" | sha256sum }}
+# {{ include "dot_config/systemd/user/agent-propose-monthly.timer" | sha256sum }}
+timers=(agent-propose-daily.timer agent-propose-weekly.timer agent-propose-monthly.timer)
+
+if [ "$(uname -s)" != "Linux" ]; then
+    echo "agent-propose: not Linux — skipping"
+    exit 0
+fi
+if ! command -v systemctl >/dev/null 2>&1 || ! systemctl --user show-environment >/dev/null 2>&1; then
+    echo "agent-propose: no systemd user manager — run ~/.local/bin/agent-propose by hand"
+    exit 0
+fi
+
+# `systemctl --user` always acts on the real home, never the destination
+# chezmoi is applying to, so a scratch-dest apply (CI, tests/smoke.sh) must
+# not enable timers for the live user.
+manager_home="$(systemctl --user show-environment 2>/dev/null | sed -n 's/^HOME=//p')"
+if [ -n "$manager_home" ] && [ "$manager_home" != "$HOME" ]; then
+    echo "agent-propose: applying to $HOME, not the user manager's $manager_home — skipping enable"
+    exit 0
+fi
+
+unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+if [ ! -f "$unit_dir/agent-propose@.service" ]; then
+    echo "agent-propose: no unit in $unit_dir — not a home apply, skipping"
+    exit 0
+fi
+
+systemctl --user daemon-reload
+# Enabling --now starts the timers, which wait for their calendar slot; no
+# run starts until then, and a timer with no earlier stamp does not catch up.
+systemctl --user enable --now "${timers[@]}"
+
+if [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" != "yes" ]; then
+    echo "agent-propose: linger is off — the timers stop at logout; run: sudo scripts/provision-persistence.sh"
+fi
+echo "agent-propose: timers enabled"

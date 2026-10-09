@@ -1,0 +1,14 @@
+[Unit]
+Description=Monthly agent audit proposal
+
+[Timer]
+# After the 09:10 monthly report; half an hour behind the weekly slot for the
+# months that start on a Monday, when the weekly run's PR is already open.
+OnCalendar=*-*-01 10:30:00
+Unit=agent-propose@monthly.service
+# A box that was off at the scheduled time proposes at next boot instead of
+# silently skipping a window.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

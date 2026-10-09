@@ -10,9 +10,11 @@ ExecStartPre=%h/.local/bin/agent-report --window %i
 ExecStart=%h/.local/bin/agent-propose run --window %i
 # Judging merged findings needs no model and is due on no schedule of its own.
 ExecStartPost=%h/.local/bin/agent-propose verify
-# A user manager starts with a bare PATH; claude lives in ~/.local/bin, and gh
-# and git in /usr/bin.
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# A user manager starts with a bare PATH. claude lives in ~/.local/bin, gh and
+# git in /usr/bin. The repo's script tests, which a run executes, also need
+# chezmoi from ~/bin and the managed Node, which must come before the
+# distribution's older one in /usr/bin.
+Environment=PATH=%h/.local/npm-bin:%h/.local/bin:%h/bin:/usr/local/bin:/usr/bin:/bin
 # Bounds the whole run: the report, up to four authoring calls and one review
 # (five minutes each), the script tests after each commit (ten minutes each at
 # most), the store lock waits and two pushes.

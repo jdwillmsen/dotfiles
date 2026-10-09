@@ -47,8 +47,9 @@ SCHEMA = 1
 IDLE_GAP_S = 300
 ID_MAX = 64
 ID_UNSAFE = re.compile(r"[^A-Za-z0-9:_.@/-]")
-# Shapes of common credentials, which are otherwise valid identifier characters.
-ID_CREDENTIAL = re.compile(r"(?:gh[pousr]_|github_pat_|sk-|xox[baprs]-|AKIA|ASIA|AIza|eyJ)[A-Za-z0-9_-]{16,}")
+# Shapes of common credentials, which are otherwise valid identifier
+# characters. Anchored to a token start, or `sk-` would match inside `task-`.
+ID_CREDENTIAL = re.compile(r"(?<![A-Za-z0-9])(?:gh[pousr]_|github_pat_|sk-|xox[baprs]-|AKIA|ASIA|AIza|eyJ)[A-Za-z0-9_-]{16,}")
 # A person is typing in these: the terminal, and T3 Code, which drives its
 # sessions through the TypeScript SDK. Everything else is pipeline-launched.
 INTERACTIVE_ENTRYPOINTS = ("cli", "sdk-ts")

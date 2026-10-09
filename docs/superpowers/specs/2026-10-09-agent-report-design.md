@@ -68,6 +68,25 @@ Usage is in `docs/agent-report.md`.
 - **A stored report that cannot be read** while building the trend or the
   thresholds review stops the run with exit 2 naming the file.
 
+## Changes after review
+
+- Count-first GitHub search with range splitting, and caps that scale with
+  the window, so quarterly and yearly reports complete at real volume.
+- The ledger books the cap before the model call and settles to the real cost.
+- Compute, validate and render first; call the model last; splice its text in.
+- Delivery failures and insights errors are fixed reason codes; stored values
+  read back are validated; audit strings and paths are length-capped and
+  credential-checked.
+- Foreign-change refusal and fast-forward pull under the lock, then
+  `publish(dirs=("reports", "ledger"))`. The lock is held only for those steps.
+- Only the default daily run owns `flags.json`; it clears it first.
+- `agent-report@.service` runs `agent-metrics collect` first.
+- Re-runs reuse stored commentary (`--force-insights` overrides) and keep
+  `generated_at` when nothing else changed.
+- `github_authors` in config.json; previous-window follow-up rates.
+- Search qualifiers: repeated `author:` terms are OR'd; a parenthesised OR
+  returns nothing from this endpoint.
+
 ## Not covered
 
 - Notifications and the trends page.

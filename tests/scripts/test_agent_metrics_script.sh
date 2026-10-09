@@ -225,4 +225,122 @@ assert r["unpriced_models"] == ["mystery-model-1"] and r["cost_usd"] == 0.0, r
 assert r["cache_read_share"] is None, r["cache_read_share"]
 PY
 
+# ── Collector and store ──
+store="$AGENT_METRICS_STORE"
+sg() { git -C "$store" "$@"; }
+field() { sed -n "s/^$1: //p" "$out"; }
+want() { [ "$(field "$1")" = "$2" ] || fail "collect reported $1=$(field "$1"), want $2 ($3)" "$(cat "$out" "$err")"; }
+month="$store/sessions/2026-10.jsonl"
+
+run 2 collect
+grep -q "agent-metrics init" "$out" || fail "collect without a store does not point at init" "$(cat "$out")"
+
+run 0 init
+[ -f "$store/README.md" ] || fail "init did not write the store README"
+[ "$(sg rev-parse HEAD)" = "$(git -C "$remote" rev-parse main)" ] || fail "init did not push the first commit"
+run 0 init
+
+run 0 collect --since 30
+want sessions_written 3 "first run"
+want files_skipped 2 "empty and timestamp-less transcripts"
+want pushed true "first run"
+[ "$(wc -l <"$month")" = 3 ] || fail "expected three rows in the month file" "$(cat "$month")"
+python3 - "$month" <<'PY' || fail "rows are not sorted by start time with sorted keys"
+import json, sys
+lines = open(sys.argv[1]).read().splitlines()
+rows = [json.loads(l) for l in lines]
+assert [r["session_id"] for r in rows] == ["aaaa-1", "bbbb-2", "eeee-5"], [r["session_id"] for r in rows]
+assert all(l == json.dumps(r, sort_keys=True, separators=(",", ":")) for l, r in zip(lines, rows))
+PY
+[ "$(sg rev-parse HEAD)" = "$(git -C "$remote" rev-parse main)" ] || fail "collect did not push"
+[ -z "$(sg status --porcelain)" ] || fail "collect left the store dirty" "$(sg status --porcelain)"
+if grep -rE "ghp_|purple|secret tool output" "$store" --exclude-dir=.git; then fail "transcript text leaked into the store"; fi
+
+commits() { sg rev-list --count HEAD; }
+before="$(commits)"
+run 0 collect --since 30
+want sessions_written 0 "nothing changed"
+want sessions_unchanged 3 "nothing changed"
+[ "$(commits)" = "$before" ] || fail "an unchanged collect made a commit"
+
+# One changed transcript is a one-line diff.
+append() {
+    python3 - "$@" <<'PY'
+import json, sys
+path, sid, t, mid = sys.argv[1:5]
+rec = {"type": "assistant", "sessionId": sid, "cwd": "/x", "entrypoint": "cli", "timestamp": f"2026-10-08T{t}.000Z",
+       "message": {"id": mid, "model": "claude-haiku-4-5", "usage": {"input_tokens": 7, "output_tokens": 7}, "content": []}}
+if len(sys.argv) > 5:
+    rec["isSidechain"] = True
+open(path, "a").write(json.dumps(rec) + "\n")
+PY
+}
+append "$P/-b/bbbb-2.jsonl" bbbb-2 11:01:00 n2
+run 0 collect --since 30
+want sessions_written 1 "one transcript grew"
+[ "$(sg show --numstat --format= HEAD)" = "1	1	sessions/2026-10.jsonl" ] || fail "a one-session change is not a one-line diff" "$(sg show --numstat --format= HEAD)"
+
+# A subagent that finishes after its parent's last write still reaches the row.
+append "$P/-a/aaaa-1/subagents/agent-x1.jsonl" aaaa-1 10:00:16 m4 sub
+touch -d "2026-01-01" "$P/-a/aaaa-1.jsonl"
+run 0 collect --since 1
+want sessions_written 1 "only the subagent file changed"
+grep '"aaaa-1"' "$month" | grep -q '"claude-haiku-4-5":{"cache_read":0,"cache_write_1h":0,"cache_write_5m":0,"calls":1' \
+    || fail "late subagent usage did not reach the parent's row" "$(grep '"aaaa-1"' "$month")"
+
+# A session outside the window keeps its row, and so does one whose transcript is gone.
+append "$P/-b/bbbb-2.jsonl" bbbb-2 11:02:00 n3
+touch -d "2026-09-01" "$P/-b/bbbb-2.jsonl"
+rm -rf "$P/-e"
+row_b="$(grep '"bbbb-2"' "$month")"
+run 0 collect --since 1
+want sessions_written 0 "nothing inside the window"
+[ "$(grep '"bbbb-2"' "$month")" = "$row_b" ] || fail "a session outside --since was rewritten"
+grep -q '"eeee-5"' "$month" || fail "a row was dropped when its transcript was deleted"
+touch "$P/-b/bbbb-2.jsonl"
+
+# --dry-run reports and writes nothing.
+head_before="$(sg rev-parse HEAD)"
+run 0 collect --since 1 --dry-run
+want sessions_written 1 "dry run still counts"
+want dry_run true "dry run"
+[ "$(sg rev-parse HEAD)" = "$head_before" ] && [ -z "$(sg status --porcelain)" ] || fail "--dry-run changed the store"
+
+# A rejected push keeps the commit and fails loudly; the next run delivers it.
+printf '#!/bin/sh\nexit 1\n' >"$remote/hooks/pre-receive"
+chmod +x "$remote/hooks/pre-receive"
+run 1 collect --since 1
+want committed true "push rejected"
+want pushed false "push rejected"
+[ "$(sg rev-parse HEAD)" != "$(git -C "$remote" rev-parse main)" ] || fail "the rejecting remote accepted the push"
+rm "$remote/hooks/pre-receive"
+run 0 collect --since 1
+want pushed true "retry after a rejected push"
+[ "$(sg rev-parse HEAD)" = "$(git -C "$remote" rev-parse main)" ] || fail "the kept commit was not pushed on the next run"
+
+# A store somebody else touched is left alone.
+echo stray >"$store/stray.txt"
+before="$(commits)"
+run 1 collect --since 30
+grep -q "stray.txt" "$out" || fail "a dirty store is not named in the error" "$(cat "$out")"
+[ "$(commits)" = "$before" ] && [ "$(cat "$store/stray.txt")" = stray ] || fail "collect committed or removed a stray file"
+rm "$store/stray.txt"
+
+git clone -q "$remote" "$tmp/other"
+git -C "$tmp/other" commit -q --allow-empty -m "elsewhere"
+git -C "$tmp/other" push -q origin main
+sg commit -q --allow-empty -m "local only"
+run 1 collect --since 30
+grep -qi "pull" "$out" || fail "a diverged store does not fail on the pull" "$(cat "$out")"
+sg reset -q --hard origin/main
+run 0 collect --since 30
+
+# A second run waits for the first instead of racing it.
+mkdir -p "$AGENT_METRICS_STATE"
+flock "$AGENT_METRICS_STATE/collect.lock" sleep 3 &
+sleep 0.5
+AGENT_METRICS_LOCK_WAIT=1 run 1 collect --since 30
+grep -q "another" "$out" || fail "a held lock is not reported" "$(cat "$out")"
+wait
+
 echo "test_agent_metrics_script: OK"

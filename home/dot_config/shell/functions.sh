@@ -105,3 +105,10 @@ t3_expiry_notice() {
         echo "  Then clear this: npx t3@latest auth session revoke <id> && t3-session-expiry"
     } >&2
 }
+
+# Nudge about the daily report's unacknowledged flags. The stat comes first so
+# a shell with nothing pending never starts Python; any failure stays silent.
+if [ -e "${AGENT_METRICS_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-metrics}/flags.json" ] \
+    && command -v agent-notify >/dev/null 2>&1; then
+    agent-notify shell 2>/dev/null || true
+fi

@@ -352,4 +352,64 @@ run 0 --window daily --end 2026-10-02 --no-insights
 cp "$tmp/thresholds.bak" "$tmp/config/thresholds.json"
 reset_store
 
+# ── Output: files in the store, one commit, pushed; Markdown for people ──
+wmd="$store/reports/2026-10-04-weekly.md"
+run 0 --window weekly --end 2026-10-09 --no-insights --no-github
+[ -f "$store/reports/2026-10-04-weekly.json" ] && [ -f "$wmd" ] || fail "the report files are not in the store" "$(cat "$out" "$err")"
+[ "$(gs log -1 --format=%s)" = "report: 2026-10-04 weekly" ] || fail "report commit subject: $(gs log -1 --format=%s)"
+[ "$(gs rev-parse HEAD)" = "$(git -C "$remote" rev-parse main)" ] || fail "the report was not pushed"
+[ -z "$(gs status --porcelain)" ] || fail "the store was left dirty" "$(gs status --porcelain)"
+grep -q "^pushed: true" "$out" || fail "the run does not report the push" "$(cat "$out")"
+for want in "list-price estimates" "## Interactive" "## Scripted" "\$5.00" "\$6.00" "2026-09-28" "no-mistakes"; do
+    grep -q -- "$want" "$wmd" || fail "the Markdown report lacks '$want'" "$(cat "$wmd")"
+done
+
+# Re-running a window overwrites it; with nothing new the files are identical and nothing is committed.
+cp "$store/reports/2026-10-04-weekly.json" "$tmp/first.json"
+commits_before="$(gs rev-list --count HEAD)"
+run 0 --window weekly --end 2026-10-09 --no-insights --no-github
+cmp -s "$tmp/first.json" "$store/reports/2026-10-04-weekly.json" || fail "a re-run changed the report"
+[ "$(gs rev-list --count HEAD)" = "$commits_before" ] || fail "a re-run committed again"
+grep -q "^committed: false" "$out" || fail "a re-run should report no commit" "$(cat "$out")"
+
+# A dry run writes outside the store and touches nothing in it.
+reset_store
+echo '{"date": "keep", "window": "daily", "flags": []}' >"$tmp/state/flags.json"
+head_before="$(gs rev-parse HEAD)"
+ledger_before="$(cat "$store/ledger/2026-10.jsonl")"
+for w in daily weekly monthly; do
+    run 0 --window "$w" --end 2026-10-09 --dry-run
+    for k in json md; do
+        p="$(field "$k")"
+        [ -f "$p" ] || fail "dry run $w did not write $k" "$(cat "$out")"
+        case "$p" in "$store"/*) fail "dry run $w wrote into the store: $p" ;; esac
+    done
+done
+[ "$(gs rev-parse HEAD)" = "$head_before" ] && [ -z "$(gs status --porcelain)" ] || fail "a dry run changed the store" "$(gs status --porcelain)"
+[ "$ledger_before" = "$(cat "$store/ledger/2026-10.jsonl")" ] || fail "a dry run changed the ledger"
+grep -q '"keep"' "$tmp/state/flags.json" || fail "a dry run rewrote flags.json"
+rm "$tmp/state/flags.json"
+run 0 --window daily --end 2026-10-09 --dry-run
+[ ! -e "$tmp/state/flags.json" ] || fail "a dry run wrote flags.json"
+
+# One run at a time: a held lock times out as a failure, not a hang.
+python3 - "$tmp/state/collect.lock" <<'PY' &
+import fcntl, sys, time
+fh = open(sys.argv[1], "w"); fcntl.flock(fh, fcntl.LOCK_EX)
+time.sleep(4)
+PY
+holder=$!
+python3 -c 'import time; time.sleep(0.5)'
+AGENT_METRICS_LOCK_WAIT=1 run 1 --window weekly --end 2026-10-09 --no-insights --no-github
+grep -q "lock" "$out" || fail "a lock timeout is not explained" "$(cat "$out")"
+wait "$holder"
+
+# A failed push keeps the commit and fails the run, so the next run delivers it.
+mv "$remote" "$remote.gone"
+run 1 --window weekly --end 2026-10-09 --no-insights --no-github
+grep -q "^pushed: false" "$out" || fail "a failed push is not reported" "$(cat "$out")"
+[ "$(gs log -1 --format=%s)" = "report: 2026-10-04 weekly" ] || fail "the commit was not kept after a failed push"
+mv "$remote.gone" "$remote"
+reset_store
+
 echo "test_agent_report_script: OK"

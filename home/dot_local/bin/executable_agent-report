@@ -384,10 +384,120 @@ def write_text(path, text):
     os.replace(tmp, path)
 
 
+# ── Markdown ─────────────────────────────────────────────────────────────────
+
+def usd(v):
+    return "n/a" if v is None else f"${v:,.2f}"
+
+
+def num(v):
+    return "n/a" if v is None else f"{v:,}" if isinstance(v, int) else f"{v:,.4g}"
+
+
+def pct_share(v):
+    return "n/a" if v is None else f"{v * 100:.1f}%"
+
+
+def change(cur, prev):
+    if cur is None or prev is None:
+        return "n/a"
+    if prev == 0:
+        return "0" if cur == 0 else "new"
+    return f"{(cur - prev) / prev * 100:+.0f}%"
+
+
+def table(headers, rows):
+    lines = ["| " + " | ".join(headers) + " |", "|" + "|".join("---" for _ in headers) + "|"]
+    lines += ["| " + " | ".join(str(c) for c in row) + " |" for row in rows]
+    return lines
+
+
+def population_rows(c, p):
+    f, o, t, lp = c["friction"], c["output"], c["time"], c["linked_pr_cost"]
+    pf, po, pt, plp = p["friction"], p["output"], p["time"], p["linked_pr_cost"]
+    rows = [("Sessions", num(c["sessions"]), num(p["sessions"]), change(c["sessions"], p["sessions"])),
+            ("Estimated cost (list price)", usd(c["cost_usd"]), usd(p["cost_usd"]), change(c["cost_usd"], p["cost_usd"])),
+            ("Cache read share", pct_share(c["cache_read_share"]), pct_share(p["cache_read_share"]), "")]
+    rows += [(k.replace("_", " ").capitalize(), num(f[k]), num(pf[k]), change(f[k], pf[k])) for k in FRICTION]
+    rows += [(k.replace("_", " ").capitalize(), num(o[k]), num(po[k]), change(o[k], po[k])) for k in (*OUTPUT, "linked_prs")]
+    rows += [("Cost per linked PR (list price)", usd(lp["cost_per_linked_pr_usd"]), usd(plp["cost_per_linked_pr_usd"]), ""),
+             ("Spend covered by linked PRs", pct_share(lp["share_of_spend"]), pct_share(plp["share_of_spend"]), "")]
+    rows += [(k.replace("_s", "").replace("_", " ").capitalize() + " time (h)", f"{t[k] / 3600:.1f}", f"{pt[k] / 3600:.1f}",
+              change(t[k], pt[k])) for k in TIME]
+    return rows
+
+
+def render_population(name, c, p):
+    lines = [f"## {name.capitalize()}", ""]
+    lines += table(["Metric", "This window", "Previous", "Change"], population_rows(c, p))
+    if c["cost_by_pipeline"]:
+        lines += ["", "Cost by pipeline (list price): " + ", ".join(f"{k} {usd(v)}" for k, v in c["cost_by_pipeline"].items())]
+    if c["models"]:
+        lines += [""] + table(["Model", "Main calls", "Main cost", "Subagent calls", "Subagent cost"],
+                              [(m["model"], num(m["main_calls"]), usd(m["main_cost_usd"]), num(m["subagent_calls"]),
+                                usd(m["subagent_cost_usd"])) for m in c["models"]])
+    for label, key in (("Skills", "skills"), ("Tools", "tools"), ("MCP servers", "mcp"), ("Subagent types", "subagent_types")):
+        if c["top"][key]:
+            lines += ["", f"{label}: " + ", ".join(f"{x['name']} {x['count']}" for x in c["top"][key])]
+    return lines + [""]
+
+
+def render_flags(flags):
+    if not flags:
+        return ["## Flags", "", "None.", ""]
+    return ["## Flags", ""] + [f"- **{f['severity']}** `{f['id']}`: {f['message']}" for f in flags] + [""]
+
+
+def render_quota_ledger(cur, prev):
+    q, pq = cur["quota"], prev["quota"]
+    lines = ["## Plan quota and audit spend", ""]
+    lines += table(["Metric", "This window", "Previous"],
+                   [("Peak five-hour quota used", num(q["peak_five_hour_pct"]) + ("%" if q["peak_five_hour_pct"] is not None else ""),
+                     num(pq["peak_five_hour_pct"]) + ("%" if pq["peak_five_hour_pct"] is not None else "")),
+                    ("Peak weekly quota used", num(q["peak_seven_day_pct"]) + ("%" if q["peak_seven_day_pct"] is not None else ""),
+                     num(pq["peak_seven_day_pct"]) + ("%" if pq["peak_seven_day_pct"] is not None else "")),
+                    ("Hourly readings", num(q["readings"]), num(pq["readings"])),
+                    ("Audit model spend (list price)", usd(cur["ledger"]["usd"]), usd(prev["ledger"]["usd"]))])
+    return lines + [""]
+
+
+def render_trend(rows):
+    if not rows:
+        return []
+    lines = ["## Trend", "", "Earlier reports of this window, oldest first.", ""]
+    lines += table(["Label date", "Interactive sessions", "Interactive cost", "Scripted sessions", "Scripted cost"],
+                   [(r["label_date"], num(r["interactive"]["sessions"]), usd(r["interactive"]["cost_usd"]),
+                     num(r["scripted"]["sessions"]), usd(r["scripted"]["cost_usd"])) for r in rows])
+    return lines + [""]
+
+
+SECTION_RENDERERS = []
+
+
+def render(r):
+    cur, prev = r["current"], r["previous"]
+    lines = [f"# Agent report: {r['window']} {r['start']} to {r['label_date']}", "",
+             f"Generated {r['generated_at']}. All windows are UTC. Dollar figures are list-price estimates, not bills: "
+             "on a subscription they are an index of relative use, and the quota percentages are the real limit. "
+             f"Scripted (pipeline-launched) and interactive sessions are reported separately. "
+             f"Previous window: {prev['start']} to {prev['end']} (end exclusive).", ""]
+    if cur["unpriced_models"]:
+        lines += [f"Models without a price, left out of cost: {', '.join(cur['unpriced_models'])}.", ""]
+    lines += render_flags(r["flags"])
+    for name in POPULATIONS:
+        lines += render_population(name, cur["populations"][name], prev["populations"][name])
+    lines += render_quota_ledger(cur, prev)
+    lines += render_trend(r["trend"])
+    for fn in SECTION_RENDERERS:
+        lines += fn(r)
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def write_outputs(report, directory):
     stem = f"{report['label_date']}-{report['window']}"
-    paths = {"json": directory / f"{stem}.json"}
+    paths = {"json": directory / f"{stem}.json", "md": directory / f"{stem}.md"}
     write_text(paths["json"], json.dumps(report, indent=1) + "\n")
+    write_text(paths["md"], render(report))
     return paths
 
 
@@ -439,16 +549,24 @@ def cmd_run(args):
     am.require_store()
     th = load_thresholds()
     w = compute_windows(args.window, end)
-    report = build_report(args, w, th)
-    directory = Path(tempfile.mkdtemp(prefix="agent-report-")) if args.dry_run else am.STORE / "reports"
-    paths = write_outputs(report, directory)
-    if args.window == "daily" and not args.dry_run:
-        write_flags_file(report)
-    emit({"dry_run": bool(args.dry_run), "window": report["window"], "start": report["start"],
-          "end": report["end"], "label_date": report["label_date"], "previous_start": report["previous"]["start"],
-          "flags": len(report["flags"]),
-          **{k: str(v) for k, v in paths.items()}})
-    return 0
+    if args.dry_run:
+        report = build_report(args, w, th)
+        paths = write_outputs(report, Path(tempfile.mkdtemp(prefix="agent-report-")))
+        result = {"dry_run": True}
+    else:
+        with am.Lock():
+            report = build_report(args, w, th)
+            paths = write_outputs(report, am.STORE / "reports")
+            if args.window == "daily":
+                write_flags_file(report)
+            try:
+                result = {"dry_run": False, **am.publish(f"report: {report['label_date']} {report['window']}")}
+            except RuntimeError as e:
+                die(EXIT_FAIL, str(e), f"Inspect with `git -C {tilde(am.STORE)} status`")
+    emit({**result, "window": report["window"], "start": report["start"], "end": report["end"],
+          "label_date": report["label_date"], "previous_start": report["previous"]["start"],
+          "flags": len(report["flags"]), **{k: str(v) for k, v in paths.items()}})
+    return EXIT_FAIL if result.get("pushed") is False else 0
 
 
 class Parser(argparse.ArgumentParser):

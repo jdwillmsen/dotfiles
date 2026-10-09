@@ -64,6 +64,31 @@ jobs:
             }
           }' | ~/.local/bin/claude-status | grep -q '⬡'
 
+  agent-diff:
+    name: agent-authored commits pass the diff checker
+    # Commits written by agent-propose carry a Finding trailer; the checker
+    # judges each of those against its parent and ignores everything else.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Check Finding commits
+        run: |
+          # The base branch's copy judges the pull request, so a pull request
+          # cannot loosen the rules it is judged by; the checkout's copy is
+          # used only until the base has one.
+          checker="$RUNNER_TEMP/check-agent-diff"
+          if ! git show "$BASE_SHA:scripts/check-agent-diff" >"$checker" 2>/dev/null; then
+            cp scripts/check-agent-diff "$checker"
+          fi
+          python3 -I "$checker" --each-commit "$BASE_SHA" "$HEAD_SHA"
+
   chezmoi:
     name: chezmoi verify + smoke
     runs-on: ubuntu-latest

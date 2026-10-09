@@ -45,7 +45,10 @@ __wt_project() {
     if [[ -n "$slug" ]] && ! { __wt_ok_segment "${slug%/*}" && __wt_ok_segment "${slug#*/}"; }; then
         slug=""
     fi
-    owner=$(git config --get stream.owner 2>/dev/null | sed -E 's#^[[:space:]]+##; s#[[:space:]]+$##')
+    # GitHub owner and repo names are case-insensitive: lower-cased, one repo
+    # cannot land in two worktree namespaces. A folder name is taken as it is.
+    slug=$(printf '%s' "$slug" | tr '[:upper:]' '[:lower:]')
+    owner=$(git config --get stream.owner 2>/dev/null | sed -E 's#^[[:space:]]+##; s#[[:space:]]+$##' | tr '[:upper:]' '[:lower:]')
     __wt_ok_segment "$owner" || owner=""
     if [[ -z "$slug" ]]; then
         root=$(git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | head -1)

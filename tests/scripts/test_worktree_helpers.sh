@@ -80,12 +80,20 @@ mkrepo l https://github.com/acme/widget/.git
 mkrepo m "https://github.com/acme/widget.git "
 mkrepo n git@github.com:acme/widget.git
 git -C "$tmp/n" config stream.owner " jdwillmsen "
+# GitHub owner and repo names are case-insensitive, so one repo must not get a
+# second worktree namespace by case. A folder name is not GitHub's to fold.
+mkrepo o https://github.com/JDWillmsen/Career.git
+mkrepo p git@github.com:Acme/Widget.git
+git -C "$tmp/p" config stream.owner JDWLabs
+mkrepo Q
+git -C "$tmp/Q" config stream.owner JDWLabs
 
 stream_bin="$here/home/dot_local/bin/executable_stream"
 for case in "a:jdwlabs/platform" "b:dotablaze-tech/platform" "c:jdwillmsen/career" \
     "d:jdwillmsen/gameops" "e:e" "f:jdwillmsen/no-mistakes" "inside:jdwlabs/platform" \
     "g:g" "h:acme/widget" "i:acme/widget" \
-    "j:acme/widget" "k:acme/widget" "l:acme/widget" "m:acme/widget" "n:jdwillmsen/widget"; do
+    "j:acme/widget" "k:acme/widget" "l:acme/widget" "m:acme/widget" "n:jdwillmsen/widget" \
+    "o:jdwillmsen/career" "p:jdwlabs/widget" "Q:jdwlabs/Q"; do
     dir="${case%%:*}" want="${case#*:}"
     got="$(slug_in "$tmp/$dir")"
     [ "$got" = "$want" ] || { echo "FAIL: __wt_project in $dir gave '$got', expected '$want'"; exit 1; }

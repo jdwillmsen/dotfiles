@@ -203,6 +203,11 @@ assert (r["population"], r["pipeline"], r["repo"]) == ("scripted", "no-mistakes"
 assert r["prompts"] == 1 and r["wall_s"] == 30 and r["subagent_runs"] == 0, r
 PY
 
+# T3 Code drives its sessions through the TypeScript SDK; a person is still typing.
+printf '%s\n' '{"type":"user","sessionId":"t3","cwd":"/x","entrypoint":"sdk-ts","timestamp":"2026-10-08T09:00:00.000Z","message":{"role":"user","content":"hi"}}' >"$tmp/t3.jsonl"
+run 0 row "$tmp/t3.jsonl"
+grep -q '"population": "interactive"' "$out" || fail "an sdk-ts session should count as interactive" "$(cat "$out")"
+
 for f in -c/cccc-3 -d/dddd-4; do
     run 0 row "$P/$f.jsonl"
     [ "$(cat "$out")" = "null" ] || fail "a transcript with no timestamped record should give no row ($f)" "$(cat "$out")"

@@ -47,6 +47,9 @@ SCHEMA = 1
 IDLE_GAP_S = 300
 ID_MAX = 64
 ID_UNSAFE = re.compile(r"[^A-Za-z0-9:_.@/-]")
+# A person is typing in these: the terminal, and T3 Code, which drives its
+# sessions through the TypeScript SDK. Everything else is pipeline-launched.
+INTERACTIVE_ENTRYPOINTS = ("cli", "sdk-ts")
 TIMED_TYPES = ("user", "assistant", "system", "attachment")
 INTERRUPTED = "[Request interrupted by user"
 # Matched against Bash commands to count outcomes; the command is never stored.
@@ -420,7 +423,7 @@ def build_row(main_path, sub_paths):
         "entrypoint": clean_id(entry) if entry else None,
         "cli_version": clean_id(ident["cli_version"]) if ident.get("cli_version") else None,
         "started_at": iso(times[0]), "ended_at": iso(times[-1]),
-        "population": "interactive" if entry == "cli" else "scripted",
+        "population": "interactive" if entry in INTERACTIVE_ENTRYPOINTS else "scripted",
         "pipeline": pipeline, "repo": repo,
         "cwd_hash": hashlib.sha256(str(ident.get("cwd") or "").encode()).hexdigest()[:12],
         "wall_s": round(times[-1] - times[0]), "active_s": round(active), "idle_s": round(idle),

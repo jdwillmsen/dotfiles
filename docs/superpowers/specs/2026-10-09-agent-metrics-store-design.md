@@ -107,7 +107,7 @@ One row per main session, with its subagent transcripts rolled in.
 |---|---|---|---|
 | Identity | `schema`, `session_id`, `entrypoint`, `cli_version` | record fields | yes |
 | | `started_at`, `ended_at` | first and last record timestamp | yes |
-| | `population` | `interactive` when the entrypoint is `cli`, otherwise `scripted` | yes |
+| | `population` | `interactive` when the entrypoint is `cli` or `sdk-ts` (T3 Code), otherwise `scripted` | yes |
 | | `pipeline` | `no-mistakes` or `agent-audit` when the working directory matches their known roots, else null | yes |
 | | `repo` | `owner/repo` when the working directory is under `~/projects` or `~/worktrees`, else null | yes |
 | | `cwd_hash` | first 12 hex of SHA-256 of the first working directory | yes |

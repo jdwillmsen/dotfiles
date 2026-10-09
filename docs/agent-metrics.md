@@ -47,7 +47,8 @@ transcript reaches the store.
 Reading the numbers:
 
 - **`population`** is `interactive` for sessions started from the terminal
-  and `scripted` for everything a pipeline launched. Most sessions are
+  or T3 Code (entrypoints `cli` and `sdk-ts`) and `scripted` for everything
+  a pipeline launched. Most sessions are
   scripted, so averages across both mean little; always split them.
 - **`cost_usd`** is an estimate at the list prices in
   `~/.config/agent-metrics/pricing.json`. On a subscription it is an index

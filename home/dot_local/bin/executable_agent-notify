@@ -7,17 +7,26 @@ store's GitHub repo, `shell` prints a one-line nudge at shell start, and
 is TOON, diagnostics go to stderr.
 """
 import argparse
+import datetime as dt
+import fcntl
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
+import time
+import unicodedata
 from pathlib import Path
 
 VERSION = "1.0.0"
 ISSUE_TITLE = "Agent metrics: flagged days"
-DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+IDENT_RE = re.compile(r"[A-Za-z0-9:_.@/-]{1,64}")
+# GitHub's own limits, tightened: the name is later part of a command line.
+REPO_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/(?!\.{1,2}$)[A-Za-z0-9._-]{1,100}")
+LOCK_WAIT_S = 120
 SEVERITIES = ("info", "warn", "critical")
 # A flags file is a few hundred bytes; this bounds a corrupt or hostile one.
 MAX_FLAGS_BYTES = 64 << 10
@@ -36,15 +45,62 @@ def state_dir():
     return Path(xdg) / "agent-metrics"
 
 
-def read_small_json(path):
-    """Parsed JSON object, or None when absent, oversized or not an object."""
+def read_regular(path):
+    """Bytes of a small regular file, or None for anything else. The open is
+    non-blocking and the size is checked on the descriptor, so a FIFO, a
+    device or a huge file can neither hang nor flood a shell start."""
     try:
-        if path.stat().st_size > MAX_FLAGS_BYTES:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_FLAGS_BYTES:
             return None
-        data = json.loads(path.read_text())
-    except (OSError, ValueError):
+        data = os.read(fd, MAX_FLAGS_BYTES + 1)
+        return data if len(data) <= MAX_FLAGS_BYTES else None
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+
+def read_small_json(path):
+    """Parsed JSON object, or None when absent, not a small regular file, or
+    not an object."""
+    raw = read_regular(path)
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
         return None
     return data if isinstance(data, dict) else None
+
+
+def valid_date(d):
+    if not isinstance(d, str) or not DATE_RE.fullmatch(d):
+        return False
+    try:
+        dt.date.fromisoformat(d)
+    except ValueError:
+        return False
+    return True
+
+
+def printable(text, limit):
+    """Text with every control, format, separator and unassigned character
+    replaced by a space, so nothing from a file can steer a terminal, flip
+    text direction or break markdown."""
+    text = "".join(c if unicodedata.category(c)[0] not in "CZ" else " " for c in str(text))
+    text = " ".join(text.split()).replace("`", "")
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def ident(v):
+    """An identifier as-is, or `_invalid` whole: a partial clean would let a
+    crafted value look like a different one."""
+    return v if isinstance(v, str) and IDENT_RE.fullmatch(v) else "_invalid"
 
 
 def worst_count(flags):
@@ -57,8 +113,9 @@ def worst_count(flags):
 
 
 def valid_flags(data):
-    """Normalized flags of a parsed flags.json, or None when it is not one."""
-    if not data or not isinstance(data.get("date"), str) or not DATE_RE.fullmatch(data["date"]):
+    """Normalized flags of a parsed flags.json, or None when it is not one.
+    The Go status line applies the same rules."""
+    if not data or not valid_date(data.get("date")):
         return None
     raw = data.get("flags")
     if not isinstance(raw, list):
@@ -68,8 +125,10 @@ def valid_flags(data):
         if not isinstance(f, dict):
             return None
         sev = f.get("severity")
-        flags.append({"id": str(f.get("id", "")), "severity": sev if sev in SEVERITIES else "info",
-                      "message": str(f.get("message", ""))})
+        if sev is not None and not isinstance(sev, str):
+            return None
+        flags.append({"id": ident(f.get("id")), "severity": sev if sev in SEVERITIES else "info",
+                      "message": printable(f.get("message", ""), MESSAGE_MAX)})
     return flags
 
 
@@ -125,14 +184,16 @@ def load_flags():
     that cannot be read as flags is a setup error: a day's flags must never
     be dropped silently."""
     path = STATE / "flags.json"
-    if not path.exists():
+    if not os.path.lexists(path):
         return None
     where = am.tilde(path)
+    raw = read_regular(path)
+    if raw is None:
+        am.die(am.EXIT_USAGE, f"{where} is not a regular file under {MAX_FLAGS_BYTES} bytes",
+               "It is rewritten by the next daily report")
     try:
-        if path.stat().st_size > MAX_FLAGS_BYTES:
-            raise ValueError("larger than expected")
-        data = json.loads(path.read_text())
-    except (OSError, ValueError) as e:
+        data = json.loads(raw)
+    except ValueError as e:
         am.die(am.EXIT_USAGE, f"{where} cannot be read: {e}", "It is rewritten by the next daily report")
     flags = valid_flags(data if isinstance(data, dict) else None)
     if flags is None:
@@ -144,15 +205,22 @@ def load_flags():
 def read_dates(name):
     data = read_small_json(STATE / name) or {}
     dates = data.get("dates")
-    return [d for d in dates if isinstance(d, str)] if isinstance(dates, list) else []
+    return [d for d in dates if valid_date(d)] if isinstance(dates, list) else []
 
 
 def write_state(name, obj):
     STATE.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=STATE, prefix=name + ".")
-    with os.fdopen(fd, "w") as fh:
-        json.dump(obj, fh)
-    os.replace(tmp, STATE / name)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(obj, fh)
+        os.replace(tmp, STATE / name)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def add_date(name, date):
@@ -160,12 +228,50 @@ def add_date(name, date):
     write_state(name, {"dates": sorted(dates)[-KEEP_DATES:]})
 
 
-def remembered_issue():
-    try:
-        n = int((STATE / "notify-issue").read_text().strip())
-    except (OSError, ValueError):
+def remove_date(name, date):
+    write_state(name, {"dates": [d for d in read_dates(name) if d != date]})
+
+
+def remembered_issue(repo=None):
+    """(repo, number) last used, or None. With `repo`, a value remembered for
+    any other repository is ignored: numbers mean nothing across repos."""
+    data = read_small_json(STATE / "notify-issue") or {}
+    r, n = data.get("repo"), data.get("number")
+    if not (isinstance(r, str) and REPO_RE.fullmatch(r) and isinstance(n, int) and not isinstance(n, bool) and n > 0):
         return None
-    return n if n > 0 else None
+    return (r, n) if repo is None or r == repo else None
+
+
+def remember_issue(repo, number):
+    write_state("notify-issue", {"repo": repo, "number": number})
+
+
+def forget_issue():
+    try:
+        (STATE / "notify-issue").unlink()
+    except OSError:
+        pass
+
+
+class SendLock:
+    """One send at a time, covering check, comment and record, so a timer
+    firing during a manual run cannot post the same date twice."""
+
+    def __enter__(self):
+        STATE.mkdir(parents=True, exist_ok=True)
+        self.fh = open(STATE / "notify.lock", "w")
+        deadline = time.monotonic() + LOCK_WAIT_S
+        while True:
+            try:
+                fcntl.flock(self.fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return self
+            except OSError:
+                if time.monotonic() >= deadline:
+                    am.die(am.EXIT_FAIL, f"another send still holds the lock after {LOCK_WAIT_S}s")
+                time.sleep(0.2)
+
+    def __exit__(self, *_exc):
+        self.fh.close()
 
 
 # ── GitHub ───────────────────────────────────────────────────────────────────
@@ -175,33 +281,48 @@ REMOTE_RES = (re.compile(r"^git@github\.com:([^/\s]+)/([^/\s]+?)(?:\.git)?/?$"),
 
 
 def store_repo():
-    override = os.environ.get("AGENT_NOTIFY_REPO")
-    if override:
-        return override
-    remote = am.load_config("config.json").get("store_remote")
-    for rx in REMOTE_RES:
-        m = rx.match(remote) if isinstance(remote, str) else None
-        if m:
-            return f"{m.group(1)}/{m.group(2)}"
-    am.die(am.EXIT_USAGE, f"store_remote in {am.tilde(am.CONFIG / 'config.json')} is not a GitHub repository",
-           "Set AGENT_NOTIFY_REPO=owner/repo or fix store_remote")
+    repo = os.environ.get("AGENT_NOTIFY_REPO")
+    if not repo:
+        remote = am.load_config("config.json").get("store_remote")
+        for rx in REMOTE_RES:
+            m = rx.match(remote) if isinstance(remote, str) else None
+            if m:
+                repo = f"{m.group(1)}/{m.group(2)}"
+                break
+    if not repo:
+        am.die(am.EXIT_USAGE, f"store_remote in {am.tilde(am.CONFIG / 'config.json')} is not a GitHub repository",
+               "Set AGENT_NOTIFY_REPO=owner/repo or fix store_remote")
+    if not REPO_RE.fullmatch(repo):
+        am.die(am.EXIT_USAGE, "the store repository is not a valid owner/name", "Fix store_remote or AGENT_NOTIFY_REPO")
+    return repo
+
+
+class GhError(Exception):
+    def __init__(self, what, detail, timed_out=False):
+        super().__init__(what)
+        self.what, self.detail, self.timed_out = what, detail, timed_out
 
 
 def gh(*args, stdin=None):
-    """Run gh and return stdout. Any failure exits 1 so a send never marks
-    a date notified on a partial result."""
+    """Run gh and return stdout; any failure raises GhError."""
     env = {**os.environ, "GH_PROMPT_DISABLED": "1", "NO_COLOR": "1"}
+    what = f"gh {args[0]} {args[1]}"
     try:
-        r = subprocess.run(["gh", *args], input=stdin, capture_output=True, text=True, env=env, timeout=60)
+        timeout = float(os.environ.get("AGENT_NOTIFY_GH_TIMEOUT", "60"))
+        r = subprocess.run(["gh", *args], input=stdin, capture_output=True, text=True, env=env, timeout=timeout)
     except FileNotFoundError:
         am.die(am.EXIT_USAGE, "gh is not installed", "Install the GitHub CLI and run `gh auth login`")
     except subprocess.TimeoutExpired:
-        am.die(am.EXIT_FAIL, f"gh {args[0]} {args[1]} timed out")
+        raise GhError(what, "timed out", timed_out=True)
     if r.returncode != 0:
         detail = (r.stderr or r.stdout).strip().splitlines()
-        am.die(am.EXIT_FAIL, f"gh {args[0]} {args[1]} failed: {detail[-1] if detail else r.returncode}",
-               "Check `gh auth status`; the date stays unnotified and the next run retries")
+        raise GhError(what, detail[-1] if detail else str(r.returncode))
     return r.stdout
+
+
+def gh_failed(e, extra=None):
+    am.die(am.EXIT_FAIL, f"{e.what} failed: {e.detail}",
+           extra or "Check `gh auth status`; the date stays unnotified and the next run retries")
 
 
 def find_or_create_issue(repo):
@@ -212,6 +333,7 @@ def find_or_create_issue(repo):
     except (ValueError, TypeError, KeyError, AttributeError):
         am.die(am.EXIT_FAIL, "gh issue list returned something that is not a list of issues")
     if found:
+        remember_issue(repo, min(found))
         return min(found)
     body = ("Daily flags from the agent-metrics report, one comment per flagged day. "
             "Written by `agent-notify send`.")
@@ -221,42 +343,61 @@ def find_or_create_issue(repo):
         am.die(am.EXIT_FAIL, "gh issue create did not print an issue URL")
     number = int(m.group(1))
     # Remembered before the comment so a failed comment retries on this issue.
-    write_state_text("notify-issue", str(number))
+    remember_issue(repo, number)
     try:
-        subprocess.run(["gh", "issue", "pin", str(number), "--repo", repo], capture_output=True, text=True,
-                       env={**os.environ, "GH_PROMPT_DISABLED": "1"}, timeout=60).check_returncode()
-    except (OSError, subprocess.SubprocessError):
+        gh("issue", "pin", str(number), "--repo", repo)
+    except GhError:
         log("could not pin the tracking issue; pin it by hand if you want it on top")
     return number
 
 
-def write_state_text(name, text):
-    STATE.mkdir(parents=True, exist_ok=True)
-    (STATE / name).write_text(text + "\n")
+def issue_unusable(repo, number):
+    """True when the issue is closed or no longer exists. Any other failure
+    to ask means we cannot tell, which is not a reason to open another."""
+    try:
+        state = json.loads(gh("issue", "view", str(number), "--repo", repo, "--json", "state")).get("state")
+    except GhError as e:
+        return bool(re.search(r"could not resolve|not found|404|deleted|transferred", e.detail, re.I))
+    except (ValueError, AttributeError):
+        return False
+    return state == "CLOSED"
 
 
-def clean(text, limit=MESSAGE_MAX):
-    text = re.sub(r"\s+", " ", re.sub(r"[\x00-\x1f\x7f]", " ", text)).strip()
-    # A mention in a flag message would notify a stranger.
-    text = text.replace("@", "@​").replace("`", "'")
-    return text if len(text) <= limit else text[:limit - 1] + "…"
+def post_comment(repo, issue, from_memory, body):
+    """Comment, replacing a closed or deleted remembered issue once. Returns
+    the issue number used."""
+    try:
+        gh("issue", "comment", str(issue), "--repo", repo, "--body-file", "-", stdin=body)
+        return issue
+    except GhError as e:
+        if e.timed_out or not from_memory or not issue_unusable(repo, issue):
+            raise
+    forget_issue()
+    issue = find_or_create_issue(repo)
+    gh("issue", "comment", str(issue), "--repo", repo, "--body-file", "-", stdin=body)
+    return issue
+
+
+def code(text, limit=MESSAGE_MAX):
+    """Inline code with nothing in it for markdown to interpret."""
+    return f"`{printable(text, limit) or '(empty)'}`"
 
 
 def report_path(date):
     return f"reports/{date}-daily.json"
 
 
-def comment_body(repo, date, flags):
-    lines = [f"Flags for {date}", ""]
-    lines += [f"- **{f['severity']}** `{clean(f['id'], 64)}`: {clean(f['message'])}" for f in flags]
-    lines += ["", f"Daily report: [{report_path(date)}](https://github.com/{repo}/blob/main/{report_path(date)})"]
+def comment_body(date, flags):
+    lines = [f"Flags for {code(date)}", ""]
+    lines += [f"- {code(f['severity'])} {code(f['id'])}: {code(f['message'])}" for f in flags]
+    lines += ["", f"Daily report: {code(report_path(date))}"]
     return "\n".join(lines)
 
 
 # ── Commands ─────────────────────────────────────────────────────────────────
 
 def cmd_home(_args):
-    loaded = load_flags() if (STATE / "flags.json").exists() else None
+    loaded = load_flags()
     pending = "none"
     if loaded and loaded[1] and loaded[0] not in read_dates("acked.json"):
         pending = pending_line(loaded[1], loaded[0]).removeprefix("agent-metrics: ")
@@ -264,7 +405,7 @@ def cmd_home(_args):
     issue = remembered_issue()
     am.emit({"pending": pending,
              "last_notified": notified[-1] if notified else "none",
-             "issue": issue if issue else "not created yet",
+             "issue": f"{issue[0]}#{issue[1]}" if issue else "not created yet",
              "help": ["agent-notify show: print the flags and acknowledge them",
                       "agent-notify send --dry-run: preview the issue comment"]})
 
@@ -275,20 +416,43 @@ def cmd_send(args):
         am.emit({"sent": False, "reason": "nothing to send: no flags file" if loaded is None else "nothing to send: no flags"})
         return
     date, flags = loaded
-    if date in read_dates("notified.json"):
-        am.emit({"sent": False, "reason": f"already notified for {date}"})
-        return
     repo = store_repo()
-    body = comment_body(repo, date, flags)
+    body = comment_body(date, flags)
     if args.dry_run:
-        am.emit({"dry_run": True, "repo": repo, "issue": remembered_issue() or "found or created on send",
+        remembered = remembered_issue(repo)
+        am.emit({"dry_run": True, "repo": repo, "issue": remembered[1] if remembered else "found or created on send",
                  "comment": body.split("\n")})
         return
-    issue = remembered_issue() or find_or_create_issue(repo)
-    if remembered_issue() != issue:
-        write_state_text("notify-issue", str(issue))
-    gh("issue", "comment", str(issue), "--repo", repo, "--body-file", "-", stdin=body)
-    add_date("notified.json", date)
+    with SendLock():
+        if date in read_dates("notified.json") and not args.force:
+            am.emit({"sent": False, "reason": f"already notified for {date}"})
+            return
+        # At most one comment per date is the side to err on: the date is
+        # recorded before posting, a definite failure rolls it back, and an
+        # unknown outcome (a timeout) keeps it and says so.
+        try:
+            remembered = remembered_issue(repo)
+            issue = remembered[1] if remembered else find_or_create_issue(repo)
+        except GhError as e:
+            gh_failed(e)
+        try:
+            add_date("notified.json", date)
+        except OSError as e:
+            am.die(am.EXIT_FAIL, f"cannot record {date} in {am.tilde(STATE / 'notified.json')}: {e.strerror}; nothing was posted",
+                   "Fix the state directory and re-run")
+        try:
+            issue = post_comment(repo, issue, bool(remembered), body)
+        except GhError as e:
+            if e.timed_out:
+                am.die(am.EXIT_FAIL, f"{e.what} timed out: the comment may have been posted, so {date} stays recorded and is not retried",
+                       "Check the tracking issue; `agent-notify send --force` posts again")
+            try:
+                remove_date("notified.json", date)
+            except OSError:
+                am.die(am.EXIT_FAIL, f"{e.what} failed ({e.detail}) and {date} could not be unrecorded, so it will not be retried",
+                       "Remove it from notified.json, or run `agent-notify send --force`")
+            gh_failed(e)
+        remember_issue(repo, issue)
     am.emit({"sent": True, "date": date, "flags": len(flags), "repo": repo, "issue": issue})
 
 
@@ -300,7 +464,7 @@ def cmd_show(_args):
     date, flags = loaded
     add_date("acked.json", date)
     am.emit({"date": date, "report": report_path(date),
-             "flags": [{"severity": f["severity"], "id": f["id"], "message": clean(f["message"], 500)} for f in flags],
+             "flags": [{"severity": f["severity"], "id": f["id"], "message": f["message"]} for f in flags],
              "acknowledged": True})
 
 
@@ -315,6 +479,7 @@ def build_parser():
     sub = p.add_subparsers(dest="cmd", parser_class=Parser)
     s = sub.add_parser("send", help="comment today's flags on the tracking issue, once per date")
     s.add_argument("--dry-run", action="store_true", help="show the comment; call nothing, remember nothing")
+    s.add_argument("--force", action="store_true", help="post even if this date is already recorded as notified")
     sub.add_parser("shell", help="print a one-line nudge when flags are unacknowledged")
     sub.add_parser("show", help="print the flags in full and acknowledge them")
     return p

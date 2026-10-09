@@ -17,16 +17,25 @@ flags and reports `agent-report` writes.
   before starting Python, and `agent-notify shell` answers without loading
   `agent-metrics` or touching network or git (about 20 ms when it prints).
   It lives in `functions.sh`, which both rc files already source.
-- **Notification state** is `notified.json` (dates), `notify-issue`. The
-  issue is remembered before the comment is posted, so a failed comment
-  retries on the same issue instead of creating another.
+- **At most one comment per date.** `send` takes a lock around check,
+  comment and record, records the date first, rolls it back on a definite
+  `gh` failure and keeps it on a timeout (loud exit 1, `--force` to repost).
+  A crash between record and post loses that day's comment rather than
+  risking a duplicate.
+- **Issue memory** is `{repo, number}` in `notify-issue`; another repo's value
+  is ignored. A closed or deleted remembered issue is replaced once, on a
+  failed comment, through search-or-create.
+- **State files are untrusted**: opened non-blocking and read only if they
+  are small regular files, so a FIFO or device cannot hang or flood a shell.
 - **Repo derivation** accepts GitHub SSH and HTTPS remotes only; any other
   remote exits 2 unless `AGENT_NOTIFY_REPO` is set. The brief did not say.
 - **`gh` runs with the full environment**, not `agent-metrics`'s
   credential-stripped one, because `gh` may authenticate through a token
   variable. Comments go through stdin, not argv.
-- **Flag text is sanitized** for the issue (whitespace, length, mentions,
-  backticks) even though its source is a trusted report.
+- **Flag text is untrusted.** Ids are identifier-only (else `_invalid`),
+  messages drop control, format and separator characters, and every value
+  in the comment is inline code with backticks removed. The report location
+  is a plain path, not a link.
 - **Status line**: the marker joins line 2, or line 1 when line 2 is empty,
   so it never adds a line. In the compact layout it is `⚑N` placed last and
   is the first thing dropped for width. A malformed or oversized file, or a
@@ -54,7 +63,9 @@ flags and reports `agent-report` writes.
   one colour each. Every chart has a legend, hover details and a data table,
   which discharges the low-contrast relief rule for aqua and yellow.
 - **Publishing** pulls fast-forward only, then builds and pushes under the
-  collector's lock. `site/` is already in the store tool's own directories.
+  collector's lock, staging only `site/` through `publish(dirs=...)`.
+- **`--days` is 1 to 180** so daily bars keep a width; the 30-day tables load
+  their own history regardless of the range.
 - **Serving is not part of this change.** The owner runs `tailscale serve`
   (see `agent-trends.md`).
 - One trigger, `run_onchange_55-enable-agent-notify.sh.tmpl`, enables both

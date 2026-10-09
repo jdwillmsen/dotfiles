@@ -106,9 +106,13 @@ t3_expiry_notice() {
     } >&2
 }
 
-# Nudge about the daily report's unacknowledged flags. The stat comes first so
-# a shell with nothing pending never starts Python; any failure stays silent.
-if [ -e "${AGENT_METRICS_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-metrics}/flags.json" ] \
+# Nudge about the daily report's unacknowledged flags. Only on a terminal, so
+# `bash -ic` pipelines see nothing extra. Plain tests come first so a shell
+# with nothing pending, or with the flags already acknowledged (acked.json
+# newer than flags.json), never starts Python; any failure stays silent.
+__agent_state="${AGENT_METRICS_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/agent-metrics}"
+if [ -t 1 ] && [ -e "$__agent_state/flags.json" ] && [ ! "$__agent_state/acked.json" -nt "$__agent_state/flags.json" ] \
     && command -v agent-notify >/dev/null 2>&1; then
     agent-notify shell 2>/dev/null || true
 fi
+unset __agent_state

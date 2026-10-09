@@ -26,11 +26,13 @@ estimates, not a bill.
 ```sh
 agent-trends build --dry-run      # temp dir, prints the path, publishes nothing
 agent-trends build --out DIR      # DIR/index.html, publishes nothing
-agent-trends build [--days N]     # store site/, commit, push (default 90 days)
+agent-trends build [--days N]     # store site/, commit, push (default 90, at most 180)
 ```
 
-Unreadable store data (a bad line in a session, quota or report file, or a
-cost that is not a number) exits 2 naming the file.
+Unreadable store data (a bad line in a session, quota or report file, a cost
+that is not a plausible number, a malformed `pr_links` entry) exits 2 naming
+the file and writes no page. The build stages only `site/`, so other tools'
+files waiting in the store are not committed with it.
 
 ## Viewing it privately
 

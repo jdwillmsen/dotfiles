@@ -302,7 +302,7 @@ reset_store
 
 # ── Flags: deterministic thresholds on the daily window ──
 flagsfile="$tmp/state/flags.json"
-run 0 --window daily --end 2026-10-09 --no-insights
+run 0 --window daily --no-insights
 [ -f "$flagsfile" ] || fail "a daily run with flags did not write flags.json" "$(cat "$out" "$err")"
 python3 - "$flagsfile" "$store/reports/2026-10-08-daily.json" <<'PY' || fail "daily flags are wrong"
 import json, sys
@@ -326,7 +326,7 @@ assert json.load(open(sys.argv[2]))["flags"] == f["flags"], "the report and flag
 PY
 
 # A quiet day removes the file, so a stale flag never outlives its day.
-run 0 --window daily --end 2026-10-03 --no-insights
+AGENT_METRICS_NOW="2026-10-03T12:00:00+00:00" run 0 --window daily --no-insights
 [ ! -e "$flagsfile" ] || fail "a daily run without flags left flags.json behind" "$(cat "$flagsfile")"
 grep -q "^flags: 0" "$out" || fail "the run does not report its flag count" "$(cat "$out")"
 
@@ -337,7 +337,7 @@ grep -q '"date": "x"' "$flagsfile" || fail "a weekly run rewrote flags.json"
 rm "$flagsfile"
 
 # Warn below critical: a 2.3x day fires the warn level only.
-run 0 --window daily --end 2026-10-02 --no-insights
+AGENT_METRICS_NOW="2026-10-02T12:00:00+00:00" run 0 --window daily --no-insights
 python3 - "$flagsfile" <<'PY' || fail "a warn-level spend day is flagged wrongly"
 import json, sys
 f = json.load(open(sys.argv[1]))["flags"]
@@ -350,9 +350,22 @@ import json, sys
 t = json.load(open(sys.argv[1])); t["spend_warn_multiple"] = 2.4
 json.dump(t, open(sys.argv[2], "w"))
 PY
-run 0 --window daily --end 2026-10-02 --no-insights
+AGENT_METRICS_NOW="2026-10-02T12:00:00+00:00" run 0 --window daily --no-insights
 [ ! -e "$flagsfile" ] || fail "a day under the threshold was flagged" "$(cat "$flagsfile")"
 cp "$tmp/thresholds.bak" "$tmp/config/thresholds.json"
+
+# A back-dated daily run is a backfill: it must not delete or replace the current flags.
+echo '{"date": "current", "window": "daily", "flags": []}' >"$flagsfile"
+run 0 --window daily --end 2026-10-09 --no-insights
+grep -q '"current"' "$flagsfile" || fail "a daily run with --end rewrote flags.json"
+rm "$flagsfile"
+run 0 --window daily --end 2026-10-09 --no-insights
+[ ! -e "$flagsfile" ] || fail "a daily run with --end created flags.json"
+# A failed default daily run must not leave the previous day's flags behind.
+echo '{"date": "stale", "window": "daily", "flags": [{"id": "x"}]}' >"$flagsfile"
+sed -i 's/"cost_usd": 30.0/"cost_usd": "thirty"/' "$store/sessions/2026-10.jsonl"
+run 2 --window daily --no-insights
+[ ! -e "$flagsfile" ] || fail "a failed daily run left stale flags.json" "$(cat "$flagsfile")"
 reset_store
 
 # ── Output: files in the store, one commit, pushed; Markdown for people ──
@@ -408,11 +421,12 @@ grep -q "lock" "$out" || fail "a lock timeout is not explained" "$(cat "$out")"
 wait "$holder"
 
 # A failed push keeps the commit and fails the run, so the next run delivers it.
-mv "$remote" "$remote.gone"
+printf '#!/bin/sh\nexit 1\n' >"$remote/hooks/pre-receive"
+chmod +x "$remote/hooks/pre-receive"
 run 1 --window weekly --end 2026-10-09 --no-insights --no-github
 grep -q "^pushed: false" "$out" || fail "a failed push is not reported" "$(cat "$out")"
 [ "$(gs log -1 --format=%s)" = "report: 2026-10-04 weekly" ] || fail "the commit was not kept after a failed push"
-mv "$remote.gone" "$remote"
+rm "$remote/hooks/pre-receive"
 reset_store
 
 # ── Config inventory from the audit's JSON ──
@@ -442,6 +456,31 @@ assert a["instructions"]["files"][0]["path"] == "~/.claude/CLAUDE.md", a["instru
 raw = open(sys.argv[1]).read() + open(sys.argv[2]).read()
 assert "LAUNCH CODES" not in raw and "body_words" not in raw, "audit text or unrelated sections leaked"
 assert "caveman" in open(sys.argv[2]).read(), "the Markdown omits the disable candidates"
+PY
+python3 - "$AGENT_REPORT_AUDIT_DIR/2026-10-04-weekly.json" <<'PY'
+import json, sys
+j = json.load(open(sys.argv[1]))
+tok = "ghp_" + "A" * 36
+j["instructions"]["files"] = [{"path": "~/" + tok, "lines": 1, "bytes": 1, "flag": ""},
+                              {"path": "~/" + "a" * 1300, "lines": 1, "bytes": 1, "flag": ""},
+                              {"path": "~/.claude/ok-" + "b" * 300, "lines": 1, "bytes": 1, "flag": ""},
+                              {"path": "x" * 1300, "lines": 1, "bytes": 1, "flag": tok}]
+json.dump(j, open(sys.argv[1], "w"))
+PY
+run 0 --window weekly --end 2026-10-09 --dry-run --no-insights --no-github
+python3 - "$(field json)" "$(field md)" <<'PY' || fail "hostile audit paths were not rejected"
+import json, sys
+raw = open(sys.argv[1]).read() + open(sys.argv[2]).read()
+assert "ghp_" not in raw and "a" * 100 not in raw and "b" * 100 not in raw, "credential or long text leaked"
+paths = [f["path"] for f in json.load(open(sys.argv[1]))["audit"]["instructions"]["files"]]
+assert paths == ["_redacted", "_invalid", "_invalid", "_invalid"][:4] or all(p in ("_redacted", "_invalid") or len(p) <= 64 for p in paths), paths
+assert all(len(p) <= 64 for p in paths), paths
+PY
+python3 - "$AGENT_REPORT_AUDIT_DIR/2026-10-04-weekly.json" <<'PY'
+import json, sys
+j = json.load(open(sys.argv[1]))
+j["instructions"]["files"] = [{"path": "~/.claude/CLAUDE.md", "lines": 97, "bytes": 5503, "flag": ""}]
+json.dump(j, open(sys.argv[1], "w"))
 PY
 run 0 --window weekly --end 2026-10-16 --dry-run --no-insights --no-github
 python3 - "$(field json)" "$(field md)" <<'PY' || fail "a window without an audit report is mishandled"
@@ -494,9 +533,12 @@ cat >"$tmp/bin/claude" <<'STUB'
     echo "ARGS: $*"
     echo "CWD: $(pwd)"
     echo "TOKENS: $(env | grep -c 'SECRET_TOKEN' || true)"
+    flock -n "$AGENT_METRICS_STATE/collect.lock" true || echo "LOCKED"
 } >>"$CLAUDE_LOG"
 cat >"$CLAUDE_STDIN"
 case "${STUB_CLAUDE_MODE:-ok}" in
+    nocost) printf '{"type":"result","is_error":false,"result":"No cost here."}\n' ;;
+    kill) kill -9 "$PPID" ;;
     ok) printf '{"type":"result","is_error":false,"result":"%s","total_cost_usd":0.1234}\n' "${STUB_CLAUDE_TEXT:-Spend is up. Trim the plugin hooks.}" ;;
     error) printf '{"type":"result","is_error":true,"subtype":"error_max_budget_usd","total_cost_usd":0.05}\n' ;;
     fail) echo "boom" >&2; exit 1 ;;
@@ -568,15 +610,56 @@ for mode in fail error sleep; do
     python3 - "$store/reports/2026-10-04-weekly.json" "$mode" <<'PY' || fail "insights $mode not recorded as an error"
 import json, sys
 i = json.load(open(sys.argv[1]))["insights"]
-assert set(i) == {"error"} and i["error"], i
-assert {"fail": "exited 1", "error": "error_max_budget_usd", "sleep": "timed out"}[sys.argv[2]] in i["error"], i
+assert i == {"error": {"fail": "claude_exit", "error": "claude_error", "sleep": "timeout"}[sys.argv[2]]}, i
 PY
     if [ "$mode" = error ]; then
         tail -1 <(ledger) | grep -q '"usd":0.05' || fail "the cost of a failed call is not in the ledger" "$(ledger)"
     else
-        [ "$ledger_before" = "$(ledger)" ] || fail "a $mode call left a ledger entry"
+        # Unknown cost is booked at the cap, never left out.
+        tail -1 <(ledger) | grep -q '"usd":0.5}' || fail "a $mode call with unknown cost is not booked at the cap" "$(ledger)"
+        [ "$(ledger | wc -l)" = "$(($(printf '%s\n' "$ledger_before" | wc -l) + 1))" ] || fail "a $mode call booked more than once"
     fi
 done
+
+# A reply with no numeric cost is booked at the cap too.
+reset_store
+STUB_CLAUDE_MODE=nocost run 0 --window weekly --end 2026-10-09 --no-github
+tail -1 <(ledger) | grep -q '"usd":0.5}' || fail "a reply without a cost is not booked at the cap" "$(ledger)"
+# A kill in the middle of the call leaves the reservation and no half-written report.
+reset_store
+got=0
+cp "$store/reports/2026-10-04-weekly.json" "$tmp/pre-kill.json"
+env STUB_CLAUDE_MODE=kill "$report" --window weekly --end 2026-10-09 --no-github >"$out" 2>"$err" || got=$?
+[ "$got" != 0 ] || fail "a killed run should not succeed"
+tail -1 <(ledger) | grep -q '"usd":0.5}' || fail "a killed call is not booked at the cap" "$(ledger)"
+[ ! -e "$store/reports/2026-10-04-weekly.md" ] && cmp -s "$tmp/pre-kill.json" "$store/reports/2026-10-04-weekly.json" || fail "a killed run left report files"
+# The next run commits the leftover ledger entry along with its own.
+run 0 --window weekly --end 2026-10-09 --no-github
+[ -z "$(gs status --porcelain)" ] || fail "leftovers were not committed by the next run" "$(gs status --porcelain)"
+
+# A re-run does not spend again unless asked.
+reset_store
+: >"$CLAUDE_LOG"
+run 0 --window weekly --end 2026-10-09 --no-github
+lines_before="$(ledger | wc -l)"
+run 0 --window weekly --end 2026-10-09 --no-github
+[ "$(grep -c '^ARGS:' "$CLAUDE_LOG")" = 1 ] || fail "a re-run called the model again" "$(cat "$CLAUDE_LOG")"
+[ "$(ledger | wc -l)" = "$lines_before" ] || fail "a re-run booked a second spend"
+[ "$(insights 2026-10-04-weekly)" = '{"cost_usd": 0.1234, "text": "Spend is up. Trim the plugin hooks."}' ] || fail "a re-run lost the insights"
+run 0 --window weekly --end 2026-10-09 --no-github --force-insights
+[ "$(grep -c '^ARGS:' "$CLAUDE_LOG")" = 2 ] || fail "--force-insights did not call the model"
+grep -q LOCKED "$CLAUDE_LOG" && fail "claude ran with the store lock held"
+
+# Nothing that can fail runs after the model: a bad audit entry stops the run before any spend.
+reset_store
+: >"$CLAUDE_LOG"
+ledger_before="$(ledger)"
+echo '{"label_date":"2026-10-04","current":{"hooks":[{"plugin":"x","event":"E","fires":"many","bytes":1}]},"disable_candidates":{},"instructions":{}}' \
+    >"$AGENT_REPORT_AUDIT_DIR/2026-10-04-weekly.json"
+run 2 --window weekly --end 2026-10-09 --no-github
+grep -q "2026-10-04-weekly.json" "$out" || fail "a bad audit entry is not named" "$(cat "$out")"
+[ ! -s "$CLAUDE_LOG" ] && [ "$ledger_before" = "$(ledger)" ] && [ -z "$(gs status --porcelain)" ] || fail "a bad audit entry left spend or a dirty store" "$(gs status --porcelain)"
+rm "$AGENT_REPORT_AUDIT_DIR/2026-10-04-weekly.json"
 
 # Only weekly and monthly call a model, and never on a dry run or with --no-insights.
 reset_store
@@ -625,6 +708,7 @@ merged = [
     pr(2, "acme/app", "2026-09-29T00:00:00Z", "2026-09-30T00:00:00Z", 100, 20, ["src/b.py", "src/c.py"], ["FAILURE", "SUCCESS"], "SUCCESS"),
     pr(3, "acme/lib", "2026-10-01T00:00:00Z", "2026-10-01T10:00:00Z", 5, 5, ["lib/x.py"], ["FAILURE"], "FAILURE"),
     pr(4, "acme/lib", "2026-10-02T00:00:00Z", "2026-10-04T00:00:00Z", 200, 0, ["lib/y.py"], [None, "SUCCESS"], "SUCCESS"),
+    pr(5, "acme/app", "2026-09-22T00:00:00Z", "2026-09-23T00:00:00Z", 10, 0, ["src/p.py"], ["SUCCESS"], "SUCCESS"),
 ]
 def fu(number, ref, title, merged_at, files):
     return {"number": number, "mergedAt": merged_at, "headRefName": ref, "title": title, "changedFiles": len(files),
@@ -635,6 +719,7 @@ followups = {"acme__app": [
     fu(12, "feat/x", "Feature", "2026-10-01T00:00:00Z", ["src/b.py", "src/c.py"]),
     fu(13, "fix/early", "Fix early", "2026-09-28T06:00:00Z", ["src/a.py"]),
     fu(14, "fix/other", "Fix other", "2026-10-02T00:00:00Z", ["docs/z.py"]),
+    fu(15, "fix/p", "Fix p", "2026-09-25T00:00:00Z", ["src/p.py"]),
 ], "acme__lib": []}
 json.dump(merged, open(os.path.join(fxdir, "merged.json"), "w"))
 for k, v in followups.items():
@@ -663,40 +748,63 @@ c.commit()
 PY
 cat >"$tmp/bin/gh" <<'STUB'
 #!/usr/bin/env python3
-import json, os, re, sys
+import datetime as dt, fcntl, json, os, re, sys
 args = sys.argv[1:]
-with open(os.environ["GH_LOG"], "a") as log:
-    log.write(" ".join(args) + "\n")
+log = open(os.environ["GH_LOG"], "a")
+log.write(" ".join(a for a in args if not a.startswith("query=")) + "\n")
+probe = open(os.path.join(os.environ["AGENT_METRICS_STATE"], "collect.lock"), "a")
+try:
+    fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except OSError:
+    log.write("LOCKED\n")
+log.flush()
 mode = os.environ.get("STUB_GH_MODE", "ok")
 fx = os.environ["GH_FIXTURES"]
 if mode == "fail":
     sys.stderr.write("HTTP 502: Bad Gateway\n"); sys.exit(1)
 if mode == "ratelimit":
     sys.stderr.write("API rate limit exceeded for user\n"); sys.exit(1)
+if mode == "hostile":
+    sys.stderr.write("ghp_" + "Q" * 36 + " the launch codes are purple\n"); sys.exit(1)
 if args[:2] == ["api", "user"]:
     print("tester"); sys.exit(0)
+if mode == "gqlerror":
+    print(json.dumps({"errors": [{"message": "the launch codes are purple"}]})); sys.exit(0)
 assert args[:2] == ["api", "graphql"], args
 v = {}
 for flag, val in zip(args, args[1:]):
     if flag in ("-f", "-F") and "=" in val:
         k, _, x = val.partition("=")
         v[k] = x
-q, first, after = v["q"], int(v.get("first", "100")), int(v.get("after", "0") or 0)
-if "author:" in q:
+q, first, after = v["q"], int(v.get("first", "1")), int(v.get("after", "0") or 0)
+lo, hi = re.search(r"merged:(\S+)\.\.(\S+)", q).groups()
+if os.environ.get("STUB_GH_VOLUME"):
+    n, start, days = int(os.environ["STUB_GH_VOLUME"]), dt.date.fromisoformat(os.environ["STUB_GH_VOL_START"]), int(os.environ["STUB_GH_VOL_DAYS"])
+    nodes = []
+    for i in range(n):
+        d = start + dt.timedelta(days=i % days)
+        nodes.append({"number": i, "createdAt": f"{d}T10:00:00Z", "mergedAt": f"{d}T12:00:00Z", "additions": 1, "deletions": 1,
+                      "changedFiles": 1, "headRefName": "feat/x", "title": "t", "repository": {"nameWithOwner": "acme/vol"},
+                      "files": {"nodes": [{"path": f"f{i}.py"}]},
+                      "allCommits": {"totalCount": 1, "nodes": [{"commit": {"statusCheckRollup": {"state": "SUCCESS"}}}]},
+                      "head": {"nodes": [{"commit": {"statusCheckRollup": {"state": "SUCCESS"}}}]}})
+elif "author:" in q:
     nodes = json.load(open(os.path.join(fx, "merged.json")))
-    lo, hi = re.search(r"merged:(\S+)\.\.(\S+)", q).groups()
-    nodes = [n for n in nodes if lo <= n["mergedAt"][:10] <= hi]
     if mode == "empty":
-        nodes = []
-    days = (__import__("datetime").date.fromisoformat(hi) - __import__("datetime").date.fromisoformat(lo)).days + 1
-    count = 1500 if (mode == "big" and days > 1) or mode == "huge" else len(nodes)
-    if mode == "big" and days > 1:
         nodes = []
 else:
     repo = re.search(r"repo:(\S+)", q).group(1).replace("/", "__")
     nodes = json.load(open(os.path.join(fx, f"followup-{repo}.json")))
-    count = len(nodes)
-page = nodes[after:after + first]
+nodes = [n for n in nodes if lo <= n["mergedAt"][:10] <= hi]
+# Like GitHub: the true count, but never more than the first 1000 results.
+count = len(nodes)
+days = (dt.date.fromisoformat(hi) - dt.date.fromisoformat(lo)).days + 1
+if mode == "big" and days > 1 and "author:" in q:
+    count, nodes = 1500, []
+if mode == "huge" and "author:" in q:
+    count = 1500
+nodes = nodes[:1000]
+page = nodes[after:after + first] if after < 1000 else []
 print(json.dumps({"data": {"search": {"issueCount": count,
     "pageInfo": {"hasNextPage": after + first < len(nodes), "endCursor": str(after + first)}, "nodes": page}}}))
 STUB
@@ -721,12 +829,18 @@ assert (g["failed_check_share"], g["red_head_share"]) == (0.5, 0.25), g
 # At the fixture clock all four PRs have been watched for 7 days, only the two oldest for 14.
 assert g["followup"] == {"d7": {"eligible": 4, "followed_up": 1, "rate": 0.25},
                          "d14": {"eligible": 2, "followed_up": 2, "rate": 1.0}}, g["followup"]
+# The previous window is settled: both horizons are fully observed.
+assert g["followup_previous"] == {"d7": {"eligible": 1, "followed_up": 1, "rate": 1.0},
+                                  "d14": {"eligible": 1, "followed_up": 1, "rate": 1.0}}, g["followup_previous"]
+assert g["authors"] == ["tester", "jdwlabs-agent-bot"], g["authors"]
 assert g["truncated"] is False
 assert n == {"available": True, "runs": 5, "completed": 3, "failed": 1, "cancelled": 1, "in_progress": 1,
              "first_pass_runs": 2, "first_pass_rate": 0.4}, n
 PY
 q1="$(grep 'author:' "$GH_LOG" | head -1)"
-for want in "author:tester" "is:pr" "is:merged" "user:acme user:acme-labs" "merged:2026-09-28..2026-10-04"; do
+grep -q "LOCKED" "$GH_LOG" && fail "gh ran with the store lock held"
+head -3 "$GH_LOG" | grep -q "first=1" || fail "the count was not asked for before any page was fetched" "$(head -3 "$GH_LOG")"
+for want in "author:tester" "author:jdwlabs-agent-bot" "is:pr" "is:merged" "user:acme user:acme-labs" "merged:2026-09-28..2026-10-04"; do
     grep -q -- "$want" <<<"$q1" || fail "the merged-PR search lacks '$want'" "$q1"
 done
 grep -q "repo:acme/app" "$GH_LOG" && grep -q "repo:acme/lib" "$GH_LOG" || fail "follow-ups were not searched per repo" "$(cat "$GH_LOG")"
@@ -753,12 +867,12 @@ python3 - "$(field json)" <<'PY' || fail "a GitHub failure is not recorded as er
 import json, sys
 d = json.load(open(sys.argv[1]))["delivery"]
 g = d["github"]
-assert g["errored"] is True and "502" in g["reason"] and "merged" not in g, g
+assert g == {"errored": True, "reason": "http_error"}, g
 assert d["no_mistakes"]["available"] is True
 PY
 grep -qi "errored" "$(field md)" || fail "the Markdown does not show the errored section"
 STUB_GH_MODE=ratelimit deliver
-[ "$(dj '"rate limit" in d["github"]["reason"]')" = true ] || fail "a rate limit is not named" "$(dj 'd["github"]')"
+[ "$(dj 'd["github"]["reason"]')" = '"rate_limited"' ] || fail "a rate limit is not named" "$(dj 'd["github"]')"
 STUB_GH_MODE=empty deliver
 python3 - "$(field json)" <<'PY' || fail "a window with no merged PRs must be a real zero with unknown rates"
 import json, sys
@@ -766,20 +880,60 @@ g = json.load(open(sys.argv[1]))["delivery"]["github"]
 assert g["available"] is True and g["merged"] == 0 and g["open_to_merge_hours"] == {"median": None, "p90": None}, g
 assert g["failed_check_share"] is None and g["followup"]["d7"] == {"eligible": 0, "followed_up": 0, "rate": None}, g
 PY
-AGENT_REPORT_GH_MAX_REQUESTS=2 deliver
+AGENT_REPORT_GH_MAX_REQUESTS=4 deliver
 python3 - "$(field json)" <<'PY' || fail "the request cap is not enforced per section"
 import json, sys
 g = json.load(open(sys.argv[1]))["delivery"]["github"]
-assert g["merged"] == 4 and g["followup"]["errored"] is True and "request cap" in g["followup"]["reason"], g
+assert g["merged"] == 4 and g["followup"] == {"errored": True, "reason": "request_cap"}, g
 PY
 AGENT_REPORT_GH_MAX_SECONDS=0 deliver
-[ "$(dj '"wall time" in d["github"]["reason"]')" = true ] || fail "the wall-time cap is not enforced" "$(dj 'd["github"]')"
+[ "$(dj 'd["github"]["reason"]')" = '"time_cap"' ] || fail "the wall-time cap is not enforced" "$(dj 'd["github"]')"
 mv "$fx/.config/streams.json" "$fx/.config/streams.json.bak"
 deliver
-[ "$(dj '"streams.json" in d["github"]["reason"]')" = true ] || fail "an unreadable stream map is not named" "$(dj 'd["github"]')"
+[ "$(dj 'd["github"]["reason"]')" = '"bad_config"' ] || fail "an unreadable stream map is not named" "$(dj 'd["github"]')"
 mv "$fx/.config/streams.json.bak" "$fx/.config/streams.json"
 AGENT_REPORT_NM_DB="$tmp/nope.sqlite" deliver
 [ "$(dj 'd["no_mistakes"]["errored"]')" = true ] || fail "a missing no-mistakes database is not errored" "$(dj 'd["no_mistakes"]')"
+
+# Free text from GitHub never reaches the report: every failure is one of a fixed set of codes.
+STUB_GH_MODE=hostile deliver
+[ "$(dj 'd["github"]')" = '{"errored": true, "reason": "http_error"}' ] || fail "hostile gh stderr was not mapped to a code" "$(dj 'd["github"]')"
+grep -q "ghp_\|launch codes" "$(field json)" "$(field md)" && fail "gh stderr text reached the report"
+grep -q "ghp_" "$err" && fail "a credential-shaped gh message was logged unredacted"
+STUB_GH_MODE=gqlerror deliver
+[ "$(dj 'd["github"]')" = '{"errored": true, "reason": "graphql_error"}' ] || fail "a GraphQL error was not mapped to a code" "$(dj 'd["github"]')"
+grep -q "launch codes" "$(field json)" "$(field md)" && fail "a GraphQL message reached the report"
+
+# Authors come from config.json when set; the authenticated login is then not needed.
+cp "$tmp/config/config.json" "$tmp/config.bak"
+python3 - "$tmp/config/config.json" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1])); c["github_authors"] = ["tester", "other-bot"]
+json.dump(c, open(sys.argv[1], "w"))
+PY
+: >"$GH_LOG"
+deliver
+grep -q "author:other-bot" "$GH_LOG" && ! grep -q "jdwlabs-agent-bot" "$GH_LOG" && ! grep -q "^api user" "$GH_LOG" || fail "github_authors was not honoured" "$(head -3 "$GH_LOG")"
+[ "$(dj 'd["github"]["authors"]')" = '["tester", "other-bot"]' ] || fail "the authors used are not reported"
+cp "$tmp/config.bak" "$tmp/config/config.json"
+
+# At real volume the count comes first and the range is split until every piece fits.
+vol() {  # window end n start days
+    : >"$GH_LOG"
+    STUB_GH_VOLUME="$3" STUB_GH_VOL_START="$4" STUB_GH_VOL_DAYS="$5" AGENT_METRICS_NOW="2026-12-01T00:00:00+00:00" \
+        run 0 --window "$1" --end "$2" --dry-run --no-insights
+    python3 - "$(field json)" "$3" "$(grep -c '^api graphql' "$GH_LOG")" <<'PY' || fail "$1 delivery at volume is wrong" "$(tail -3 "$GH_LOG")"
+import json, sys
+g = json.load(open(sys.argv[1]))["delivery"]["github"]
+assert g.get("available") is True, g
+assert g["merged"] == int(sys.argv[2]) and g["truncated"] is False, (g["merged"], g["truncated"])
+assert g["followup"]["d14"]["eligible"] == int(sys.argv[2]), g["followup"]
+assert int(sys.argv[3]) < 300, f"{sys.argv[3]} requests"
+PY
+    if grep -q LOCKED "$GH_LOG"; then fail "gh ran with the store lock held"; fi
+}
+vol quarterly 2026-10-09 1135 2026-07-01 92
+vol yearly 2026-10-09 1243 2025-01-01 365
 
 # --no-github and the daily window skip GitHub; the daily window skips delivery altogether.
 : >"$GH_LOG"
@@ -791,15 +945,64 @@ run 0 --window daily --end 2026-10-09 --dry-run --no-insights
 [ ! -s "$GH_LOG" ] || fail "a daily run called gh"
 unset STUB_GH_MODE
 
+# ── Hostile or damaged data in the store ──
+reset_store
+python3 - "$store/reports/2026-09-20-weekly.json" <<'PY'
+import json, sys
+j = json.load(open(sys.argv[1])); j["label_date"] = "ghp_" + "A" * 36 + " launch codes"
+json.dump(j, open(sys.argv[1], "w"))
+PY
+run 2 --window weekly --end 2026-10-09 --dry-run --no-insights --no-github
+grep -q "2026-09-20-weekly.json" "$out" || fail "a stored report with a free-text label_date is not named" "$(cat "$out")"
+grep -q "ghp_" "$out" "$err" && fail "a hostile label_date was echoed"
+run 2
+grep -q "2026-09-20-weekly.json" "$out" || fail "the home view trusts a damaged stored report" "$(cat "$out")"
+reset_store
+python3 - "$store/sessions/2026-10.jsonl" <<'PY'
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1])]
+del rows[0]["pipeline"]
+open(sys.argv[1], "w").write("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
+PY
+run 2 --window weekly --end 2026-10-09 --dry-run --no-insights --no-github
+grep -q "sessions/2026-10.jsonl" "$out" && grep -q "pipeline" "$out" || fail "a row without pipeline is not reported as exit 2 naming the file" "$(cat "$out" "$err")"
+grep -q Traceback "$err" && fail "a missing key printed a traceback"
+reset_store
+
+# ── Store hygiene: refuse foreign changes, pull before writing ──
+echo stray >"$store/stray.txt"
+: >"$CLAUDE_LOG"
+run 1 --window weekly --end 2026-10-09 --no-github
+grep -q "stray.txt" "$out" || fail "a foreign change is not named" "$(cat "$out")"
+[ ! -s "$CLAUDE_LOG" ] || fail "the model was called on a store with foreign changes"
+rm "$store/stray.txt"
+other="$tmp/other"
+git clone -q "$remote" "$other" 2>/dev/null
+echo "from elsewhere" >"$other/NOTES.md"
+git -C "$other" add -A && git -C "$other" commit -q -m "elsewhere" && git -C "$other" push -q origin HEAD
+run 0 --window weekly --end 2026-10-09 --no-insights --no-github
+[ -f "$store/NOTES.md" ] || fail "the report did not pull before writing"
+[ "$(gs rev-parse HEAD)" = "$(git -C "$remote" rev-parse main)" ] || fail "the push after a pull was not a fast-forward"
+rm -rf "$other"
+
+# An unchanged re-run commits nothing even when the clock has moved on.
+before="$(gs rev-parse HEAD)"
+cp "$store/reports/2026-10-04-weekly.json" "$tmp/first.json"
+AGENT_METRICS_NOW="2026-10-09T15:30:00+00:00" run 0 --window weekly --end 2026-10-09 --no-insights --no-github
+cmp -s "$tmp/first.json" "$store/reports/2026-10-04-weekly.json" || fail "an unchanged re-run rewrote generated_at"
+[ "$(gs rev-parse HEAD)" = "$before" ] || fail "an unchanged re-run committed"
+reset_store
+
 # ── Units: one template service and six calendar timers ──
 svc="$units/agent-report@.service"
 grep -qx 'ExecStart=%h/.local/bin/agent-report --window %i' "$svc" || fail "service ExecStart"
 grep -qx 'NoNewPrivileges=yes' "$svc" && grep -qx 'PrivateTmp=yes' "$svc" || fail "service hardening missing"
 grep -qx 'Nice=10' "$svc" && grep -qx 'IOSchedulingClass=idle' "$svc" || fail "service scheduling hints missing"
 grep -q '^TimeoutStartSec=' "$svc" || fail "service needs a hard timeout"
+grep -qx 'ExecStartPre=%h/.local/bin/agent-metrics collect' "$svc" || fail "a report must collect first, so a catch-up run never reads stale data"
 grep -q '^Environment=PATH=.*/usr/bin' "$svc" || fail "service needs a PATH: a user manager starts with a bare one"
 declare -A cal=([daily]="*-*-* 07:00:00" [weekly]="Mon *-*-* 08:40:00" [biweekly]="Mon *-*-* 08:50:00"
-    [monthly]="*-*-01 09:10:00" [quarterly]="*-01,04,07,10-01 09:20:00" [yearly]="*-01-01 09:30:00")
+    [monthly]="*-*-01 09:10:00" [quarterly]="*-01,04,07,10-01 09:45:00" [yearly]="*-01-01 09:55:00")
 for w in "${!cal[@]}"; do
     t="$units/agent-report-$w.timer"
     [ -f "$t" ] || fail "missing $(basename "$t")"

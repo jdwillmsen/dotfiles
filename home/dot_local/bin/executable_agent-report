@@ -129,7 +129,7 @@ def check_row(r, path):
         if not am.is_amount(r.get(k)):
             bad(path, f"session {sid} has no usable {k}")
     for k in ("pipeline", "repo"):
-        if r.get(k) is not None and not isinstance(r[k], str):
+        if k not in r or (r[k] is not None and not isinstance(r[k], str)):
             bad(path, f"session {sid} has no usable {k}")
     models = r.get("models")
     if not isinstance(models, dict):
@@ -277,24 +277,53 @@ def summarize_window(start, end):
     }
 
 
+LABEL = re.compile(r"\d{4}-\d\d-\d\d")
+STORED_ID = re.compile(r"[A-Za-z0-9:_.@/-]{1,100}")
+STORED_METRIC = re.compile(r"[a-z_]{1,40}")
+BUDGET_STATES = ("ok", "critical-only", "stopped", "quota-hold", "no-baseline")
+
+
+def load_stored(path):
+    """A stored report read back for the trend, the thresholds review or the
+    home view. Every value used is checked here: a damaged file would
+    otherwise carry free text into the next report."""
+    j = load_json_file(path)
+    label, window = j.get("label_date"), j.get("window")
+    try:
+        ok = isinstance(label, str) and LABEL.fullmatch(label) and window in WINDOWS \
+            and path.name == f"{label}-{window}.json" and dt.date.fromisoformat(label)
+        pops = j["current"]["populations"]
+        for p in POPULATIONS:
+            if not (am.is_amount(pops[p]["sessions"]) and am.is_amount(pops[p]["cost_usd"])):
+                ok = False
+        flags = j.get("flags")
+        if not isinstance(flags, list):
+            ok = False
+        for f in flags or []:
+            if not (isinstance(f, dict) and isinstance(f.get("id"), str) and STORED_ID.fullmatch(f["id"])
+                    and f.get("severity") in SEVERITY_ORDER and isinstance(f.get("metric"), str)
+                    and STORED_METRIC.fullmatch(f["metric"])):
+                ok = False
+        state = (j["current"].get("budget") or {}).get("state")
+        if state is not None and state not in BUDGET_STATES:
+            ok = False
+    except (KeyError, TypeError, ValueError, AttributeError):
+        ok = False
+    if not ok:
+        die(EXIT_USAGE, f"{tilde(path)} is not a usable stored report", "Fix or remove the stored report")
+    return j
+
+
 def trend(window, label):
     """Up to six earlier reports of this window, oldest first."""
     rows = []
     for path in sorted((am.STORE / "reports").glob(f"*-{window}.json")):
-        j = load_json_file(path)
-        if not isinstance(j.get("label_date"), str):
-            die(EXIT_USAGE, f"{tilde(path)} has no label_date")
+        j = load_stored(path)
         if j["label_date"] >= label:
             continue
-        try:
-            pops = j["current"]["populations"]
-            entry = {"label_date": j["label_date"],
-                     **{p: {"sessions": pops[p]["sessions"], "cost_usd": pops[p]["cost_usd"]} for p in POPULATIONS}}
-            if not all(am.is_amount(v) for p in POPULATIONS for v in entry[p].values()):
-                raise ValueError
-        except (KeyError, TypeError, ValueError):
-            die(EXIT_USAGE, f"{tilde(path)} has no usable populations", "Fix or remove the stored report")
-        rows.append(entry)
+        pops = j["current"]["populations"]
+        rows.append({"label_date": j["label_date"],
+                     **{p: {"sessions": pops[p]["sessions"], "cost_usd": pops[p]["cost_usd"]} for p in POPULATIONS}})
     return sorted(rows, key=lambda r: r["label_date"])[-6:]
 
 
@@ -368,21 +397,48 @@ def audit_dir():
                 or Path(os.environ.get("XDG_DATA_HOME", am.HOME / ".local/share")) / "agent-audit/reports")
 
 
+PATH_MAX = 200
+AUDIT_NUMBERS = ("fires", "bytes", "bytes_per_fire", "bytes_per_session", "lines", "hook_bytes")
+
+
+def scrub_str(v):
+    if v == "":
+        return v
+    if v.startswith("unattributed"):
+        return "unattributed"
+    if not v.startswith("~/"):
+        return am.clean_id(v)
+    body = v[2:]
+    # A path keeps its shape, so it gets the identifier tests on the whole
+    # string, not on a truncated head, plus its own length cap.
+    if len(body) > PATH_MAX or am.ID_UNSAFE.search(body):
+        return "_invalid"
+    if am.ID_CREDENTIAL.search(body):
+        return "_redacted"
+    return v
+
+
 def scrub(v):
     """The audit's sections carry hook names that can be a fragment of
-    injected text; only identifier-shaped strings pass into a report."""
+    injected text; only identifier-shaped strings and short `~/` paths pass
+    into a report."""
     if isinstance(v, dict):
         return {scrub(k): scrub(x) for k, x in v.items()}
     if isinstance(v, list):
         return [scrub(x) for x in v]
-    if not isinstance(v, str) or v == "":
-        return v
-    if v.startswith("unattributed"):
-        return "unattributed"
-    if v.startswith("~/"):
-        rest = am.clean_id(v[2:])
-        return "_invalid" if rest == "_invalid" else v
-    return am.clean_id(v)
+    return scrub_str(v) if isinstance(v, str) else v
+
+
+def check_audit(path, node):
+    """Numbers must be numbers before anything renders or spends."""
+    if isinstance(node, dict):
+        for k, x in node.items():
+            if k in AUDIT_NUMBERS and x is not None and not am.is_amount(x):
+                die(EXIT_USAGE, f"{tilde(path)}: {k} must be a number")
+            check_audit(path, x)
+    elif isinstance(node, list):
+        for x in node:
+            check_audit(path, x)
 
 
 def embed_audit(window, label):
@@ -394,11 +450,16 @@ def embed_audit(window, label):
     j = load_json_file(path)
     cur = j.get("current")
     hooks = cur.get("hooks") if isinstance(cur, dict) else None
-    if not (isinstance(hooks, list) and isinstance(j.get("disable_candidates"), dict)
-            and isinstance(j.get("instructions"), dict)):
+    dc, ins = j.get("disable_candidates"), j.get("instructions")
+    shaped = isinstance(hooks, list) and isinstance(dc, dict) and isinstance(ins, dict) \
+        and all(isinstance(h, dict) for h in hooks) \
+        and all(isinstance(x, dict) for x in (dc.get("plugins") or [])) \
+        and all(isinstance(x, dict) for x in (ins.get("files") or []))
+    if not shaped:
         die(EXIT_USAGE, f"{tilde(path)} lacks the hooks, disable_candidates or instructions sections")
-    return {"source": path.name, "hooks": scrub(hooks), "disable_candidates": scrub(j["disable_candidates"]),
-            "instructions": scrub(j["instructions"])}
+    for part in (hooks, dc, ins):
+        check_audit(path, part)
+    return {"source": path.name, "hooks": scrub(hooks), "disable_candidates": scrub(dc), "instructions": scrub(ins)}
 
 
 # ── Thresholds review ────────────────────────────────────────────────────────
@@ -417,10 +478,8 @@ def thresholds_review(start, end, th):
     daily reports. With no daily report the count is unknown, never zero."""
     daily = []
     for path in sorted((am.STORE / "reports").glob("*-daily.json")):
-        j = load_json_file(path)
-        label = j.get("label_date")
-        if not isinstance(label, str) or not isinstance(j.get("flags"), list):
-            die(EXIT_USAGE, f"{tilde(path)} has no label_date or flags")
+        j = load_stored(path)
+        label = j["label_date"]
         if start.isoformat() <= label < end.isoformat():
             daily.append(j)
     known = bool(daily)
@@ -439,24 +498,28 @@ def thresholds_review(start, end, th):
 
 # ── Delivery ─────────────────────────────────────────────────────────────────
 
-GH_MAX_REQUESTS = int(os.environ.get("AGENT_REPORT_GH_MAX_REQUESTS", "60"))
-GH_MAX_SECONDS = float(os.environ.get("AGENT_REPORT_GH_MAX_SECONDS", "300"))
-# GitHub allows 30 search requests a minute; the gap keeps a run under it.
-GH_GAP_S = float(os.environ.get("AGENT_REPORT_GH_GAP", "2.1"))
-GH_PAGE = int(os.environ.get("AGENT_REPORT_GH_PAGE", "20"))
+# (requests, seconds) per window. The ceilings follow the volume a window
+# holds, at the 30-a-minute search limit, with the previous window's
+# follow-ups included; a run that needs more reports the section errored.
+CAPS = {"weekly": (120, 360), "biweekly": (160, 480), "monthly": (300, 800),
+        "quarterly": (600, 1500), "yearly": (1200, 2700)}
 GH_CALL_TIMEOUT_S = 60
 GH_SEARCH_CAP = 1000
-GH_RATE_LIMITED = re.compile(r"rate limit|HTTP 403|HTTP 429|secondary", re.I)
+DEFAULT_AUTHORS = ("jdwlabs-agent-bot",)
 FOLLOWUP_DAYS = (7, 14)
 FOLLOWUP_OVERLAP = 0.5
 FOLLOWUP_REF = re.compile(r"(fix/|revert)", re.I)
 FOLLOWUP_TITLE = re.compile(r"revert", re.I)
 NOISE_FILE = re.compile(r"(\.lock|\.lockb|\.md|\.mdx|\.markdown|package-lock\.json|npm-shrinkwrap\.json|go\.sum)$", re.I)
 RED = ("FAILURE", "ERROR")
+LOGIN = re.compile(r"(app/)?[A-Za-z0-9][A-Za-z0-9-]{0,38}")
+
+COUNT_QUERY = """query($q: String!, $first: Int!) {
+  search(query: $q, type: ISSUE, first: $first) { issueCount }
+}"""
 
 PR_QUERY = """query($q: String!, $first: Int!, $after: String) {
   search(query: $q, type: ISSUE, first: $first, after: $after) {
-    issueCount
     pageInfo { hasNextPage endCursor }
     nodes { ... on PullRequest {
       number createdAt mergedAt additions deletions changedFiles
@@ -468,9 +531,19 @@ PR_QUERY = """query($q: String!, $first: Int!, $after: String) {
   }
 }"""
 
+PR_LITE_QUERY = """query($q: String!, $first: Int!, $after: String) {
+  search(query: $q, type: ISSUE, first: $first, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes { ... on PullRequest {
+      number mergedAt changedFiles
+      repository { nameWithOwner }
+      files(first: 100) { nodes { path } }
+    } }
+  }
+}"""
+
 FOLLOWUP_QUERY = """query($q: String!, $first: Int!, $after: String) {
   search(query: $q, type: ISSUE, first: $first, after: $after) {
-    issueCount
     pageInfo { hasNextPage endCursor }
     nodes { ... on PullRequest {
       number mergedAt headRefName title changedFiles
@@ -481,25 +554,47 @@ FOLLOWUP_QUERY = """query($q: String!, $first: Int!, $after: String) {
 
 
 class DeliveryError(RuntimeError):
-    pass
+    """A failure with one of a fixed set of codes. The detail goes to stderr
+    only: GitHub's own messages are free text and must not reach a report."""
+
+    def __init__(self, code, detail=""):
+        super().__init__(code)
+        self.code = code
+        if detail:
+            log(f"github {code}: {am.ID_CREDENTIAL.sub('_redacted', detail)[:200]}")
+
+
+def classify(stderr):
+    if re.search(r"rate limit|secondary|HTTP 429", stderr, re.I):
+        return "rate_limited"
+    if re.search(r"HTTP 40[13]|bad credentials|authentication|gh auth login", stderr, re.I):
+        return "auth"
+    return "http_error"
 
 
 class Gh:
     """Every GitHub call of a run, counted and paced against the caps."""
 
-    def __init__(self):
+    def __init__(self, window):
+        requests, seconds = CAPS[window]
+        self.max_requests = int(os.environ.get("AGENT_REPORT_GH_MAX_REQUESTS", requests))
+        self.max_seconds = float(os.environ.get("AGENT_REPORT_GH_MAX_SECONDS", seconds))
+        # GitHub allows 30 search requests a minute; the gap keeps a run under it.
+        self.gap = float(os.environ.get("AGENT_REPORT_GH_GAP", "2.1"))
+        override = os.environ.get("AGENT_REPORT_GH_PAGE")
+        self.page_prs, self.page_followup = int(override or 20), int(override or 50)
         self.requests = 0
         self.started = time.monotonic()
         self.next_at = 0.0
 
     def call(self, args):
         if not shutil.which("gh"):
-            raise DeliveryError("gh is not installed")
-        if self.requests >= GH_MAX_REQUESTS:
-            raise DeliveryError(f"request cap of {GH_MAX_REQUESTS} reached")
-        left = GH_MAX_SECONDS - (time.monotonic() - self.started)
+            raise DeliveryError("not_installed")
+        if self.requests >= self.max_requests:
+            raise DeliveryError("request_cap")
+        left = self.max_seconds - (time.monotonic() - self.started)
         if left <= 0:
-            raise DeliveryError(f"wall time cap of {GH_MAX_SECONDS:g}s reached")
+            raise DeliveryError("time_cap")
         gap = self.next_at - time.monotonic()
         if gap > 0:
             time.sleep(min(gap, left))
@@ -511,33 +606,50 @@ class Gh:
             r = subprocess.run(["gh", *args], capture_output=True, text=True, env=env,
                                timeout=max(1, min(GH_CALL_TIMEOUT_S, left)))
         except subprocess.TimeoutExpired:
-            raise DeliveryError("a GitHub request timed out")
-        self.next_at = time.monotonic() + GH_GAP_S
+            raise DeliveryError("timeout")
+        self.next_at = time.monotonic() + self.gap
         if r.returncode != 0:
-            first = (r.stderr.strip().splitlines() or ["unknown error"])[0][:160]
-            raise DeliveryError(f"GitHub rate limited: {first}" if GH_RATE_LIMITED.search(r.stderr)
-                                else f"GitHub request failed: {first}")
+            raise DeliveryError(classify(r.stderr), (r.stderr.strip().splitlines() or [""])[0])
         return r.stdout
 
-    def search(self, query, q):
-        """Pages of one search: (nodes, issueCount). Stops at the search cap."""
-        nodes, after, count = [], "", 0
+    def graphql(self, query, q, first, after=""):
+        args = ["api", "graphql", "-f", f"query={query}", "-f", f"q={q}", "-F", f"first={first}"]
+        if after:
+            args += ["-f", f"after={after}"]
+        try:
+            data = json.loads(self.call(args))
+        except ValueError:
+            raise DeliveryError("bad_output")
+        if not isinstance(data, dict):
+            raise DeliveryError("bad_output")
+        if data.get("errors"):
+            raise DeliveryError("graphql_error", str(data["errors"])[:200])
+        try:
+            return data["data"]["search"]
+        except (KeyError, TypeError):
+            raise DeliveryError("bad_output")
+
+    def count(self, q):
+        """The number of results, asked for before any are fetched."""
+        try:
+            n = self.graphql(COUNT_QUERY, q, 1)["issueCount"]
+        except (KeyError, TypeError):
+            raise DeliveryError("bad_output")
+        if not am.is_amount(n):
+            raise DeliveryError("bad_output")
+        return int(n)
+
+    def pages(self, query, q, size):
+        nodes, after = [], ""
         while True:
-            args = ["api", "graphql", "-f", f"query={query}", "-f", f"q={q}", "-F", f"first={GH_PAGE}"]
-            if after:
-                args += ["-f", f"after={after}"]
+            res = self.graphql(query, q, size, after)
             try:
-                data = json.loads(self.call(args))
-                if data.get("errors"):
-                    raise DeliveryError("GitHub query failed: " + str(data["errors"][0].get("message"))[:160])
-                result = data["data"]["search"]
-                count = result["issueCount"]
-                nodes += [n for n in result["nodes"] if isinstance(n, dict) and n]
-                more, after = result["pageInfo"]["hasNextPage"], result["pageInfo"]["endCursor"] or ""
-            except (ValueError, KeyError, TypeError, AttributeError):
-                raise DeliveryError("GitHub returned an unexpected response")
-            if not more or len(nodes) >= GH_SEARCH_CAP:
-                return nodes, count
+                nodes += [n for n in res["nodes"] if isinstance(n, dict) and n]
+                more, after = bool(res["pageInfo"]["hasNextPage"]), res["pageInfo"]["endCursor"] or ""
+            except (KeyError, TypeError):
+                raise DeliveryError("bad_output")
+            if not more or not isinstance(after, str) or len(nodes) >= GH_SEARCH_CAP:
+                return nodes[:GH_SEARCH_CAP]
 
 
 def stream_owners():
@@ -547,26 +659,42 @@ def stream_owners():
     try:
         streams = json.loads(path.read_text())["streams"]
     except (OSError, ValueError, KeyError, TypeError) as e:
-        raise DeliveryError(f"stream map {tilde(path)} unreadable: {type(e).__name__}")
+        raise DeliveryError("bad_config", f"stream map unreadable: {type(e).__name__}")
     if not isinstance(streams, dict) or not streams or not all(re.fullmatch(r"[A-Za-z0-9-]+", o) for o in streams):
-        raise DeliveryError(f"stream map {tilde(path)} has no usable owners")
+        raise DeliveryError("bad_config", "stream map has no usable owners")
     return list(streams)
 
 
-def merged_prs(gh, query, base, start, end):
-    """PRs matching `base` merged in [start, end), complete despite the
-    1000-result search cap: a range whose count exceeds it is halved until it
-    fits. Returns (nodes, truncated); truncated means one day alone exceeds it."""
-    nodes, count = gh.search(query, f"{base} merged:{start.isoformat()}..{(end - dt.timedelta(days=1)).isoformat()}")
+def github_authors(gh):
+    """Logins whose PRs count: `github_authors` from config.json, else the
+    authenticated user and the PR bot."""
+    configured = am.load_config("config.json").get("github_authors")
+    if configured is not None:
+        if not (isinstance(configured, list) and configured and all(isinstance(a, str) and LOGIN.fullmatch(a) for a in configured)):
+            raise DeliveryError("bad_config", "github_authors is not a list of logins")
+        return configured
+    login = gh.call(["api", "user", "--jq", ".login"]).strip()
+    if not LOGIN.fullmatch(login):
+        raise DeliveryError("bad_output")
+    return [login, *[a for a in DEFAULT_AUTHORS if a != login]]
+
+
+def merged_in_range(gh, query, size, base, start, end):
+    """PRs matching `base` merged in [start, end). The count comes first; a
+    range over the 1000-result search cap is halved until every piece fits,
+    and only then fetched. Returns (nodes, truncated); truncated means one day
+    alone exceeds the cap."""
+    q = f"{base} merged:{start.isoformat()}..{(end - dt.timedelta(days=1)).isoformat()}"
+    count = gh.count(q)
+    if count == 0:
+        return [], False
     days = (end - start).days
-    if count <= GH_SEARCH_CAP:
-        return nodes, False
-    if days <= 1:
-        return nodes, True
-    mid = start + dt.timedelta(days=days // 2)
-    a, ta = merged_prs(gh, query, base, start, mid)
-    b, tb = merged_prs(gh, query, base, mid, end)
-    return a + b, ta or tb
+    if count > GH_SEARCH_CAP and days > 1:
+        mid = start + dt.timedelta(days=days // 2)
+        a, ta = merged_in_range(gh, query, size, base, start, mid)
+        b, tb = merged_in_range(gh, query, size, base, mid, end)
+        return a + b, ta or tb
+    return gh.pages(query, q, size), count > GH_SEARCH_CAP
 
 
 def ts(s):
@@ -602,9 +730,8 @@ def followups(gh, prs, now_ts):
             continue
         lo = min(ts(p["mergedAt"]) for p in watch).date()
         hi = min(max(ts(p["mergedAt"]) for p in watch) + dt.timedelta(days=FOLLOWUP_DAYS[-1]), now_ts).date()
-        later, count = gh.search(FOLLOWUP_QUERY, f"repo:{repo} is:pr is:merged merged:{lo.isoformat()}..{hi.isoformat()}")
-        if count > GH_SEARCH_CAP:
-            raise DeliveryError(f"{repo} has more than {GH_SEARCH_CAP} merged PRs in the follow-up range")
+        later, _ = merged_in_range(gh, FOLLOWUP_QUERY, gh.page_followup, f"repo:{repo} is:pr is:merged",
+                                   lo, hi + dt.timedelta(days=1))
         fixes = [c for c in later if c.get("mergedAt") and (FOLLOWUP_REF.match(c.get("headRefName") or "")
                                                           or FOLLOWUP_TITLE.match(c.get("title") or ""))]
         for p in watch:
@@ -622,40 +749,55 @@ def followups(gh, prs, now_ts):
     return out
 
 
-def github_delivery(start, end):
-    gh = Gh()
+def section(fn):
+    """Run one delivery section; any failure becomes an errored section with a
+    fixed reason code, never a zero."""
     try:
+        return fn()
+    except DeliveryError as e:
+        return {"errored": True, "reason": e.code}
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return {"errored": True, "reason": "bad_output"}
+
+
+def github_delivery(window, cs, ce, ps, pe):
+    gh = Gh(window)
+    state = {}
+
+    def merged():
         owners = stream_owners()
-        login = gh.call(["api", "user", "--jq", ".login"]).strip()
-        if not re.fullmatch(r"[A-Za-z0-9-]+", login):
-            raise DeliveryError("could not resolve the GitHub login")
-        base = f"is:pr is:merged author:{login} " + " ".join(f"user:{o}" for o in owners)
-        prs, truncated = merged_prs(gh, PR_QUERY, base, start, end)
+        authors = github_authors(gh)
+        # Repeated qualifiers are OR'd by the search; a parenthesised OR returns nothing here.
+        who = " ".join(f"author:{a}" for a in authors)
+        state["base"] = f"is:pr is:merged {who} " + " ".join(f"user:{o}" for o in owners)
+        prs, truncated = merged_in_range(gh, PR_QUERY, gh.page_prs, state["base"], cs, ce)
+        state["prs"] = prs
         hours = [(ts(p["mergedAt"]) - ts(p["createdAt"])).total_seconds() / 3600 for p in prs]
         lines = [p["additions"] + p["deletions"] for p in prs]
         failed = [any(((c["commit"].get("statusCheckRollup") or {}).get("state") in RED) for c in p["allCommits"]["nodes"]) for p in prs]
         red = [any(((c["commit"].get("statusCheckRollup") or {}).get("state") in RED) for c in p["head"]["nodes"]) for p in prs]
-        out = {"available": True, "owners": owners, "truncated": truncated, "merged": len(prs),
-               "open_to_merge_hours": {"median": round(median(hours), 2) if hours else None,
-                                       "p90": round(percentile(hours, 0.9), 2) if hours else None},
-               "lines_changed_median": round(median(lines), 1) if lines else None,
-               "failed_check_share": ratio(sum(failed), len(prs)), "red_head_share": ratio(sum(red), len(prs)),
-               "commits_truncated": sum(1 for p in prs if p["allCommits"]["totalCount"] > len(p["allCommits"]["nodes"])),
-               "files_truncated": sum(1 for p in prs if p["changedFiles"] > len(p["files"]["nodes"]))}
-    except (DeliveryError, KeyError, TypeError, ValueError) as e:
-        return {"errored": True, "reason": (str(e) if isinstance(e, DeliveryError) else f"unexpected GitHub data: {type(e).__name__}")[:200]}
-    try:
-        out["followup"] = followups(gh, prs, am.now())
-    except (DeliveryError, KeyError, TypeError, ValueError) as e:
-        out["followup"] = {"errored": True,
-                           "reason": (str(e) if isinstance(e, DeliveryError) else f"unexpected GitHub data: {type(e).__name__}")[:200]}
+        return {"available": True, "owners": owners, "authors": authors, "truncated": truncated, "merged": len(prs),
+                "open_to_merge_hours": {"median": round(median(hours), 2) if hours else None,
+                                        "p90": round(percentile(hours, 0.9), 2) if hours else None},
+                "lines_changed_median": round(median(lines), 1) if lines else None,
+                "failed_check_share": ratio(sum(failed), len(prs)), "red_head_share": ratio(sum(red), len(prs)),
+                "commits_truncated": sum(1 for p in prs if p["allCommits"]["totalCount"] > len(p["allCommits"]["nodes"])),
+                "files_truncated": sum(1 for p in prs if p["changedFiles"] > len(p["files"]["nodes"]))}
+
+    out = section(merged)
+    if out.get("errored"):
+        return out
+    out["followup"] = section(lambda: followups(gh, state["prs"], am.now()))
+    # The previous window's 7-day figure is settled, unlike this window's.
+    out["followup_previous"] = section(lambda: followups(
+        gh, merged_in_range(gh, PR_LITE_QUERY, gh.page_prs, state["base"], ps, pe)[0], am.now()))
     return out
 
 
 def no_mistakes_delivery(start, end):
     path = Path(os.environ.get("AGENT_REPORT_NM_DB") or am.HOME / ".no-mistakes/state.sqlite")
     if not path.is_file():
-        return {"errored": True, "reason": f"{tilde(path)} not found"}
+        return {"errored": True, "reason": "not_found"}
     lo = int(dt.datetime.combine(start, dt.time(), dt.timezone.utc).timestamp())
     hi = int(dt.datetime.combine(end, dt.time(), dt.timezone.utc).timestamp())
     try:
@@ -668,7 +810,8 @@ def no_mistakes_delivery(start, end):
         finally:
             conn.close()
     except sqlite3.Error as e:
-        return {"errored": True, "reason": f"{tilde(path)} unreadable: {type(e).__name__}"}
+        log(f"no-mistakes database: {type(e).__name__}")
+        return {"errored": True, "reason": "unreadable"}
     terminal = [r for r in rows if r[0] in ("completed", "failed", "cancelled")]
     first_pass = sum(1 for status, fixes in terminal if status == "completed" and fixes == 0)
     count = lambda s: sum(1 for r in rows if r[0] == s)
@@ -678,10 +821,11 @@ def no_mistakes_delivery(start, end):
             "first_pass_rate": ratio(first_pass, len(terminal))}
 
 
-def delivery(opts, cs, ce):
+def delivery(opts, w):
+    (cs, ce), (ps, pe) = w
     if opts.window == "daily":
         return {"skipped": "daily window"}
-    github = {"skipped": "--no-github"} if opts.no_github else github_delivery(cs, ce)
+    github = {"skipped": "--no-github"} if opts.no_github else github_delivery(opts.window, cs, ce, ps, pe)
     return {"github": github, "no_mistakes": no_mistakes_delivery(cs, ce)}
 
 
@@ -723,15 +867,37 @@ def insights_input(report):
     return json.dumps(capped({k: v for k, v in report.items() if k != "insights"}), separators=(",", ":"))
 
 
-def record_spend(run, usd):
-    """Append to the ledger exactly as `agent-metrics budget record` does."""
-    am.ledger_spent()
-    at = am.iso(am.now().timestamp())
-    path = am.month_file("ledger", at)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    entry = {"at": at, "run": am.clean_id(run), "usd": usd, "critical": False}
-    with open(path, "a") as fh:
-        fh.write(json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n")
+def ledger_entry(run, at, usd):
+    return json.dumps({"at": at, "run": am.clean_id(run), "usd": usd, "critical": False},
+                      sort_keys=True, separators=(",", ":"))
+
+
+def reserve_spend(run):
+    """Book the cap before the call, in the format `agent-metrics budget
+    record` writes. A timeout, a reply with no cost or a kill then still leaves
+    the spend on the books; settle_spend replaces it with the real figure."""
+    with am.Lock():
+        am.ledger_spent()
+        at = am.iso(am.now().timestamp())
+        path = am.month_file("ledger", at)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        line = ledger_entry(run, at, INSIGHTS_NEED_USD)
+        with open(path, "a") as fh:
+            fh.write(line + "\n")
+    return path, line, run, at
+
+
+def settle_spend(reservation, usd):
+    path, line, run, at = reservation
+    new = ledger_entry(run, at, usd)
+    with am.Lock():
+        text = path.read_text()
+        i = text.rfind(line + "\n")
+        # Rewriting races an append by `budget record`; the window is the two
+        # calls below, and losing that one line only under-counts by its amount.
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(text[:i] + new + "\n" + text[i + len(line) + 1:] if i >= 0 else text + new + "\n")
+        os.replace(tmp, path)
 
 
 def first_words(text, n):
@@ -742,7 +908,7 @@ def first_words(text, n):
 def run_insights(report):
     claude = shutil.which("claude") or str(am.HOME / ".local/bin/claude")
     if not os.access(claude, os.X_OK):
-        return {"error": "claude CLI not found"}
+        return {"error": "not_found"}
     # An empty working directory and project-only settings load no user
     # plugins, hooks or MCP servers, so the call costs what its prompt costs.
     # No persisted session keeps it out of the next collect's numbers.
@@ -750,35 +916,53 @@ def run_insights(report):
            "--max-turns", "1", "--max-budget-usd", INSIGHTS_BUDGET_USD, "--no-session-persistence",
            "--output-format", "json"]
     prompt = INSIGHTS_PROMPT.format(words=INSIGHTS_WORDS) + insights_input(report)
+    reservation = reserve_spend(f"report-{report['window']}")
     with tempfile.TemporaryDirectory(prefix="agent-report-insights-") as cwd:
         try:
             r = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=INSIGHTS_TIMEOUT_S,
                                cwd=cwd, env=am.child_env())
         except subprocess.TimeoutExpired:
-            return {"error": f"timed out after {INSIGHTS_TIMEOUT_S}s"}
+            return {"error": "timeout"}
         except OSError as e:
-            return {"error": f"could not start claude: {e.strerror}"}
+            log(f"could not start claude: {e.strerror}")
+            settle_spend(reservation, 0)
+            return {"error": "spawn_failed"}
     try:
         j = json.loads(r.stdout)
     except ValueError:
         j = None
     j = j if isinstance(j, dict) else {}
     cost = j.get("total_cost_usd")
-    # Money the call spent is recorded whether or not it produced text.
-    if am.is_amount(cost) and cost > 0:
-        record_spend(f"report-{report['window']}", cost)
+    if am.is_amount(cost):
+        settle_spend(reservation, cost)
     if r.returncode != 0:
-        return {"error": f"claude exited {r.returncode}"}
+        return {"error": "claude_exit"}
     if not j:
-        return {"error": "claude returned non-JSON output"}
+        return {"error": "bad_output"}
     if j.get("is_error") or not isinstance(j.get("result"), str) or not j["result"].strip():
-        return {"error": f"claude reported an error ({j.get('subtype') or j.get('terminal_reason') or 'no result'})"}
+        return {"error": "claude_error"}
     return {"text": first_words(j["result"].strip(), INSIGHTS_WORDS), "cost_usd": round(cost, 4) if am.is_amount(cost) else None}
+
+
+def stored_insights(window, label):
+    """Commentary already paid for in this window's stored report."""
+    path = am.STORE / "reports" / f"{label}-{window}.json"
+    if not path.is_file():
+        return None
+    i = load_json_file(path).get("insights")
+    if isinstance(i, dict) and set(i) <= {"text", "cost_usd"} and isinstance(i.get("text"), str) \
+            and 0 < len(i["text"]) <= 6000 and (i.get("cost_usd") is None or am.is_amount(i["cost_usd"])):
+        return i
+    return None
 
 
 def insights(opts, report):
     if opts.window not in INSIGHTS_WINDOWS:
         return {"skipped": "window"}
+    if not opts.force_insights:
+        kept = stored_insights(opts.window, report["label_date"])
+        if kept:
+            return kept
     if opts.no_insights:
         return {"skipped": "--no-insights"}
     if opts.dry_run:
@@ -815,7 +999,7 @@ def build_report(opts, w, th):
         "current": current,
         "previous": {"start": ps.isoformat(), "end": pe.isoformat(), **summarize_window(ps, pe)},
         "trend": trend(opts.window, label),
-        "flags": flags, "delivery": delivery(opts, cs, ce), "audit": embed_audit(opts.window, label), "insights": None,
+        "flags": flags, "delivery": delivery(opts, w), "audit": embed_audit(opts.window, label), "insights": None,
     }
 
 
@@ -921,7 +1105,7 @@ def render_trend(rows):
 
 
 def errored(section):
-    return f"Errored, so unknown rather than zero: {section.get('reason')}."
+    return f"Errored, so unknown rather than zero (reason: {section.get('reason')})."
 
 
 def render_delivery(r):
@@ -935,15 +1119,16 @@ def render_delivery(r):
     elif g.get("errored"):
         lines += ["### Merged PRs", "", errored(g), ""]
     else:
-        h, f = g["open_to_merge_hours"], g["followup"]
+        h = g["open_to_merge_hours"]
         rows = [("Merged PRs", num(g["merged"])), ("Open to merge, median (h)", num(h["median"])), ("Open to merge, p90 (h)", num(h["p90"])),
                 ("Lines changed per PR, median", num(g["lines_changed_median"])),
                 ("Merged with a failed-check commit", pct_share(g["failed_check_share"])),
                 ("Merged with a red head commit", pct_share(g["red_head_share"]))]
         for n in FOLLOWUP_DAYS:
-            k = f"d{n}"
-            rows.append((f"Follow-up fix within {n} days", errored(f) if f.get("errored") else
-                         f"{pct_share(f[k]['rate'])} ({f[k]['followed_up']} of {f[k]['eligible']} watched that long)"))
+            for name, f in (("this window", g["followup"]), ("previous window", g["followup_previous"])):
+                k = f"d{n}"
+                rows.append((f"Follow-up fix within {n} days, {name}", errored(f) if f.get("errored") else
+                             f"{pct_share(f[k]['rate'])} ({f[k]['followed_up']} of {f[k]['eligible']} watched that long)"))
         lines += ["### Merged PRs", ""] + table(["Metric", "Value"], rows)
         if g["truncated"] or g["commits_truncated"] or g["files_truncated"]:
             lines += ["", f"Incomplete: search truncated {g['truncated']}, PRs with over 100 commits {g['commits_truncated']}, "
@@ -1027,12 +1212,49 @@ def render(r):
     return "\n".join(lines).rstrip() + "\n"
 
 
-def write_outputs(report, directory):
+def write_outputs(report, md, directory):
+    """Both files are staged before either is moved into place, so a failure
+    while writing cannot leave a JSON without its Markdown."""
     stem = f"{report['label_date']}-{report['window']}"
     paths = {"json": directory / f"{stem}.json", "md": directory / f"{stem}.md"}
-    write_text(paths["json"], json.dumps(report, indent=1) + "\n")
-    write_text(paths["md"], render(report))
+    directory.mkdir(parents=True, exist_ok=True)
+    texts = {"json": json.dumps(report, indent=1) + "\n", "md": md}
+    for k, path in paths.items():
+        path.with_suffix(path.suffix + ".tmp").write_text(texts[k])
+    for path in paths.values():
+        os.replace(path.with_suffix(path.suffix + ".tmp"), path)
     return paths
+
+
+def keep_stamp(report, path):
+    """An unchanged re-run keeps the stored `generated_at`, so it writes the
+    same bytes and commits nothing."""
+    try:
+        old = json.loads(path.read_text())
+        same = {**old, "generated_at": None} == {**json.loads(json.dumps(report)), "generated_at": None}
+    except (OSError, ValueError, TypeError):
+        return
+    if same and isinstance(old.get("generated_at"), str):
+        report["generated_at"] = old["generated_at"]
+
+
+def sync_store():
+    """Call with the Lock held: refuse a store with changes this tool did not
+    make, then fast-forward, as `collect` does, so a push is never rejected
+    by commits another run left on the remote."""
+    try:
+        foreign = [l for l in am.git("status", "--porcelain").stdout.splitlines()
+                   if not l[3:].startswith(tuple(d + "/" for d in am.OWN_DIRS))]
+        if foreign:
+            die(EXIT_FAIL, f"the store has changes this run did not make: {foreign[0].strip()}",
+                f"Inspect with `git -C {tilde(am.STORE)} status`")
+        if am.has_upstream():
+            pull = am.git("pull", "--quiet", "--ff-only", check=False)
+            if pull.returncode != 0:
+                die(EXIT_FAIL, f"git pull --ff-only failed: {(pull.stderr or pull.stdout).strip()}",
+                    f"Reconcile by hand in {tilde(am.STORE)}")
+    except RuntimeError as e:
+        die(EXIT_FAIL, str(e), f"Inspect with `git -C {tilde(am.STORE)} status`")
 
 
 # ── Commands ─────────────────────────────────────────────────────────────────
@@ -1064,7 +1286,7 @@ def cmd_home():
     files = sorted((am.STORE / "reports").glob("*.json"), reverse=True)
     rows = []
     for p in files[:HOME_REPORTS]:
-        j = load_json_file(p)
+        j = load_stored(p)
         rows.append({"report": p.stem, "cost_usd": total_cost(j), "flags": len(j.get("flags") or [])})
     out["count"] = f"{len(rows)} of {len(files)} reports"
     out["reports"] = rows if rows else "0 reports yet"
@@ -1080,23 +1302,38 @@ def cmd_run(args):
         end = dt.date.fromisoformat(args.end) if args.end else am.now().date()
     except ValueError:
         am.usage_error(f"--end must be YYYY-MM-DD, got {args.end}", USAGE_SHORT)
+    # Only the default daily run speaks for "today". Clearing the file first
+    # means a run that fails part-way leaves no previous day's flags to be
+    # mistaken for current ones; a back-dated run is a backfill and leaves it.
+    owns_flags = args.window == "daily" and not args.end and not args.dry_run
+    if owns_flags:
+        (am.STATE / "flags.json").unlink(missing_ok=True)
     am.require_store()
     th = load_thresholds()
     w = compute_windows(args.window, end)
+    if not args.dry_run:
+        with am.Lock():
+            sync_store()
+    # Everything that can fail runs, and the report is rendered whole, before
+    # the one step that spends money.
+    report = build_report(args, w, th)
+    report["insights"] = {"skipped": "pending"}
+    render(report)
+    report["insights"] = insights(args, report)
     if args.dry_run:
-        report = build_report(args, w, th)
-        report["insights"] = insights(args, report)
-        paths = write_outputs(report, Path(tempfile.mkdtemp(prefix="agent-report-")))
+        report_md = render(report)
+        paths = write_outputs(report, report_md, Path(tempfile.mkdtemp(prefix="agent-report-")))
         result = {"dry_run": True}
     else:
         with am.Lock():
-            report = build_report(args, w, th)
-            report["insights"] = insights(args, report)
-            paths = write_outputs(report, am.STORE / "reports")
-            if args.window == "daily":
+            sync_store()
+            keep_stamp(report, am.STORE / "reports" / f"{report['label_date']}-{report['window']}.json")
+            paths = write_outputs(report, render(report), am.STORE / "reports")
+            if owns_flags:
                 write_flags_file(report)
             try:
-                result = {"dry_run": False, **am.publish(f"report: {report['label_date']} {report['window']}")}
+                result = {"dry_run": False, **am.publish(f"report: {report['label_date']} {report['window']}",
+                                                         dirs=("reports", "ledger"))}
             except RuntimeError as e:
                 die(EXIT_FAIL, str(e), f"Inspect with `git -C {tilde(am.STORE)} status`")
     emit({**result, "window": report["window"], "start": report["start"], "end": report["end"],
@@ -1121,13 +1358,20 @@ def build_parser():
     p.add_argument("--dry-run", action="store_true", help="write to a temp dir; touch no store, flag file or ledger; no model call")
     p.add_argument("--no-insights", action="store_true", help="skip the model commentary")
     p.add_argument("--no-github", action="store_true", help="skip the GitHub delivery metrics")
+    p.add_argument("--force-insights", action="store_true",
+                   help="call the model again even when the stored report already has commentary")
     return p
 
 
 def main(argv):
     if not argv:
         return cmd_home()
-    return cmd_run(build_parser().parse_args(argv))
+    try:
+        return cmd_run(build_parser().parse_args(argv))
+    except (KeyError, TypeError, ValueError, AttributeError) as e:
+        # Reached only by data the checks above did not foresee; the type is
+        # enough to find it, and a message could quote the data.
+        die(EXIT_FAIL, f"unexpected data ({type(e).__name__})", "Re-run with --dry-run and inspect the store")
 
 
 if __name__ == "__main__":

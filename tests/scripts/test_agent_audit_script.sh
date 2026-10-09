@@ -529,7 +529,7 @@ unset JIRA_URL JIRA_USERNAME JIRA_API_TOKEN
 
 # ── Units: template service + four calendar timers ──
 svc="$units/agent-audit@.service"
-grep -qx 'ExecStart=%h/.local/bin/agent-audit --window %i' "$svc" || fail "service ExecStart"
+grep -qx 'ExecStart=%h/.local/bin/agent-audit --window %i --no-jira --no-insights' "$svc" || fail "service ExecStart"
 grep -qx 'NoNewPrivileges=yes' "$svc" && grep -qx 'PrivateTmp=yes' "$svc" || fail "service hardening missing"
 grep -q '^TimeoutStartSec=' "$svc" || fail "service needs a hard timeout"
 declare -A cal=([weekly]="Mon *-*-* 08:00:00" [biweekly]="Mon *-*-* 08:15:00"

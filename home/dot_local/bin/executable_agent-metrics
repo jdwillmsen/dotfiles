@@ -11,6 +11,7 @@ import datetime as dt
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -54,6 +55,7 @@ OUTPUT_CMDS = (("commits", re.compile(r"\bgit\b[^|;&\n]*\bcommit\b")),
                ("prs_created", re.compile(r"\bgh\s+pr\s+create\b")))
 USAGE_FIELDS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
 
+BASELINE_DAYS = 30
 QUOTA_LOCAL_KEEP_S = 35 * 86400
 QUOTA_WINDOWS = ("five_hour", "seven_day")
 LOCK_WAIT_S = int(os.environ.get("AGENT_METRICS_LOCK_WAIT", "600"))
@@ -676,9 +678,10 @@ def cmd_collect(args):
     if args.since < 1:
         usage_error("--since needs a whole number of days, 1 or more")
     with Lock():
-        dirty = git("status", "--porcelain").stdout.strip()
+        # Ledger entries are written between runs by `budget record`.
+        dirty = [l for l in git("status", "--porcelain").stdout.splitlines() if not l[3:].startswith("ledger/")]
         if dirty:
-            die(EXIT_FAIL, f"the store has changes this run did not make: {dirty.splitlines()[0]}",
+            die(EXIT_FAIL, f"the store has changes this run did not make: {dirty[0].strip()}",
                 f"Inspect with `git -C {tilde(STORE)} status`")
         if has_upstream():
             pull = git("pull", "--quiet", "--ff-only", check=False)
@@ -726,9 +729,114 @@ def cmd_row(args):
     return 0
 
 
-def cmd_budget(_args):
+# ── Budget ───────────────────────────────────────────────────────────────────
+
+def budget_config():
     b = load_config("budget.json")
-    emit({"pricing_as_of": pricing()["as_of"], "plan_pct": b.get("plan_pct"), "hard_pct": b.get("hard_pct")})
+    path = tilde(CONFIG / "budget.json")
+    out = {}
+    for k in ("plan_pct", "hard_pct", "weekly_quota_cutoff_pct"):
+        v = b.get(k)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 < v <= 100:
+            die(EXIT_USAGE, f"{path}: {k} must be a number above 0 and at most 100")
+        out[k] = v
+    if out["plan_pct"] > out["hard_pct"]:
+        die(EXIT_USAGE, f"{path}: plan_pct must not exceed hard_pct")
+    return out
+
+
+def ledger_spent():
+    """This calendar month's recorded spend. A line that cannot be read is an
+    error: skipping it would under-count and let a spend through."""
+    path = month_file("ledger", iso(now().timestamp()))
+    if not path.is_file():
+        return 0.0
+    total = 0.0
+    for n, line in enumerate(path.read_text().splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            usd = json.loads(line)["usd"]
+            if isinstance(usd, bool) or not isinstance(usd, (int, float)) or not math.isfinite(usd) or usd < 0:
+                raise ValueError("usd")
+        except (ValueError, KeyError, TypeError):
+            die(EXIT_USAGE, f"{tilde(path)} line {n} is not a ledger entry",
+                f"Fix or remove the line in {tilde(STORE)}/ledger/{path.name}")
+        total += usd
+    return total
+
+
+def budget_state(need=0.0, critical=False):
+    cfg = budget_config()
+    end = now()
+    base = float(sum(r.get("cost_usd") or 0 for r in
+                     iter_sessions(end - dt.timedelta(days=BASELINE_DAYS), end + dt.timedelta(seconds=1))))
+    spent = ledger_spent()
+    plan, hard = base * cfg["plan_pct"] / 100, base * cfg["hard_pct"] / 100
+    q = latest_quota()
+    weekly = q.get("seven_day_pct") if q else None
+    resets = q.get("seven_day_resets_at") if q else None
+    held = (isinstance(weekly, (int, float)) and weekly >= cfg["weekly_quota_cutoff_pct"]
+            and isinstance(resets, (int, float)) and resets > end.timestamp())
+
+    if base <= 0:
+        state, allowed = "no-baseline", False
+        reason = f"the store has no priced sessions in the last {BASELINE_DAYS} days"
+    elif held:
+        state, allowed = "quota-hold", False
+        reason = f"weekly plan quota is {weekly}% used, at or above the {cfg['weekly_quota_cutoff_pct']}% cut-off"
+    elif spent + need > hard:
+        state, allowed = "stopped", False
+        reason = f"${spent + need:.2f} would pass the {cfg['hard_pct']}% hard stop of ${hard:.2f}"
+    elif spent + need > plan:
+        state, allowed = "critical-only", critical
+        reason = f"${spent + need:.2f} is over the {cfg['plan_pct']}% plan of ${plan:.2f}; only critical findings may spend"
+    else:
+        state, allowed = "ok", True
+        reason = f"${spent + need:.2f} is within the {cfg['plan_pct']}% plan of ${plan:.2f}"
+    out = {"state": state, "allowed": allowed, "reason": reason,
+           "base_usd": round(base, 2), "plan_usd": round(plan, 2), "hard_usd": round(hard, 2),
+           "spent_usd": round(spent, 2), "need_usd": round(need, 2)}
+    if q:
+        out["quota"] = {"seven_day_pct": weekly, "age_hours": round(max(0, end.timestamp() - q["at"]) / 3600, 1)}
+    else:
+        # Unknown quota does not block: readings exist only while an
+        # interactive session is open, and the dollar caps still apply.
+        out["quota"] = None
+    return out
+
+
+def cmd_budget(_args):
+    require_store()
+    out = budget_state()
+    out["help"] = ["Run `agent-metrics budget check --need <usd>` before a model call",
+                   "Run `agent-metrics budget record --usd <usd> --run <name>` after it"]
+    emit(out)
+    return 0
+
+
+def cmd_budget_check(args):
+    require_store()
+    if not math.isfinite(args.need) or args.need < 0:
+        usage_error("--need must be a dollar amount of 0 or more")
+    out = budget_state(args.need, args.critical)
+    emit(out)
+    return 0 if out["allowed"] else EXIT_DENIED
+
+
+def cmd_budget_record(args):
+    require_store()
+    if not math.isfinite(args.usd) or args.usd < 0:
+        usage_error("--usd must be a dollar amount of 0 or more")
+    ledger_spent()
+    stamp = iso(now().timestamp())
+    path = month_file("ledger", stamp)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {"at": stamp, "run": clean_id(args.run), "usd": args.usd, "critical": bool(args.critical)}
+    with open(path, "a") as fh:
+        fh.write(json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n")
+    emit({"recorded": entry, "spent_usd": round(ledger_spent(), 2),
+          "help": ["The entry is committed by the next `agent-metrics collect`"]})
     return 0
 
 
@@ -758,6 +866,16 @@ def build_parser():
     r.set_defaults(func=cmd_row)
     b = sub.add_parser("budget", help="show the budget, or check and record a spend")
     b.set_defaults(func=cmd_budget)
+    bsub = b.add_subparsers(metavar="action", parser_class=Parser)
+    bc = bsub.add_parser("check", help="exit 0 when a spend is allowed, 3 when it is not")
+    bc.add_argument("--need", type=float, required=True, metavar="USD")
+    bc.add_argument("--critical", action="store_true", help="the spend is for a critical finding")
+    bc.set_defaults(func=cmd_budget_check)
+    br = bsub.add_parser("record", help="append a model spend to this month's ledger")
+    br.add_argument("--usd", type=float, required=True)
+    br.add_argument("--run", required=True, metavar="NAME", help="which run spent it, e.g. weekly")
+    br.add_argument("--critical", action="store_true")
+    br.set_defaults(func=cmd_budget_record)
     return p
 
 

@@ -78,13 +78,6 @@ assert list(found["CACHE_W5M,CACHE_W1H"]) == [p["cache_write_5m"], p["cache_writ
 assert p["as_of"]
 PY
 
-# ── Config that cannot be read is an error, never a default ──
-cp "$tmp/config/pricing.json" "$tmp/pricing.bak"
-echo '{not json' >"$tmp/config/pricing.json"
-run 2 budget
-grep -q "pricing.json" "$out" || fail "a broken pricing.json is not named in the error" "$(cat "$out")"
-cp "$tmp/pricing.bak" "$tmp/config/pricing.json"
-
 # ── Fixture transcripts ──
 python3 - "$fx" <<'PY'
 import json, os, sys
@@ -224,6 +217,13 @@ assert m["output"] == 5 and m["cost_usd"] is None, m
 assert r["unpriced_models"] == ["mystery-model-1"] and r["cost_usd"] == 0.0, r
 assert r["cache_read_share"] is None, r["cache_read_share"]
 PY
+
+# Prices that cannot be read are an error, never a zero cost.
+cp "$tmp/config/pricing.json" "$tmp/pricing.bak"
+echo '{not json' >"$tmp/config/pricing.json"
+run 2 row "$P/-b/bbbb-2.jsonl"
+grep -q "pricing.json" "$out" || fail "a broken pricing.json is not named in the error" "$(cat "$out")"
+cp "$tmp/pricing.bak" "$tmp/config/pricing.json"
 
 # ── Collector and store ──
 store="$AGENT_METRICS_STORE"
@@ -368,5 +368,95 @@ run 0 collect --since 1
 want quota_hours_added 0 "re-run"
 run 0
 grep -q "seven_day_pct: 55" "$out" || fail "the home view does not show the latest weekly quota" "$(cat "$out")"
+
+# ── Budget ──
+# $1,000 of sessions in the trailing 30 days: the plan is $10 and the hard stop $50.
+bstore="$tmp/bstore"
+bstate="$tmp/bstate"
+mkbstore() {
+    rm -rf "$1"
+    mkdir -p "$1/sessions" "$1/ledger"
+    git init -q -b main "$1"
+    echo '{"session_id":"s1","started_at":"2026-10-01T00:00:00Z","cost_usd":600}' >"$1/sessions/2026-10.jsonl"
+    {
+        echo '{"session_id":"s2","started_at":"2026-09-20T00:00:00Z","cost_usd":400}'
+        echo '{"session_id":"s3","started_at":"2026-09-01T00:00:00Z","cost_usd":5000}'
+    } >"$1/sessions/2026-09.jsonl"
+    echo '{"at":"2026-09-15T00:00:00Z","run":"weekly","usd":1000,"critical":false}' >"$1/ledger/2026-09.jsonl"
+}
+brun() {
+    local want="$1"
+    shift
+    AGENT_METRICS_STORE="$bstore" AGENT_METRICS_STATE="$bstate" run "$want" budget "$@"
+}
+state() { [ "$(field state)" = "$1" ] || fail "budget state is $(field state), want $1 ($2)" "$(cat "$out")"; }
+mkbstore "$bstore"
+mkdir -p "$bstate"
+
+brun 0
+state ok "nothing spent"
+[ "$(field base_usd)" = 1000.0 ] && [ "$(field plan_usd)" = 10.0 ] && [ "$(field hard_usd)" = 50.0 ] && [ "$(field spent_usd)" = 0.0 ] \
+    || fail "budget numbers are wrong: last month's ledger or an old session was counted" "$(cat "$out")"
+grep -q "^quota: null" "$out" || fail "a missing quota reading is not reported as unknown" "$(cat "$out")"
+brun 0 check --need 5
+state ok "5 of a 10 plan"
+[ "$(field allowed)" = true ] || fail "an allowed spend is not marked allowed" "$(cat "$out")"
+
+brun 0 record --usd 8 --run weekly
+brun 3 check --need 5
+state critical-only "13 against a 10 plan"
+[ "$(field allowed)" = false ] || fail "a denied spend is marked allowed" "$(cat "$out")"
+brun 0 check --need 5 --critical
+state critical-only "critical spend inside the hard stop"
+brun 0 record --usd 40 --run monthly --critical
+brun 3 check --need 5 --critical
+state stopped "53 against a 50 hard stop"
+brun 0
+[ "$(field spent_usd)" = 48.0 ] || fail "recorded spend does not add up" "$(cat "$out")"
+grep -q '"critical":true' "$bstore/ledger/2026-10.jsonl" || fail "record did not keep the critical flag"
+
+brun 2 record --usd -1 --run weekly
+brun 2 record --usd abc --run weekly
+brun 2 record --usd 1
+brun 2 check
+
+# The weekly plan quota holds model work while it is nearly spent.
+mkbstore "$bstore"
+soon="$(date -u -d "2026-10-10T00:00:00Z" +%s)"
+past="$(date -u -d "2026-10-09T00:00:00Z" +%s)"
+at="$(date -u -d "2026-10-09T11:00:00Z" +%s)"
+echo "{\"at\":$at,\"seven_day_pct\":90,\"seven_day_resets_at\":$soon}" >"$bstate/quota.jsonl"
+brun 3 check --need 1
+state quota-hold "weekly quota at 90"
+echo "{\"at\":$at,\"seven_day_pct\":90,\"seven_day_resets_at\":$past}" >"$bstate/quota.jsonl"
+brun 0 check --need 1
+state ok "the window already reset"
+echo "{\"at\":$at,\"seven_day_pct\":84,\"seven_day_resets_at\":$soon}" >"$bstate/quota.jsonl"
+brun 0 check --need 1
+state ok "below the cut-off"
+rm "$bstate/quota.jsonl"
+
+# No usage data means no model spend.
+rm -rf "$bstore/sessions"
+brun 3 check --need 1
+state no-baseline "empty store"
+
+# Unreadable inputs are errors, never an allowance.
+mkbstore "$bstore"
+echo "garbage" >>"$bstore/ledger/2026-10.jsonl"
+brun 2 check --need 1
+grep -q "ledger/2026-10.jsonl" "$out" || fail "a broken ledger line is not named" "$(cat "$out")"
+mkbstore "$bstore"
+cp "$tmp/config/budget.json" "$tmp/budget.bak"
+echo '{"plan_pct": "lots", "hard_pct": 5, "weekly_quota_cutoff_pct": 85}' >"$tmp/config/budget.json"
+brun 2 check --need 1
+grep -q "budget.json" "$out" || fail "a malformed budget.json is not named" "$(cat "$out")"
+cp "$tmp/budget.bak" "$tmp/config/budget.json"
+
+# A recorded spend is the collector's own change, so it commits it.
+run 0 budget record --usd 2.5 --run weekly
+run 0 collect --since 1
+want committed true "ledger entry"
+[ -z "$(sg status --porcelain)" ] && sg show --stat --format= HEAD | grep -q "ledger/2026-10.jsonl" || fail "collect did not commit the ledger"
 
 echo "test_agent_metrics_script: OK"

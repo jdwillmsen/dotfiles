@@ -65,7 +65,7 @@ for the personal account, name its active repos instead:
   `DOTA`, `OPS`) share the columns Backlog, Ready, In Progress, Review, Done.
 - The four stream projects share one set of issue types: Epic, Task, Bug,
   Spike and Subtask. `OPS` has the same without Spike.
-- Every open ticket in a stream project has a parent Epic.
+- Every open Task, Bug and Spike in a stream project sits under an Epic.
 - **Personal stream** filter: `project in (JDW, CAREER)`.
 - **All streams** dashboard: every project side by side, for the admin view,
   with open alerts from `OPS` in their own panel.

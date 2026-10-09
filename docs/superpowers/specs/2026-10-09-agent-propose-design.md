@@ -50,16 +50,18 @@ reports, the store and GitHub replies can hold hostile values. Therefore:
 - **The checker is read from the base branch**, both here and in CI, so
   neither a model edit nor the PR under test can loosen its own rules. A base
   without it stops the run (`no-checker`).
-- **A shape rule on top of the checker.** The Claude settings source is a
+- **A shape rule, in the checker.** The Claude settings source is a
   `modify_` script: chezmoi executes it, and so does the repo's settings
   test. Running tests on a model-edited script would execute model output.
   So an edit there must be exactly one `"<plugin>@<marketplace>": false` data
   line, whose allowed characters cannot leave the quoted JSON. The brief's
   "no model output is ever executed" wins over "the model edits the settings
   file" wherever they meet.
-- **`--only` in the checker.** Each finding names one file; any other changed
-  file fails (`outside_target`). This is what keeps tests and scripts out of
-  reach even where no protected pattern lists them.
+- **Per-finding rules live in the checker.** A commit with a `Finding:`
+  trailer is held to its finder's one file, the line cap and the shape, all
+  read from `propose.json` at the base revision, so CI and the tool make the
+  same check. This is what keeps tests and scripts out of reach even where no
+  protected pattern lists them.
 - **Strict changes are opt-in per finder** (`strict_finders`, default empty).
   No v1 finder needs to change a hook, API environment setting or MCP server,
   so by default such an edit is rejected. When a finder is opted in, the
@@ -103,14 +105,19 @@ reports, the store and GitHub replies can hold hostile values. Therefore:
   name what ran. "Most capable" is read as the owner's rule that review uses
   Opus; both are config.
 - **Quiet periods beyond the brief's 90 days.** An open finding is not
-  proposed twice; a merged one rests 30 days; a machine rejection is not
-  retried for 30 days, so an edit the model cannot make does not spend every
-  run. A finding never attempted (budget, cap, abort) is not recorded.
+  proposed twice; a merged one rests 30 days; an edit this tool rejected is
+  not retried for 30 days; a verify miss is remembered for 90. A finding
+  never attempted (budget, cap, abort, red baseline) is not recorded.
+- **Verdicts and attempts are different things.** A timeout, a failed call, a
+  failed review or a failed PR says nothing about the edit, so it is recorded
+  as `attempted` and retried; three in a row make the finding `needs_human`.
 - **History before push.** Rows are written as `pending` before the branch is
   pushed and become `open` with the PR number. A run that dies in between is
   reconciled by the next run from the branch name.
-- **A failed `gh pr create` deletes the pushed branch.** A branch of today's
-  name already on the remote stops the run rather than being overwritten.
+- **A failed `gh pr create` deletes the pushed branch**, but only after
+  looking for a PR on that head, since gh can fail after GitHub succeeded.
+  The body is written before the push. A branch of today's name on the
+  remote, or locally, stops the run rather than being overwritten.
 - **Commits are made with hooks and signing off**, so no repo hook or
   pinentry runs unattended.
 - **`verify` runs after every scheduled run** (`ExecStartPost`); the brief
@@ -119,10 +126,30 @@ reports, the store and GitHub replies can hold hostile values. Therefore:
 - **Exit codes.** A gate that stops the run exits 0, so a routine stop does
   not mark the unit failed; a missing store keeps the siblings' exit 2.
 
+## Changed after the security review
+
+- **Line terminators.** Text is split on line feed only, and every other
+  control or line-separator character is refused. `splitlines` had hidden a
+  carriage return and what followed it from every rule.
+- **A baseline test run** before any spend, and a unit `PATH` that finds the
+  tools those tests need. A red baseline had turned every settings edit into
+  a paid, remembered rejection.
+- **The reviewer has no tools and runs in an empty directory** outside the
+  worktree. Three real calls showed `--restricted` does not load instruction
+  files on its own, and that a model asked to read one with a tool can still
+  follow it; `docs/agent-propose.md` records what was and was not confirmed.
+- **Appending verifies the open branch first**: every commit on it must be a
+  finding commit that passes the checker, since its tests are about to run.
+- **A reply over its call cap ends the run.** The caps are then not holding.
+- **Fork PRs are ignored**, and only GitHub's explicit "Branch not protected"
+  opens the approval gate.
+
 ## Not done
 
 - Trend findings: stubbed until the store holds a month of variance.
 - Opening the PR as the bot when the base requires approval: the run stops
   and says so.
-- A per-call budget denial after the run gate passed has no test of its own;
-  it needs another process spending mid-run.
+- The reviewer's final flag set has not been exercised by a real call.
+- One author call can read, as data, a file an earlier finding edited in the
+  same run. Authoring each finding on a pristine base would close that, at
+  the cost of two plugin findings no longer stacking in one run.

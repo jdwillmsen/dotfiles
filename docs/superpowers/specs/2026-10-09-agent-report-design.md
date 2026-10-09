@@ -26,7 +26,7 @@ Usage is in `docs/agent-report.md`.
 
 ## Decisions the brief left open
 
-- **Store field `end`** is exclusive, matching `agent-audit`; `label_date`
+- **The `end` field** is exclusive, matching `agent-audit`; `label_date`
   gives the inclusive last day. The previous window's dates live inside
   `previous`, because the top-level key set is fixed.
 - **Multi-level flags emit one flag per metric and session.** A session above

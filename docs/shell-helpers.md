@@ -125,8 +125,8 @@ Rename mid-session with `/rename`.
 
 ### `~/.config/claude-jira.json`
 
-Machine-local. On a personal machine that is not ephemeral (CI, a dev
-container) `chezmoi apply` generates it from the stream map
+Machine-local. On a personal machine `chezmoi apply` generates it from the
+stream map, except on an ephemeral one such as a CI job or a dev container
 (`stream jira-config --write`) and marks it with
 `"generatedFrom": "streams.json"`. A file without that marker was written by
 hand — typically an employer's site on a work machine — and is never

@@ -81,6 +81,10 @@ git -C "$tmp/repos/platform" config stream.owner a/b
 cwd="$tmp/repos/platform" run slug;  expect "jdwlabs/platform" "a stream.owner with a slash is ignored"
 git -C "$tmp/repos/platform" config --unset stream.owner
 
+# GitHub logins are case-insensitive, so the map lookup must be too.
+mkrepo cased https://github.com/JDWLabs/Platform.git
+cwd="$tmp/repos/cased" run key;      expect "JDWLABS" "owner lookup ignores case"
+
 cwd="$tmp" run slug
 [ "$rc" -eq 1 ] && grep -q '^error: ' <<<"$out" || fail "slug outside a repo must be a structured error" "$out"
 
@@ -99,6 +103,7 @@ run
 [ "$rc" -eq 0 ] || fail "bare stream should exit 0" "$out"
 grep -q '^streams\[3\]{stream,jira,overrides}:' <<<"$out" || fail "bare stream should list the three streams" "$out"
 grep -q 'jdwillmsen,JDW,career=CAREER' <<<"$out" || fail "bare stream should show overrides" "$out"
+grep -q '^  jdwlabs,JDWLABS,none$' <<<"$out" || fail "a stream with no overrides should say none" "$out"
 grep -q '^help\[' <<<"$out" || fail "bare stream should offer next steps" "$out"
 cwd="$tmp/repos/gameops" run
 grep -q '^here: jdwillmsen/gameops' <<<"$out" && grep -q '^here_jira: JDW' <<<"$out" \
@@ -156,6 +161,7 @@ echo '{"siteBase": "https://work.example.net", "projects": ["ABC"]}' >"$cfg"
 run jira-config --write
 [ "$rc" -eq 0 ] && grep -q '^status: kept' <<<"$out" || fail "a hand-written config must be kept" "$out"
 grep -q 'work.example.net' "$cfg" || fail "a hand-written config was overwritten"
+grep -q 'stream jira-config --write' <<<"$out" || fail "the kept message should name the command that regenerates the file" "$out"
 rm -f "$cfg"
 # Anything unexpected still reaches the caller as a structured error on stdout.
 chmod 500 "$fx/.config"
@@ -180,9 +186,9 @@ def pr(repo, n, title, state, decision="REVIEW_REQUIRED"):
             "commits": {"nodes": [{"commit": {"statusCheckRollup": {"state": state} if state else None}}]}}
 if args[:2] == ["api", "graphql"]:
     owner = re.search(r"open=.*user:(\S+)", " ".join(args)).group(1)
-    nodes = {"jdwlabs": [pr("platform", 7, "feat: a, b", "SUCCESS"), pr("apps", 9, "fix: c", "FAILURE", "APPROVED"),
+    nodes = {"jdwlabs": [pr("platform", 7, "feat: a, b", "SUCCESS"), pr("apps", 9, "1e5", "FAILURE", "APPROVED"),
                          pr("apps", 11, "x" * 90, None)],
-             "jdwillmsen": [pr("gameops", 3, "feat: d", "PENDING")]}.get(owner, [])
+             "jdwillmsen": [pr("gameops", 3, "-lead", "PENDING")]}.get(owner, [])
     mine = [n for n in nodes if n["number"] == 7]
     count = 250 if mode == "many" else len(nodes)
     print(json.dumps({"data": {"open": {"issueCount": count, "nodes": nodes}, "mine": {"nodes": mine}}}))
@@ -205,7 +211,8 @@ run status jdwlabs
 grep -q '^summary: "3 open, 1 awaiting your review, 1 failing"' <<<"$out" || fail "status summary wrong" "$out"
 grep -q '^pull_requests\[3\]{repo,number,checks,review,title}:' <<<"$out" || fail "PR table header wrong" "$out"
 grep -q '^  platform,7,passing,requested,"feat: a, b"$' <<<"$out" || fail "review-requested PR row wrong" "$out"
-grep -q '^  apps,9,failing,approved,' <<<"$out" || fail "failing PR row wrong" "$out"
+# A bare 1e5 or a leading hyphen would be read back as a number or a list item.
+grep -q '^  apps,9,failing,approved,"1e5"$' <<<"$out" || fail "a number-shaped title must be quoted" "$out"
 grep -q '^  apps,11,none,' <<<"$out" || fail "a PR with no checks should read 'none'" "$out"
 grep -q 'x\{57\}…' <<<"$out" || fail "long titles should be clipped" "$out"
 grep -q '^alerts\[1\]{repo,dependabot,code_scanning}:' <<<"$out" && grep -q '^  apps,3,0$' <<<"$out" \
@@ -219,6 +226,9 @@ grep -q 'jdwillmsen' <<<"$out" && fail "status jdwlabs leaked another stream" "$
 run status jdwlabs --no-alerts
 [ "$rc" -eq 0 ] && grep -q '^summary: ' <<<"$out" || fail "--no-alerts should still report PRs" "$out"
 grep -q '^alerts' <<<"$out" && fail "--no-alerts should skip alerts" "$out"
+
+run status jdwillmsen --no-alerts
+grep -q '^  gameops,3,pending,needed,"-lead"$' <<<"$out" || fail "a title starting with a hyphen must be quoted" "$out"
 
 run status dotablaze-tech
 [ "$rc" -eq 0 ] && grep -q '^pull_requests: 0 open' <<<"$out" && grep -q '^alerts: 0 open across 0 repos' <<<"$out" \
@@ -243,6 +253,10 @@ STUB_GH=many run status jdwlabs --no-alerts
 grep -q '^summary: "250 open' <<<"$out" && grep -q '^truncated: "showing 3 of 250' <<<"$out" \
     || fail "more PRs than one page must be counted and flagged" "$out"
 
+# The overview counts reviews and failures from one page; past it they are a floor.
+STUB_GH=many run status --no-alerts
+grep -q '^  jdwlabs,JDWLABS,250,1+,1+$' <<<"$out" || fail "overview counts past one page must be marked as a floor" "$out"
+
 STUB_GH=fail run status jdwlabs
 [ "$rc" -eq 1 ] && grep -q '^error: "GitHub request failed: HTTP 401' <<<"$out" \
     || fail "a gh failure must be a structured error, not empty results" "$out"
@@ -251,6 +265,15 @@ run status nosuch
 run status jdwlabs --bogus
 [ "$rc" -eq 2 ] && grep -q '^error: unknown flag --bogus' <<<"$out" || fail "unknown flags must be rejected" "$out"
 rm "$stubs/gh"
+# With no gh at all the answer is an error, never an empty stream.
+mkdir "$tmp/minbin"
+ln -s "$(command -v python3)" "$tmp/minbin/python3"
+ln -s "$(command -v git)" "$tmp/minbin/git"
+set +e
+out="$(cd "$tmp" && HOME="$fx" PATH="$tmp/minbin" python3 "$stream" status jdwlabs 2>"$tmp/stderr")"
+rc=$?
+set -e
+[ "$rc" -eq 1 ] && grep -q '^error: gh not installed' <<<"$out" || fail "missing gh must be a structured error" "$out"
 
 # ── the chezmoi trigger regenerates the allowlist only on a personal machine ──
 chez_render "$(chez_init personal)" "$trigger" >"$tmp/trigger-personal.sh"
@@ -271,6 +294,19 @@ HOME="$fx" PATH="/usr/bin:/bin" bash "$tmp/trigger-work.sh" >/dev/null
 [ ! -e "$cfg" ] || fail "a work machine must not get the personal Jira allowlist"
 HOME="$fx" PATH="/usr/bin:/bin" bash "$tmp/trigger-personal.sh" >/dev/null
 [ -f "$cfg" ] || fail "trigger did not generate claude-jira.json on a personal machine"
+# Through the trigger too, a hand-written config survives.
+echo '{"siteBase": "https://work.example.net", "projects": ["ABC"]}' >"$cfg"
+HOME="$fx" PATH="/usr/bin:/bin" bash "$tmp/trigger-personal.sh" >/dev/null
+grep -q 'work.example.net' "$cfg" || fail "the trigger overwrote a hand-written config"
+rm -f "$cfg"
+# A CI job or dev container is ephemeral even under the personal role, and the
+# source tree's ignore rules already keep this file off such machines.
+eph="$(mktemp -d "$CHEZ_TMP_ROOT/eph.XXXXXXXX")"
+CI=true chezmoi init --source "$CHEZ_SRC" --destination "$eph/dest" --config "$eph/chezmoi.toml" \
+    --promptString "machineRole=personal" --promptBool "installDevTooling=false" --no-tty >/dev/null
+chez_render "$eph/chezmoi.toml" "$trigger" >"$tmp/trigger-ephemeral.sh"
+HOME="$fx" PATH="/usr/bin:/bin" bash "$tmp/trigger-ephemeral.sh" >/dev/null
+[ ! -e "$cfg" ] || fail "an ephemeral machine must not get the Jira allowlist"
 rm -rf "$fx/.local"
 HOME="$fx" PATH="/usr/bin:/bin" bash "$tmp/trigger-personal.sh" >/dev/null \
     || fail "trigger must exit 0 when stream is not installed yet"

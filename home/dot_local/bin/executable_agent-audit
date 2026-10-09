@@ -37,7 +37,9 @@ WINDOWS = ("weekly", "biweekly", "monthly", "quarterly")
 FLAGS_BOOL = {"--dry-run", "--no-jira", "--no-insights", "--force", "--help", "-h"}
 FLAGS_VALUE = {"--window", "--end"}
 
-JIRA_PROJECT = "JDWLABS"
+# The audit measures this box's agent tooling, which lives in the dotfiles repo,
+# so its reports belong to that repo's stream.
+JIRA_PROJECT = "JDW"
 JIRA_LABEL = "agent-audit"
 EPIC_SUMMARY = "Agent tooling usage audits"
 # Jira Cloud rejects a description over 32767 characters of serialized ADF.

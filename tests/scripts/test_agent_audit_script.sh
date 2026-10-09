@@ -361,7 +361,7 @@ payload="$(field jira_payload)"
 [ -e "$log.kubectl" ] && fail "dry run reached for Jira credentials"
 [ "$(jget "$payload" 'j["fields"]["summary"]')" = "Agent usage audit — weekly ending 2026-09-27" ] || fail "Jira summary"
 [ "$(jget "$payload" 'j["fields"]["labels"], j["fields"]["project"]["key"], j["fields"]["description"]["type"]')" \
-    = "(['agent-audit'], 'JDWLABS', 'doc')" ] || fail "Jira payload fields"
+    = "(['agent-audit'], 'JDW', 'doc')" ] || fail "Jira payload fields"
 [ "$(jget "$payload" '[b["type"] for b in j["fields"]["description"]["content"]][:3]')" = "['heading', 'paragraph', 'heading']" ] \
     || fail "report not converted to ADF"
 jget "$payload" '[b for b in j["fields"]["description"]["content"] if b["type"]=="table"][0]["content"][0]["content"][0]["type"]' \

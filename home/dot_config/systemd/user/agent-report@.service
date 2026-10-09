@@ -4,13 +4,17 @@ Documentation=file://%h/.local/share/chezmoi/docs/agent-report.md
 
 [Service]
 Type=oneshot
+# Collect first so a catch-up run after downtime never reports from stale data;
+# collect is idempotent and takes seconds.
+ExecStartPre=%h/.local/bin/agent-metrics collect
 ExecStart=%h/.local/bin/agent-report --window %i
 # A user manager starts with a bare PATH; claude lives in ~/.local/bin, and gh
 # and git in /usr/bin.
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-# Bounds the whole run: up to ten minutes waiting on the store lock, five of
-# GitHub requests, the insights call (itself capped at 240s) and one push.
-TimeoutStartSec=30min
+# Bounds the whole run: the collect, up to ten minutes waiting on the store
+# lock, up to 45 minutes of GitHub requests for a yearly report (the cap scales
+# with the window), the insights call (itself capped at 240s) and one push.
+TimeoutStartSec=60min
 NoNewPrivileges=yes
 PrivateTmp=yes
 Nice=10

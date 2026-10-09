@@ -3,8 +3,9 @@ Description=Yearly agent metrics report
 
 [Timer]
 # After the 06:30 collect, so the window is already in the store, and after the
-# audit timer whose config inventory the longer reports embed.
-OnCalendar=*-01-01 09:30:00
+# audit timer whose config inventory the longer reports embed (the quarterly
+# audit starts at 09:00 with a 20-minute limit).
+OnCalendar=*-01-01 09:55:00
 Unit=agent-report@yearly.service
 # A box that was off at the scheduled time runs the missed report at next boot
 # instead of silently skipping a window.

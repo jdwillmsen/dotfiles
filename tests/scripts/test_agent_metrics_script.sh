@@ -594,6 +594,34 @@ PY
 [ "$lib_out" = "LIB-OK" ] || fail "loading agent-metrics as a library ran its command line" "$lib_out"
 [ "$(sg rev-parse HEAD)" = "$(git -C "$remote" rev-parse main)" ] || fail "publish did not push"
 
+# publish(dirs=...) leaves other tools' in-progress files alone.
+dirs_out="$(python3 - "$metrics" "$store" <<'PY'
+import subprocess, sys
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+path, store = sys.argv[1], Path(sys.argv[2])
+sys.argv = ["sibling"]
+am = SourceFileLoader("agent_metrics", path).load_module()
+(store / "reports").mkdir(exist_ok=True)
+(store / "reports" / "inflight.json").write_text("{}\n")
+(store / "site").mkdir(exist_ok=True)
+(store / "site" / "index.html").write_text("<p>page</p>\n")
+with am.Lock():
+    out = am.publish("site: only", dirs=("site",))
+assert out == {"committed": True, "pushed": True}, out
+files = subprocess.run(["git", "-C", str(store), "show", "--name-only", "--format=", "HEAD"], capture_output=True, text=True).stdout.split()
+assert files == ["site/index.html"], files
+status = subprocess.run(["git", "-C", str(store), "status", "--porcelain"], capture_output=True, text=True).stdout
+assert "reports/inflight.json" in status, status
+with am.Lock():
+    assert am.publish("site: nothing more", dirs=("site",)) == {"committed": False, "pushed": "nothing to push"}
+with am.Lock():
+    assert am.publish("report: rest")["committed"] is True
+print("DIRS-OK")
+PY
+)" || fail "publish(dirs=...) staged more than it was given" "$dirs_out"
+[ "$dirs_out" = "DIRS-OK" ] || fail "publish(dirs=...) test did not finish" "$dirs_out"
+
 # ── Units: one daily collect ──
 svc="$units/agent-metrics-collect.service"
 timer="$units/agent-metrics-collect.timer"

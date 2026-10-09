@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily agent audit proposal
+
+[Timer]
+# After the 07:00 daily report. Takes critical findings only, and may add them
+# to an audit PR that is already open.
+OnCalendar=*-*-* 07:40:00
+Unit=agent-propose@daily.service
+# A box that was off at the scheduled time proposes at next boot instead of
+# silently skipping a window.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

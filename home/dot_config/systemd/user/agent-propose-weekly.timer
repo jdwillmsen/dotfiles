@@ -1,0 +1,13 @@
+[Unit]
+Description=Weekly agent audit proposal
+
+[Timer]
+# After the 08:40 weekly report and the audit whose inventory it embeds.
+OnCalendar=Mon *-*-* 10:00:00
+Unit=agent-propose@weekly.service
+# A box that was off at the scheduled time proposes at next boot instead of
+# silently skipping a window.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -67,6 +67,9 @@ for the personal account, name its active repos instead:
 - **All streams** dashboard: every project side by side, for the admin view,
   with open alerts from `OPS` in their own panel.
 
+Cross-stream dependencies are issue links (`Blocks`, `Relates`). An Epic lives
+in exactly one project.
+
 ## Alerts — `OPS`
 
 Alert tickets are operational events, not planned work, so they belong to no
@@ -79,6 +82,3 @@ ticket in the owning stream's project, linked to the `OPS` ticket.
 The relay only looks for an alert's existing ticket inside `OPS`, so an alert
 ticket moved to another project is never found again and the next firing
 opens a duplicate.
-
-Cross-stream dependencies are issue links (`Blocks`, `Relates`). An Epic lives
-in exactly one project.

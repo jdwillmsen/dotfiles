@@ -51,8 +51,9 @@ may not exist until the first `gwta` run — its absence is not an error.
 Each owner is a separate business with its own Jira project; the map is
 `~/.config/streams.json`. `stream key` prints the project for the current
 repo and `stream status <owner>` its open PRs and alerts. A fork whose origin
-is upstream is assigned with `git config stream.owner <owner>`. Detail:
-dotfiles `docs/streams.md`.
+is upstream is assigned with `git config stream.owner <owner>`. Alert
+tickets are filed automatically into a separate `OPS` project and belong to
+no stream; never file planned work there. Detail: dotfiles `docs/streams.md`.
 
 ## Ticket-aware Claude launch — `cj`
 

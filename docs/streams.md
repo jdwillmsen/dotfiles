@@ -61,9 +61,24 @@ for the personal account, name its active repos instead:
 
 ## Jira views
 
-- Each stream has its own board in its own project.
+- Each stream has its own board in its own project, all with the same columns:
+  Backlog, Ready, In Progress, Review, Done. `CAREER` keeps Jira's defaults.
 - **Personal stream** filter: `project in (JDW, CAREER)`.
-- **All streams** dashboard: every project side by side, for the admin view.
+- **All streams** dashboard: every project side by side, for the admin view,
+  with open alerts from `OPS` in their own panel.
+
+## Alerts — `OPS`
+
+Alert tickets are operational events, not planned work, so they belong to no
+stream. `ai-sre-relay` files every critical or warning alert as a Task in the
+`OPS` project (its `JIRA_PROJECT` setting in `jdwlabs/platform`), comments on
+the same ticket when the alert repeats, and closes it after the alert
+resolves. Nothing else is filed there: work that an alert leads to is a
+ticket in the owning stream's project, linked to the `OPS` ticket.
+
+The relay only looks for an alert's existing ticket inside `OPS`, so an alert
+ticket moved to another project is never found again and the next firing
+opens a duplicate.
 
 Cross-stream dependencies are issue links (`Blocks`, `Relates`). An Epic lives
 in exactly one project.

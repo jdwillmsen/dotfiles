@@ -1,0 +1,637 @@
+#!/usr/bin/env python3
+"""agent-trends — one static page of the metrics store's trends.
+
+Reads sessions, quota readings and stored reports from the store and writes
+`site/index.html` into it: inline CSS and SVG, no external request of any
+kind. Dollar figures are list-price estimates, not a bill. Agent-facing:
+stdout is TOON, diagnostics go to stderr.
+"""
+import argparse
+import datetime as dt
+import html
+import json
+import math
+import re
+import sys
+import tempfile
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+
+VERSION = "1.0.0"
+
+if __name__ == "__main__" and len(sys.argv) == 2 and sys.argv[1] in ("-v", "-V", "--version"):
+    print(VERSION)
+    sys.exit(0)
+
+_here = Path(__file__).resolve().parent
+am = SourceFileLoader("agent_metrics", str(next(p for p in (_here / "agent-metrics", _here / "executable_agent-metrics") if p.exists()))).load_module()
+
+USAGE_SHORT = "agent-trends [build [--days N] [--dry-run] [--out DIR]] [--help]"
+DAY = 86400
+DEFAULT_DAYS = 90
+FAMILIES = ("opus", "sonnet", "haiku", "other")
+POPULATIONS = ("interactive", "scripted")
+REPORT_NAME = re.compile(r"(\d{4}-\d{2}-\d{2})-(daily|weekly|biweekly|monthly|quarterly|yearly)\.json")
+MAX_FLAG_ROWS = 30
+TOP_N = 8
+ID_SHOW = 64
+
+
+def usage_error(msg, help_line=None):
+    am.die(am.EXIT_USAGE, msg, help_line or USAGE_SHORT)
+
+
+def esc(x):
+    return html.escape(str(x), quote=True)
+
+
+# ── Reading the store ────────────────────────────────────────────────────────
+
+def unreadable(path, why):
+    am.die(am.EXIT_USAGE, f"{am.tilde(path)} cannot be read: {why}",
+           "Fix or remove the file; a page built around it would show wrong numbers")
+
+
+def load_json_lines(path):
+    """Every line of a JSONL file as an object. Unlike the collector's lenient
+    reader, a bad line fails the build: a dropped line is a silent undercount."""
+    out = []
+    try:
+        lines = path.read_text().splitlines()
+    except (OSError, UnicodeDecodeError) as e:
+        unreadable(path, getattr(e, "strerror", None) or "not text")
+    for n, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            unreadable(path, f"line {n} is not JSON")
+        if not isinstance(d, dict):
+            unreadable(path, f"line {n} is not an object")
+        out.append(d)
+    return out
+
+
+def month_files(kind, lo_month):
+    d = am.STORE / kind
+    return sorted(p for p in d.glob("*.jsonl") if p.stem >= lo_month) if d.is_dir() else []
+
+
+def amount(d, key, path, default=0.0):
+    v = d.get(key)
+    if v is None:
+        return default
+    if not am.is_amount(v):
+        unreadable(path, f"{key} is {v!r}, not a non-negative number")
+    return float(v)
+
+
+def family(model_id):
+    m = str(model_id).lower()
+    return next((f for f in FAMILIES[:-1] if f in m), "other")
+
+
+def load_sessions(lo_month):
+    sessions = []
+    for path in month_files("sessions", lo_month):
+        for sid, r in am.read_month(path).items():
+            ts = am.parse_ts(r["started_at"])
+            if ts is None:
+                unreadable(path, f"session {sid} has started_at {r['started_at']!r}")
+            models = []
+            for part in ("main", "subagent"):
+                group = r.get("models", {}).get(part, {}) if isinstance(r.get("models"), dict) else {}
+                if not isinstance(group, dict):
+                    unreadable(path, f"session {sid} has malformed models")
+                for mid, u in group.items():
+                    if not isinstance(u, dict):
+                        unreadable(path, f"session {sid} has malformed usage for {mid}")
+                    models.append({"id": str(mid), "family": family(mid),
+                                   "cost": amount(u, "cost_usd", path),
+                                   "input": amount(u, "input", path), "cache_read": amount(u, "cache_read", path),
+                                   "cw": amount(u, "cache_write_5m", path) + amount(u, "cache_write_1h", path)})
+            links = r.get("pr_links") if isinstance(r.get("pr_links"), list) else []
+            prs = {(str(x.get("repo")), x.get("number")) for x in links if isinstance(x, dict) and x.get("number") is not None}
+            pop = r.get("population")
+            sessions.append({"ts": ts, "date": dt.datetime.fromtimestamp(ts, dt.timezone.utc).date(),
+                             "pop": pop if pop in POPULATIONS else "scripted",
+                             "cost": amount(r, "cost_usd", path), "models": models, "prs": prs,
+                             "repo": r.get("repo") if isinstance(r.get("repo"), str) else None,
+                             "pipeline": r.get("pipeline") if isinstance(r.get("pipeline"), str) else None})
+    return sessions
+
+
+def load_quota(lo_month):
+    readings = []
+    for path in month_files("quota", lo_month):
+        for r in load_json_lines(path):
+            ts = am.parse_ts(r.get("hour"))
+            if ts is None:
+                unreadable(path, f"reading has hour {r.get('hour')!r}")
+            readings.append({"ts": ts, "five": r.get("five_hour_pct") if am.is_amount(r.get("five_hour_pct")) else None,
+                             "seven": r.get("seven_day_pct") if am.is_amount(r.get("seven_day_pct")) else None})
+    return readings
+
+
+def load_reports():
+    reports = []
+    d = am.STORE / "reports"
+    for path in sorted(d.glob("*.json")) if d.is_dir() else []:
+        m = REPORT_NAME.fullmatch(path.name)
+        if not m:
+            continue
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError, UnicodeDecodeError) as e:
+            unreadable(path, getattr(e, "strerror", None) or "not valid JSON")
+        if not isinstance(data, dict):
+            unreadable(path, "not a JSON object")
+        reports.append({"date": m.group(1), "window": m.group(2), "data": data})
+    return reports
+
+
+# ── Numbers ──────────────────────────────────────────────────────────────────
+
+def money(v):
+    return f"${v:,.2f}"
+
+
+def pct(v):
+    return f"{v * 100:.1f}%"
+
+
+def plain(v):
+    return ("%.2f" % v).rstrip("0").rstrip(".")
+
+
+def number(v):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) else None
+
+
+def change(cur, prev):
+    if cur is None or prev is None or prev == 0:
+        return "no prior figure"
+    d = (cur - prev) / prev * 100
+    return f"{'▲' if d >= 0 else '▼'} {abs(d):.0f}% vs the 7 days before" if round(d) else "unchanged vs the 7 days before"
+
+
+def tile_change(cur, prev):
+    text = change(cur, prev)
+    if text.startswith(("▲", "▼")):
+        sign = "+" if text.startswith("▲") else "-"
+        return text.replace(text[2:text.index("%") + 1], f"{sign}{text[2:text.index('%') + 1]}", 1)
+    return text
+
+
+def nice_ceiling(v):
+    if v <= 0:
+        return 1.0, 1.0
+    raw = v / 4
+    mag = 10 ** math.floor(math.log10(raw))
+    step = next(m * mag for m in (1, 2, 2.5, 5, 10) if m * mag >= raw)
+    return math.ceil(v / step) * step, step
+
+
+def window_sums(sessions, now_ts):
+    def agg(lo, hi):
+        rows = [s for s in sessions if lo < s["ts"] <= hi]
+        prs = set().union(*[s["prs"] for s in rows]) if rows else set()
+        spend = sum(s["cost"] for s in rows)
+        return {"spend": spend, "sessions": len(rows), "prs": len(prs), "per_pr": spend / len(prs) if prs else None}
+    return agg(now_ts - 7 * DAY, now_ts), agg(now_ts - 14 * DAY, now_ts - 7 * DAY)
+
+
+# ── SVG ──────────────────────────────────────────────────────────────────────
+
+W, H = 720, 240
+ML, MR, MT, MB = 52, 16, 12, 28
+
+
+def thin(labels, limit=8):
+    step = max(1, math.ceil(len(labels) / limit))
+    return {i for i in range(len(labels)) if i % step == 0}
+
+
+def axes(labels, ymax, step, fmt):
+    plot_h = H - MT - MB
+    parts = []
+    t = 0.0
+    while t <= ymax + step / 1000:
+        y = MT + plot_h - t / ymax * plot_h
+        parts.append(f'<line class="grid" x1="{ML}" x2="{W - MR}" y1="{y:.1f}" y2="{y:.1f}"/>'
+                     f'<text class="tick" x="{ML - 6}" y="{y + 4:.1f}" text-anchor="end">{esc(fmt(t))}</text>')
+        t += step
+    n = len(labels)
+    slot = (W - ML - MR) / max(n, 1)
+    for i in thin(labels):
+        parts.append(f'<text class="tick" x="{ML + slot * (i + .5):.1f}" y="{H - 8}" text-anchor="middle">{esc(labels[i])}</text>')
+    return "".join(parts)
+
+
+def stacked_bars(labels, series, matrix, tips, fmt_axis):
+    """Columns stacked in series order; matrix[s][i] is series s at column i."""
+    totals = [sum(matrix[s][i] for s in range(len(series))) for i in range(len(labels))]
+    ymax, step = nice_ceiling(max(totals))
+    n = len(labels)
+    slot = (W - ML - MR) / n
+    bw = min(24.0, slot - 2)
+    plot_h = H - MT - MB
+    out = [axes(labels, ymax, step, fmt_axis)]
+    for i in range(n):
+        x = ML + slot * i + (slot - bw) / 2
+        y = MT + plot_h
+        top = max((s for s in range(len(series)) if matrix[s][i] > 0), default=None)
+        for s in range(len(series)):
+            v = matrix[s][i]
+            if v <= 0:
+                continue
+            h = v / ymax * plot_h
+            y -= h
+            # The gap is drawn by shortening the segment; skipped when it would erase it.
+            hh = h - 2 if h > 3 else h
+            r = min(2.0, bw / 2) if s == top else 0
+            if r and hh > r:
+                d = f"M{x:.1f},{y + 2 if hh != h else y:.1f}v{hh - r:.1f}h{bw:.1f}v{-(hh - r):.1f}a{r},{r} 0 0 0 {-r},{-r}h{-(bw - 2 * r):.1f}a{r},{r} 0 0 0 {-r},{r}z"
+                out.append(f'<path class="s{series[s][1]}" d="{d}"/>')
+            else:
+                out.append(f'<rect class="s{series[s][1]}" x="{x:.1f}" y="{y + (2 if hh != h else 0):.1f}" width="{bw:.1f}" height="{max(hh, 0.5):.1f}"/>')
+    for i in range(n):
+        out.append(f'<rect class="hit" x="{ML + slot * i:.1f}" y="{MT}" width="{slot:.1f}" height="{plot_h}" data-tip="{esc(tips[i])}"/>')
+    return "".join(out)
+
+
+def line_chart(labels, series, ymax, step, fmt_axis, tips, end_label=None):
+    """series: list of (name, slot, values); None breaks the line."""
+    n = len(labels)
+    slot = (W - ML - MR) / max(n, 1)
+    plot_h = H - MT - MB
+    px = lambda i: ML + slot * (i + .5)
+    py = lambda v: MT + plot_h - v / ymax * plot_h
+    out = [axes(labels, ymax, step, fmt_axis)]
+    for _name, color, values in series:
+        run = []
+        for i, v in enumerate(values + [None]):
+            if v is not None:
+                run.append((i, v))
+                continue
+            if len(run) > 1:
+                pts = " ".join(f"{px(i):.1f},{py(v):.1f}" for i, v in run)
+                out.append(f'<polyline class="l{color}" points="{pts}"/>')
+            run = []
+        marks = [(i, v) for i, v in enumerate(values) if v is not None]
+        shown = marks if n <= 31 else marks[-1:]
+        for i, v in shown:
+            out.append(f'<circle class="d{color}" cx="{px(i):.1f}" cy="{py(v):.1f}" r="4"/>')
+        if end_label and marks:
+            i, v = marks[-1]
+            out.append(f'<text class="endlabel" x="{min(px(i), W - MR - 2):.1f}" y="{py(v) - 9:.1f}" text-anchor="end">{esc(end_label(v))}</text>')
+    for i in range(n):
+        out.append(f'<rect class="hit" x="{ML + slot * i:.1f}" y="{MT}" width="{slot:.1f}" height="{plot_h}" data-tip="{esc(tips[i])}"/>')
+    return "".join(out)
+
+
+def figure(title, sub, series, svg, header, rows):
+    legend = ""
+    if len(series) > 1:
+        legend = '<ul class="legend">' + "".join(f'<li><i class="k s{c}"></i>{esc(n)}</li>' for n, c in series) + "</ul>"
+    table = ("<details><summary>Data table</summary><div class=\"scroll\"><table><thead><tr>"
+             + "".join(f"<th>{esc(h)}</th>" for h in header) + "</tr></thead><tbody>"
+             + "".join("<tr>" + "".join(f"<td>{esc(c)}</td>" for c in r) + "</tr>" for r in rows)
+             + "</tbody></table></div></details>")
+    return (f'<figure class="chart"><figcaption><h3>{esc(title)}</h3><p class="sub">{esc(sub)}</p></figcaption>{legend}'
+            f'<svg viewBox="0 0 {W} {H}" role="img" aria-label="{esc(title)}">{svg}</svg>{table}</figure>')
+
+
+def empty(title, why):
+    return f'<section class="chart"><h3>{esc(title)}</h3><p class="empty">No data. {esc(why)}</p></section>'
+
+
+# ── Page ─────────────────────────────────────────────────────────────────────
+
+LIGHT = {"surface": "#fcfcfb", "page": "#f9f9f7", "ink": "#0b0b0b", "ink2": "#52514e", "muted": "#898781",
+         "grid": "#e1e0d9", "axis": "#c3c2b7", "s1": "#2a78d6", "s2": "#eb6834", "s3": "#1baf7a", "s4": "#eda100",
+         "other": "#898781", "ring": "rgba(11,11,11,0.10)"}
+DARK = {"surface": "#1a1a19", "page": "#0d0d0d", "ink": "#ffffff", "ink2": "#c3c2b7", "muted": "#898781",
+        "grid": "#2c2c2a", "axis": "#383835", "s1": "#3987e5", "s2": "#d95926", "s3": "#199e70", "s4": "#c98500",
+        "other": "#898781", "ring": "rgba(255,255,255,0.10)"}
+
+
+def css():
+    block = lambda pal: "".join(f"--{k}:{v};" for k, v in pal.items())
+    return f"""
+:root{{color-scheme:light;{block(LIGHT)}}}
+@media (prefers-color-scheme: dark){{:root:where(:not([data-theme="light"])){{color-scheme:dark;{block(DARK)}}}}}
+:root[data-theme="dark"]{{color-scheme:dark;{block(DARK)}}}
+*{{box-sizing:border-box}}
+body{{margin:0;background:var(--page);color:var(--ink);font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}}
+main{{max-width:880px;margin:0 auto;padding:24px 16px 48px}}
+h1{{font-size:22px;margin:0 0 4px}} h2{{font-size:16px;margin:32px 0 12px;color:var(--ink)}}
+h3{{font-size:14px;margin:0;font-weight:600}}
+.lede,.sub,footer{{color:var(--ink2);font-size:13px;margin:2px 0 8px}}
+.tiles{{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}}
+.tile,.chart{{background:var(--surface);border:1px solid var(--ring);border-radius:8px;padding:14px 16px;margin:0 0 12px}}
+.tile .label{{color:var(--ink2);font-size:13px}} .tile .value{{font-size:28px;font-weight:600;margin:2px 0}}
+.tile .delta{{color:var(--ink2);font-size:12px}}
+svg{{width:100%;height:auto;display:block}}
+.grid{{stroke:var(--grid);stroke-width:1}} .tick,.endlabel{{fill:var(--muted);font-size:11px}} .endlabel{{fill:var(--ink2)}}
+.s1{{fill:var(--s1);background:var(--s1)}} .s2{{fill:var(--s2);background:var(--s2)}} .s3{{fill:var(--s3);background:var(--s3)}}
+.s4{{fill:var(--s4);background:var(--s4)}} .s5{{fill:var(--other);background:var(--other)}}
+.l1,.l2,.l3,.l4{{fill:none;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}}
+.l1{{stroke:var(--s1)}} .l2{{stroke:var(--s2)}} .l3{{stroke:var(--s3)}} .l4{{stroke:var(--s4)}}
+.d1{{fill:var(--s1)}} .d2{{fill:var(--s2)}} .d3{{fill:var(--s3)}} .d4{{fill:var(--s4)}}
+.d1,.d2,.d3,.d4{{stroke:var(--surface);stroke-width:2}}
+.hit{{fill:transparent}} .hit:hover{{fill:var(--grid);fill-opacity:.5}}
+.legend{{list-style:none;display:flex;flex-wrap:wrap;gap:4px 16px;padding:0;margin:4px 0;font-size:13px;color:var(--ink2)}}
+.k{{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px}}
+.empty{{color:var(--ink2);margin:6px 0 0}}
+details{{margin-top:8px;font-size:13px}} summary{{cursor:pointer;color:var(--ink2)}}
+.scroll{{overflow-x:auto;max-height:320px;overflow-y:auto}}
+table{{border-collapse:collapse;width:100%;font-size:13px}}
+th,td{{text-align:left;padding:4px 10px 4px 0;border-bottom:1px solid var(--grid);font-variant-numeric:tabular-nums;white-space:nowrap}}
+th{{color:var(--ink2);font-weight:600}}
+.cols{{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}}
+#tip{{position:fixed;z-index:9;pointer-events:none;background:var(--surface);color:var(--ink);border:1px solid var(--axis);
+border-radius:6px;padding:6px 8px;font-size:12px;max-width:320px}}
+@media (forced-colors: active){{.s1,.s2,.s3,.s4,.s5{{forced-color-adjust:none}}}}
+"""
+
+
+SCRIPT = """(function(){var t=document.getElementById('tip');
+document.addEventListener('mouseover',function(e){var n=e.target.closest&&e.target.closest('[data-tip]');
+if(!n){t.hidden=true;return;}t.textContent=n.getAttribute('data-tip');t.hidden=false;});
+document.addEventListener('mousemove',function(e){t.style.left=Math.min(e.clientX+12,window.innerWidth-200)+'px';t.style.top=(e.clientY+14)+'px';});
+document.addEventListener('mouseleave',function(){t.hidden=true;});})();"""
+
+
+def tile(label, value, delta):
+    return (f'<div class="tile"><div class="label">{esc(label)}</div><div class="value">{esc(value)}</div>'
+            f'<div class="delta">{esc(delta)}</div></div>')
+
+
+def render(sessions, quota, reports, days, now):
+    now_ts = now.timestamp()
+    today = now.date()
+    day_list = [today - dt.timedelta(days=i) for i in range(days - 1, -1, -1)]
+    monday = today - dt.timedelta(days=today.weekday())
+    weeks = [monday - dt.timedelta(weeks=i) for i in range(math.ceil(days / 7) - 1, -1, -1)]
+    in_days = [s for s in sessions if day_list[0] <= s["date"] <= today]
+    cur, prev = window_sums(sessions, now_ts)
+    sec = []
+
+    # Tiles
+    seven_peak = lambda lo, hi: max((q["seven"] for q in quota if lo < q["ts"] <= hi and q["seven"] is not None), default=None)
+    qc, qp = seven_peak(now_ts - 7 * DAY, now_ts), seven_peak(now_ts - 14 * DAY, now_ts - 7 * DAY)
+    sec.append('<div class="tiles">'
+               + tile("Estimated spend, 7 days", money(cur["spend"]), tile_change(cur["spend"], prev["spend"]) if prev["sessions"] else "no prior figure")
+               + tile("Sessions, 7 days", f"{cur['sessions']}", tile_change(cur["sessions"], prev["sessions"]))
+               + tile("Estimated cost per linked PR", money(cur["per_pr"]) if cur["per_pr"] is not None else "n/a",
+                      f"{cur['prs']} PRs linked" + (f", before: {money(prev['per_pr'])}" if prev["per_pr"] is not None else ""))
+               + tile("Weekly quota peak", f"{qc:g}%" if qc is not None else "n/a",
+                      f"before: {qp:g}%" if qp is not None else "no readings in either week")
+               + "</div>")
+
+    # Daily spend by population
+    sec.append("<h2>Spend</h2>")
+    if not in_days:
+        sec.append(empty("Estimated spend per day", f"No sessions in the last {days} days."))
+    else:
+        by = {(d, p): 0.0 for d in day_list for p in POPULATIONS}
+        for s in in_days:
+            by[(s["date"], s["pop"])] += s["cost"]
+        matrix = [[by[(d, p)] for d in day_list] for p in POPULATIONS]
+        labels = [d.strftime("%b %d") for d in day_list]
+        tips = [f"{d.isoformat()}: " + " · ".join(f"{p} {money(by[(d, p)])}" for p in POPULATIONS)
+                + f" · total {money(sum(by[(d, p)] for p in POPULATIONS))}" for d in day_list]
+        series = [("Interactive", 1), ("Scripted", 2)]
+        rows = [[d.isoformat()] + [money(by[(d, p)]) for p in POPULATIONS] + [money(sum(by[(d, p)] for p in POPULATIONS))] for d in day_list]
+        sec.append(figure("Estimated spend per day", f"Last {days} days, UTC, list-price estimate, by population", series,
+                          stacked_bars(labels, series, matrix, tips, lambda v: "$" + f"{v:,.0f}" if v >= 10 else "$" + plain(v)),
+                          ["Date", "Interactive", "Scripted", "Total"], rows))
+
+    # Weekly spend by model family
+    in_weeks = [s for s in sessions if weeks[0] <= s["date"] <= today]
+    if not any(m["cost"] for s in in_weeks for m in s["models"]):
+        sec.append(empty("Estimated spend per week by model family", "No priced model usage in this range."))
+    else:
+        fam = {(w, f): 0.0 for w in weeks for f in FAMILIES}
+        for s in in_weeks:
+            w = s["date"] - dt.timedelta(days=s["date"].weekday())
+            for m in s["models"]:
+                fam[(w, m["family"])] += m["cost"]
+        matrix = [[fam[(w, f)] for w in weeks] for f in FAMILIES]
+        series = [(f.capitalize(), i + 1) for i, f in enumerate(FAMILIES)]
+        labels = [w.strftime("%b %d") for w in weeks]
+        tips = [f"Week of {w.isoformat()}: " + " · ".join(f"{f} {money(fam[(w, f)])}" for f in FAMILIES) for w in weeks]
+        rows = [[w.isoformat()] + [money(fam[(w, f)]) for f in FAMILIES] for w in weeks]
+        sec.append(figure("Estimated spend per week by model family", "Weeks start on Monday (UTC); the last week is partial", series,
+                          stacked_bars(labels, series, matrix, tips, lambda v: "$" + f"{v:,.0f}"),
+                          ["Week of"] + [f.capitalize() for f in FAMILIES], rows))
+
+    # Cache read share
+    sec.append("<h2>Cache</h2>")
+    share = []
+    for w in weeks:
+        ms = [m for s in in_weeks if s["date"] - dt.timedelta(days=s["date"].weekday()) == w for m in s["models"]]
+        total = sum(m["input"] + m["cache_read"] + m["cw"] for m in ms)
+        share.append(sum(m["cache_read"] for m in ms) / total if total else None)
+    if all(v is None for v in share):
+        sec.append(empty("Cache read share per week", "No token counts in this range."))
+    else:
+        labels = [w.strftime("%b %d") for w in weeks]
+        tips = [f"Week of {w.isoformat()}: " + (pct(v) if v is not None else "no tokens") for w, v in zip(weeks, share)]
+        sec.append(figure("Cache read share per week", "Share of input tokens served from the prompt cache", [("Cache read share", 1)],
+                          line_chart(labels, [("Cache read share", 1, share)], 1.0, 0.25, lambda v: f"{v * 100:.0f}%", tips,
+                                     end_label=pct),
+                          ["Week of", "Cache read share"], [[w.isoformat(), pct(v) if v is not None else "n/a"] for w, v in zip(weeks, share)]))
+
+    # Plan quota
+    sec.append("<h2>Plan quota</h2>")
+    qdays = {}
+    for q in quota:
+        d = dt.datetime.fromtimestamp(q["ts"], dt.timezone.utc).date()
+        if day_list[0] <= d <= today:
+            slot = qdays.setdefault(d, {"five": None, "seven": None})
+            for k in ("five", "seven"):
+                if q[k] is not None:
+                    slot[k] = max(q[k], slot[k] if slot[k] is not None else 0)
+    if not qdays:
+        sec.append(empty("Plan quota used", "No quota readings in this range; they are logged while an interactive session is open."))
+    else:
+        five = [qdays.get(d, {}).get("five") for d in day_list]
+        seven = [qdays.get(d, {}).get("seven") for d in day_list]
+        top = max(v for v in five + seven if v is not None)
+        ymax, step = nice_ceiling(max(top, 10))
+        ymax = min(ymax, 100.0) if top <= 100 else ymax
+        step = min(step, ymax / 2) if ymax < 100 else step
+        labels = [d.strftime("%b %d") for d in day_list]
+        f = lambda v: "no reading" if v is None else f"{v:g}%"
+        tips = [f"{d.isoformat()}: 5-hour peak {f(a)} · 7-day peak {f(b)}" for d, a, b in zip(day_list, five, seven)]
+        series = [("5-hour window", 1), ("7-day window", 2)]
+        sec.append(figure("Plan quota used", "Highest reading each day (UTC), percent of the plan limit", series,
+                          line_chart(labels, [("5-hour window", 1, five), ("7-day window", 2, seven)], ymax, step, lambda v: f"{v:g}%", tips),
+                          ["Date", "5-hour peak", "7-day peak"], [[d.isoformat(), f(a), f(b)] for d, a, b in zip(day_list, five, seven)]))
+
+    # Delivery from weekly reports
+    sec.append("<h2>Delivery</h2>")
+    getters = [("Follow-up fix rate, 7 days", lambda d: d.get("followup_fix_rate_7d")),
+               ("Follow-up fix rate, 14 days", lambda d: d.get("followup_fix_rate_14d")),
+               ("Failed-check share", lambda d: d.get("failed_check_share")),
+               ("No-mistakes first-pass rate", lambda d: (d.get("no_mistakes") or {}).get("first_pass_rate") if isinstance(d.get("no_mistakes"), dict) else None)]
+    weekly = []
+    for r in sorted((r for r in reports if r["window"] == "weekly"), key=lambda r: r["date"]):
+        delivery = r["data"].get("delivery")
+        vals = [number(g(delivery)) if isinstance(delivery, dict) else None for _n, g in getters]
+        if any(v is not None for v in vals):
+            weekly.append((r["date"], vals))
+    if not weekly:
+        sec.append(empty("Delivery rates by week", "No weekly reports carry delivery numbers yet."))
+    else:
+        labels = [d for d, _ in weekly]
+        series = [(n, i + 1) for i, (n, _g) in enumerate(getters)]
+        lines = [(n, i + 1, [v[i] for _d, v in weekly]) for i, (n, _g) in enumerate(getters)]
+        top = max(v for _n, _c, vs in lines for v in vs if v is not None)
+        ymax, step = nice_ceiling(max(top * 1.1, 0.1))
+        tips = [f"Week of {d}: " + " · ".join(f"{n} {pct(v) if v is not None else 'n/a'}" for (n, _c, vs) in lines for v in [vs[i]]) for i, (d, _v) in enumerate(weekly)]
+        sec.append(figure("Delivery rates by week", "From the stored weekly reports; a gap means that report did not carry the figure", series,
+                          line_chart(labels, lines, ymax, step, lambda v: f"{v * 100:.0f}%", tips),
+                          ["Week of"] + [n for n, _c in series], [[d] + [pct(x) if x is not None else "n/a" for x in v] for d, v in weekly]))
+
+    # Flagged days
+    sec.append("<h2>Flagged days</h2>")
+    flagged = []
+    for r in sorted((r for r in reports if r["window"] == "daily"), key=lambda r: r["date"], reverse=True):
+        flags = r["data"].get("flags")
+        for fl in flags if isinstance(flags, list) else []:
+            if isinstance(fl, dict):
+                flagged.append((r["date"], fl))
+    flagged = [x for x in flagged if x[0] >= day_list[0].isoformat()][:MAX_FLAG_ROWS]
+    if not flagged:
+        sec.append(empty("Flagged days", "No daily report in this range raised a flag."))
+    else:
+        show = lambda v: plain(number(v)) if number(v) is not None else "n/a"
+        rows = "".join(f"<tr><td>{esc(d)}</td><td>{esc(str(fl.get('severity'))[:ID_SHOW])}</td><td>{esc(str(fl.get('id'))[:ID_SHOW])}</td>"
+                       f"<td>{esc(str(fl.get('metric'))[:ID_SHOW])}</td><td>{esc(show(fl.get('value')))}</td><td>{esc(show(fl.get('baseline')))}</td></tr>"
+                       for d, fl in flagged)
+        sec.append('<section class="chart"><h3>Flagged days</h3><p class="sub">Most recent first; the full text is in the daily report</p>'
+                   '<div class="scroll"><table><thead><tr><th>Date</th><th>Severity</th><th>Flag</th><th>Metric</th><th>Value</th><th>Baseline</th></tr></thead>'
+                   f"<tbody>{rows}</tbody></table></div></section>")
+
+    # Where the spend went
+    sec.append("<h2>Where the spend went</h2>")
+    recent = [s for s in sessions if now_ts - 30 * DAY < s["ts"] <= now_ts]
+
+    def top_table(title, key, none_label):
+        agg = {}
+        for s in recent:
+            if key == "model":
+                # A session counts once per model it used; its spend is that model's share.
+                per = {}
+                for m in s["models"]:
+                    per[m["id"]] = per.get(m["id"], 0.0) + m["cost"]
+                items = per.items()
+            else:
+                items = [(s[key] or none_label, s["cost"])]
+            for name, cost in items:
+                a = agg.setdefault(name, [0, 0.0])
+                a[0] += 1
+                a[1] += cost
+        ranked = sorted(agg.items(), key=lambda kv: (-kv[1][1], kv[0]))[:TOP_N]
+        body = "".join(f"<tr><td>{esc(str(n)[:ID_SHOW])}</td><td>{c}</td><td>{esc(money(v))}</td></tr>" for n, (c, v) in ranked)
+        return f'<div class="chart"><h3>{esc(title)}</h3><table><thead><tr><th>Name</th><th>Sessions</th><th>Spend</th></tr></thead><tbody>{body}</tbody></table></div>'
+    if not recent:
+        sec.append(empty("Repos and pipelines", "No sessions in the last 30 days."))
+    else:
+        sec.append('<div class="cols">' + top_table("Repos, last 30 days", "repo", "(no repo)") + top_table("Pipelines, last 30 days", "pipeline", "(interactive or other)")
+                   + top_table("Models, last 30 days", "model", "") + "</div>")
+
+    generated = am.iso(now_ts)
+    return ("<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            "<title>Agent metrics trends</title><style>" + css() + "</style></head><body><main>"
+            "<h1>Agent metrics trends</h1>"
+            f'<p class="lede">Last 7 days against the 7 before, then trends over the last {days} days.</p>'
+            + "".join(sec)
+            + f"<footer>Dollar figures are list-price estimates, not a bill; on a subscription they are an index of relative use. Generated {esc(generated)}.</footer>"
+            "</main><div id=\"tip\" hidden></div><script>" + SCRIPT + "</script></body></html>\n"), len(in_days)
+
+
+# ── Commands ─────────────────────────────────────────────────────────────────
+
+def cmd_home(_args):
+    site = am.STORE / "site" / "index.html"
+    out = {"store": am.tilde(am.STORE) if am.store_exists() else f"{am.tilde(am.STORE)} (missing)"}
+    out["page"] = am.tilde(site) if site.exists() else "not built yet"
+    if site.exists():
+        out["built_at"] = am.iso(site.stat().st_mtime)
+    out["help"] = ["agent-trends build --dry-run: render to a temp dir and print the path",
+                   "agent-trends build: write site/index.html in the store, commit and push"]
+    am.emit(out)
+
+
+def write_page(directory, page):
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / "index.html"
+    tmp = directory / "index.html.tmp"
+    tmp.write_text(page, encoding="utf-8")
+    tmp.replace(target)
+    return target
+
+
+def build_page(days):
+    now = am.now()
+    start = now.date() - dt.timedelta(days=max(days, 14) + 7)
+    lo_month = start.strftime("%Y-%m")
+    page, count = render(load_sessions(lo_month), load_quota(lo_month), load_reports(), days, now)
+    return page, count
+
+
+def cmd_build(args):
+    if not 1 <= args.days <= 366:
+        usage_error("--days must be between 1 and 366")
+    if args.out and args.dry_run:
+        usage_error("--out and --dry-run both pick the destination; use one")
+    am.require_store()
+    if args.out or args.dry_run:
+        page, count = build_page(args.days)
+        directory = Path(args.out) if args.out else Path(tempfile.mkdtemp(prefix="agent-trends-"))
+        am.emit({"path": str(write_page(directory, page)), "sessions_charted": count, "published": False})
+        return 0
+    with am.Lock():
+        if am.has_upstream():
+            pulled = am.git("pull", "--ff-only", "--quiet", check=False)
+            if pulled.returncode != 0:
+                am.die(am.EXIT_FAIL, f"git pull failed: {(pulled.stderr or pulled.stdout).strip().splitlines()[-1:]}",
+                       f"Resolve it in {am.tilde(am.STORE)} and re-run")
+        page, count = build_page(args.days)
+        target = write_page(am.STORE / "site", page)
+        result = am.publish(f"site: {am.now().strftime('%Y-%m-%d')}")
+    am.emit({"path": am.tilde(target), "sessions_charted": count, **result})
+    return 1 if "error" in result else 0
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        usage_error(message, f"Run `{self.prog} --help`")
+
+
+def build_parser():
+    p = Parser(prog="agent-trends", description=__doc__.split("\n\n")[0])
+    p.set_defaults(func=cmd_home)
+    p.add_argument("-v", "--version", action="version", version=VERSION)
+    sub = p.add_subparsers(metavar="command", parser_class=Parser)
+    b = sub.add_parser("build", help="render the trends page; publish it unless --out or --dry-run")
+    b.set_defaults(func=cmd_build)
+    b.add_argument("--days", type=int, default=DEFAULT_DAYS, metavar="N", help="chart range in days (default 90)")
+    b.add_argument("--dry-run", action="store_true", help="write to a temp dir, print the path, publish nothing")
+    b.add_argument("--out", metavar="DIR", help="write DIR/index.html instead of the store; publish nothing")
+    return p
+
+
+def main(argv):
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

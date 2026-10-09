@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily agent metrics trends page
+
+[Timer]
+# After the notification, so the page includes the day's flags.
+OnCalendar=*-*-* 07:30:00
+Unit=agent-trends.service
+Persistent=true
+RandomizedDelaySec=2min
+
+[Install]
+WantedBy=timers.target

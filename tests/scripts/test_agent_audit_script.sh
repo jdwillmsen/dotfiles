@@ -395,7 +395,7 @@ class H(http.server.BaseHTTPRequestHandler):
         else:
             n["issue"] += 1
             kind = body["fields"]["issuetype"]["name"]
-            key = "EPIC-1" if kind == "Epic" else f"TASK-{n['issue']}"
+            key = f"{body['fields']['project']['key']}-1" if kind == "Epic" else f"TASK-{n['issue']}"
             issues.append((key, kind, body["fields"]["summary"]))
             resp = {"key": key}
             mode = open(mode_file).read().strip() if os.path.exists(mode_file) else ""
@@ -425,10 +425,10 @@ export JIRA_URL JIRA_USERNAME=user JIRA_API_TOKEN=secret-token
 
 run --window monthly --end 2026-10-01 --no-insights
 [ "$rc" -eq 0 ] || fail "filing against the mock failed" "$out"
-grep -q "^jira: TASK-2 created under EPIC-1 (epic created)" <<<"$out" || fail "epic should be created, task parented" "$out"
-[ "$(cat "$fx/.local/share/agent-audit/epic-key")" = "EPIC-1" ] || fail "epic key not stored in the data dir"
+grep -q "^jira: TASK-2 created under JDW-1 (epic created)" <<<"$out" || fail "epic should be created, task parented" "$out"
+[ "$(cat "$fx/.local/share/agent-audit/epic-key")" = "JDW-1" ] || fail "epic key not stored in the data dir"
 task="$(grep '"Task"' "$tmp/jira.log")"
-grep -q '"parent": {"key": "EPIC-1"}' <<<"$task" || fail "task not parented under the epic" "$task"
+grep -q '"parent": {"key": "JDW-1"}' <<<"$task" || fail "task not parented under the epic" "$task"
 grep -q '"labels": \["agent-audit"\]' <<<"$task" || fail "task missing label" "$task"
 grep -qF "secret-token" <<<"$out$(cat "$tmp/stderr")" && fail "credential leaked to output"
 grep -rqF "secret-token" "$fx/.local/share/agent-audit" && fail "credential persisted to the data dir"
@@ -440,13 +440,13 @@ run --window monthly --end 2026-10-01 --no-insights
     || fail "re-running a filed window should be a no-op" "$out"
 calls_before="$(wc -l <"$tmp/jira.log")"
 run --window monthly --end 2026-10-01 --no-insights --force
-grep -q "^jira: TASK-3 created under EPIC-1$" <<<"$out" || fail "--force should file again with the stored epic" "$out"
+grep -q "^jira: TASK-3 created under JDW-1$" <<<"$out" || fail "--force should file again with the stored epic" "$out"
 [ "$(($(wc -l <"$tmp/jira.log") - calls_before))" -eq 1 ] || fail "stored epic key should skip the epic search"
 
 # A create that times out but landed is found by summary, not filed twice.
 echo slow-once >"$tmp/jira.mode"
 AGENT_AUDIT_JIRA_TIMEOUT=1 run --window monthly --end 2026-09-01 --no-insights
-grep -q "^jira: TASK-4 created under EPIC-1$" <<<"$out" || fail "timed-out create should resolve to the landed issue" "$out"
+grep -q "^jira: TASK-4 created under JDW-1$" <<<"$out" || fail "timed-out create should resolve to the landed issue" "$out"
 [ "$(grep '"path": "/rest/api/3/issue"' "$tmp/jira.log" | grep -c 'monthly ending 2026-08-31"')" -eq 1 ] \
     || fail "timed-out create was retried into a duplicate"
 grep -q 'created >= -15m' "$tmp/jira.log" || fail "dedup search should be limited to recent issues"
@@ -491,6 +491,26 @@ run --window monthly --end 2026-08-01 --no-insights
 [ "$rc" -eq 1 ] && grep -q "^jira: \"failed: Jira POST /rest/api/3/issue returned a non-JSON body" <<<"$out" \
     || fail "non-JSON Jira reply should fail cleanly" "$out"
 grep -q Traceback "$tmp/stderr" && fail "non-JSON Jira reply produced a traceback" "$(cat "$tmp/stderr")"
+
+# A stored epic key from another project is not trusted: the epic is looked
+# up again in the filing project and the stored key replaced.
+epic_file="$fx/.local/share/agent-audit/epic-key"
+echo "JDWLABS-697" >"$epic_file"
+run
+grep -q "JDWLABS-697" <<<"$out" && fail "home view should not show an epic key from another project" "$out"
+run --window weekly --end 2026-09-28 --dry-run --no-insights
+grep -q "JDWLABS-697" <<<"$out" && fail "dry run should not parent under an epic key from another project" "$out"
+[ "$(cat "$epic_file")" = "JDWLABS-697" ] || fail "dry run and home view must not rewrite the stored epic key"
+calls_before="$(wc -l <"$tmp/jira.log")"
+run --window monthly --end 2026-10-01 --no-insights --force
+[ "$rc" -eq 0 ] || fail "filing with a stale stored epic key failed" "$out"
+grep -Eq "^jira: TASK-[0-9]+ created under JDW-1$" <<<"$out" || fail "stale stored epic key should resolve to the epic in JDW" "$out"
+[ "$(cat "$epic_file")" = "JDW-1" ] || fail "stale stored epic key was not replaced"
+stale_calls="$(tail -n +"$((calls_before + 1))" "$tmp/jira.log")"
+grep -q 'project = JDW AND issuetype = Epic' <<<"$stale_calls" || fail "epic should be searched for in JDW" "$stale_calls"
+grep -q '"issuetype": {"name": "Epic"}' <<<"$stale_calls" && fail "existing epic was duplicated" "$stale_calls"
+grep '"issuetype": {"name": "Task"}' <<<"$stale_calls" | grep -q '"parent": {"key": "JDW-1"}' \
+    || fail "task not parented under the epic found in JDW" "$stale_calls"
 
 # Lock: a run waiting on a concurrent one re-checks and no-ops once that one filed.
 js3="$fx/.local/share/agent-audit/reports/2026-09-27-weekly.json"

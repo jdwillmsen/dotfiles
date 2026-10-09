@@ -1116,6 +1116,7 @@ func main() {
 
 	var p Payload
 	json.NewDecoder(os.Stdin).Decode(&p) //nolint:errcheck
+	logQuota(p, quotaLogPath(), time.Now())
 
 	cols, _ := strconv.Atoi(os.Getenv("COLUMNS"))
 	verbose := os.Getenv("CLAUDE_STATUS_VERBOSE") == "1"

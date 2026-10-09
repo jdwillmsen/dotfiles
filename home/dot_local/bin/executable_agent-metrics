@@ -54,6 +54,8 @@ OUTPUT_CMDS = (("commits", re.compile(r"\bgit\b[^|;&\n]*\bcommit\b")),
                ("prs_created", re.compile(r"\bgh\s+pr\s+create\b")))
 USAGE_FIELDS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
 
+QUOTA_LOCAL_KEEP_S = 35 * 86400
+QUOTA_WINDOWS = ("five_hour", "seven_day")
 LOCK_WAIT_S = int(os.environ.get("AGENT_METRICS_LOCK_WAIT", "600"))
 
 README = """# agent-metrics store
@@ -537,12 +539,96 @@ class Lock:
         self.fh.close()
 
 
+# ── Quota ────────────────────────────────────────────────────────────────────
+
+def read_jsonl(path):
+    """Parsed object lines of a file; anything else on a line is skipped."""
+    rows = []
+    try:
+        lines = Path(path).read_text(errors="replace").splitlines()
+    except OSError:
+        return rows
+    for line in lines:
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(d, dict):
+            rows.append(d)
+    return rows
+
+
+def local_quota():
+    return [r for r in read_jsonl(STATE / "quota.jsonl") if isinstance(r.get("at"), (int, float))]
+
+
+def rollup_quota(write=True):
+    """Fold finished hours of the status line's quota log into the store and
+    return how many hours were added. The hour in progress waits, so a stored
+    hour never needs rewriting."""
+    readings = local_quota()
+    current_hour = int(now().timestamp()) // 3600
+    hours = {}
+    for r in readings:
+        h = int(r["at"]) // 3600
+        if h >= current_hour:
+            continue
+        agg = hours.setdefault(h, {"hour": iso(h * 3600), "readings": 0})
+        agg["readings"] += 1
+        for w in QUOTA_WINDOWS:
+            pct = r.get(f"{w}_pct")
+            if isinstance(pct, (int, float)) and pct >= agg.get(f"{w}_pct", -1):
+                agg[f"{w}_pct"], agg[f"{w}_resets_at"] = pct, r.get(f"{w}_resets_at")
+    added = 0
+    by_file = {}
+    for agg in hours.values():
+        by_file.setdefault(month_file("quota", agg["hour"]), []).append(agg)
+    for path, new in by_file.items():
+        have = {r.get("hour"): r for r in read_jsonl(path)}
+        fresh = [a for a in new if a["hour"] not in have]
+        added += len(fresh)
+        if fresh and write:
+            have.update((a["hour"], a) for a in fresh)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("".join(json.dumps(have[h], sort_keys=True, separators=(",", ":")) + "\n"
+                                    for h in sorted(have)))
+    cutoff = now().timestamp() - QUOTA_LOCAL_KEEP_S
+    # Rewriting races the status line's appends, so only do it when there is
+    # something to drop; at worst one reading in a month is lost.
+    if write and any(r["at"] < cutoff for r in readings):
+        tmp = STATE / "quota.jsonl.tmp"
+        tmp.write_text("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in readings if r["at"] >= cutoff))
+        os.replace(tmp, STATE / "quota.jsonl")
+    return added
+
+
+def latest_quota():
+    """The newest reading, from the local log or, failing that, the store."""
+    readings = local_quota()
+    if store_exists():
+        files = sorted((STORE / "quota").glob("*.jsonl"))
+        for r in read_jsonl(files[-1]) if files else []:
+            at = parse_ts(r.get("hour"))
+            if at is not None:
+                readings.append({**r, "at": at})
+    return max(readings, key=lambda r: r["at"]) if readings else None
+
+
+def quota_view():
+    q = latest_quota()
+    if not q:
+        return "no readings yet (logged by the status line during interactive sessions)"
+    age_h = max(0, now().timestamp() - q["at"]) / 3600
+    return {"seven_day_pct": q.get("seven_day_pct"), "five_hour_pct": q.get("five_hour_pct"),
+            "age_hours": round(age_h, 1)}
+
+
 # ── Commands ─────────────────────────────────────────────────────────────────
 
 def cmd_home(_args):
     out = {"bin": tilde(Path(sys.argv[0]).resolve()),
            "description": "Per-session agent metrics store: collect rows from transcripts, log plan quota, gate model spend",
-           "store": tilde(STORE)}
+           "store": tilde(STORE), "quota": quota_view()}
     if store_exists():
         last = git("log", "-1", "--format=%cs %s", check=False).stdout.strip()
         out["last_commit"] = last or "none yet"
@@ -610,7 +696,8 @@ def cmd_collect(args):
                 rows.append(row)
         written, unchanged = upsert(rows, write=not args.dry_run)
         out = {"files_scanned": len(sessions), "sessions_written": written, "sessions_unchanged": unchanged,
-               "files_skipped": skipped, "dry_run": bool(args.dry_run)}
+               "files_skipped": skipped, "quota_hours_added": rollup_quota(write=not args.dry_run),
+               "dry_run": bool(args.dry_run)}
         if args.dry_run:
             emit(out)
             return 0

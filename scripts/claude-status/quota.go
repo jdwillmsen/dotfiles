@@ -20,8 +20,14 @@ type quotaReading struct {
 }
 
 func quotaLogPath() string {
+	return stateFile("quota.jsonl")
+}
+
+// stateFile resolves a file in the metrics state directory, or "" when no
+// home can be found.
+func stateFile(name string) string {
 	if dir := os.Getenv("AGENT_METRICS_STATE"); dir != "" {
-		return filepath.Join(dir, "quota.jsonl")
+		return filepath.Join(dir, name)
 	}
 	base := os.Getenv("XDG_STATE_HOME")
 	if base == "" {
@@ -31,7 +37,7 @@ func quotaLogPath() string {
 		}
 		base = filepath.Join(home, ".local", "state")
 	}
-	return filepath.Join(base, "agent-metrics", "quota.jsonl")
+	return filepath.Join(base, "agent-metrics", name)
 }
 
 // logQuota appends the plan-quota percentages to a local log that the

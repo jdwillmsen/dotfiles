@@ -343,4 +343,30 @@ AGENT_METRICS_LOCK_WAIT=1 run 1 collect --since 30
 grep -q "another" "$out" || fail "a held lock is not reported" "$(cat "$out")"
 wait
 
+# ── Quota roll-up ──
+qlog="$AGENT_METRICS_STATE/quota.jsonl"
+reading() { printf '{"at":%s,"five_hour_pct":%s,"five_hour_resets_at":1,"seven_day_pct":%s,"seven_day_resets_at":%s}\n' "$(date -u -d "$1" +%s)" "$2" "$3" "$(date -u -d "2026-10-12T00:00:00Z" +%s)"; }
+{
+    reading "2026-08-30T08:10:00Z" 5 20
+    reading "2026-10-09T09:05:00Z" 10 40
+    reading "2026-10-09T09:25:00Z" 30 45
+    echo "not a reading"
+    reading "2026-10-09T09:45:00Z" 20 42
+    reading "2026-10-09T10:15:00Z" 25 50
+    reading "2026-10-09T12:00:00Z" 35 55
+} >"$qlog"
+run 0 collect --since 1
+want quota_hours_added 3 "two finished hours this month and one old one"
+[ "$(wc -l <"$store/quota/2026-10.jsonl")" = 2 ] || fail "the hour still in progress was rolled up, or a finished one was not" "$(cat "$store/quota/2026-10.jsonl")"
+grep -q '"five_hour_pct":30,.*"hour":"2026-10-09T09:00:00Z","readings":3,.*"seven_day_pct":45,' "$store/quota/2026-10.jsonl" \
+    || fail "an hour does not keep its highest reading per window" "$(cat "$store/quota/2026-10.jsonl")"
+[ -f "$store/quota/2026-08.jsonl" ] || fail "an old reading was dropped without being rolled up"
+if grep -q "$(date -u -d "2026-08-30T08:10:00Z" +%s)" "$qlog"; then fail "a reading older than 35 days stayed in the local log"; fi
+grep -q "$(date -u -d "2026-10-09T12:00:00Z" +%s)" "$qlog" || fail "a recent reading was pruned from the local log"
+[ "$(sg rev-parse HEAD)" = "$(git -C "$remote" rev-parse main)" ] || fail "the quota roll-up was not pushed"
+run 0 collect --since 1
+want quota_hours_added 0 "re-run"
+run 0
+grep -q "seven_day_pct: 55" "$out" || fail "the home view does not show the latest weekly quota" "$(cat "$out")"
+
 echo "test_agent_metrics_script: OK"

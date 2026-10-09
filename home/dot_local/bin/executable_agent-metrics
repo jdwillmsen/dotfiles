@@ -8,11 +8,13 @@ Agent-facing: stdout is TOON, diagnostics go to stderr.
 """
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 VERSION = "1.0.0"
@@ -36,6 +38,19 @@ CONFIG = Path(os.environ.get("AGENT_METRICS_CONFIG",
 # Children get the environment minus anything credential-shaped; git reaches
 # its remote through the ssh agent or a credential helper, not through these.
 CRED_ENV = re.compile(r"TOKEN|SECRET|PASSW|API_KEY|PRIVATE_KEY|CREDENTIAL", re.I)
+
+SCHEMA = 1
+# A gap longer than this between two records is time nobody was working.
+IDLE_GAP_S = 300
+ID_MAX = 64
+ID_UNSAFE = re.compile(r"[^A-Za-z0-9:_.@/-]")
+TIMED_TYPES = ("user", "assistant", "system", "attachment")
+INTERRUPTED = "[Request interrupted by user"
+# Matched against Bash commands to count outcomes; the command is never stored.
+OUTPUT_CMDS = (("commits", re.compile(r"\bgit\b[^|;&\n]*\bcommit\b")),
+               ("pushes", re.compile(r"\bgit\b[^|;&\n]*\bpush\b")),
+               ("prs_created", re.compile(r"\bgh\s+pr\s+create\b")))
+USAGE_FIELDS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
 
 USAGE_SHORT = "agent-metrics [init | collect | budget [check|record]] [--help]"
 
@@ -164,6 +179,243 @@ def cost_of(model, u):
             + u["cache_write_5m"] * i * p["w5m"] + u["cache_write_1h"] * i * p["w1h"]) / 1e6
 
 
+# ── Session rows ─────────────────────────────────────────────────────────────
+
+def clean_id(s):
+    """Identifier fields are the only strings a row stores, so a prompt
+    fragment that ends up in one must not survive verbatim."""
+    return ID_UNSAFE.sub("_", str(s))[:ID_MAX]
+
+
+def parse_ts(s):
+    try:
+        return dt.datetime.fromisoformat(str(s).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def iso(t):
+    return dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def subagent_files(main_path):
+    d = Path(main_path).with_suffix("") / "subagents"
+    return sorted(str(p) for p in d.rglob("*.jsonl")) if d.is_dir() else []
+
+
+def find_sessions(since_days):
+    """Main transcripts where the file or any of its subagent files changed
+    inside the window; a subagent can finish after its parent's last write."""
+    cutoff = now().timestamp() - since_days * 86400
+    found = []
+    for main in sorted((CLAUDE_DIR / "projects").glob("*/*.jsonl")):
+        subs = subagent_files(main)
+        try:
+            newest = max(os.path.getmtime(p) for p in [main, *subs])
+        except OSError:
+            continue
+        if newest >= cutoff:
+            found.append((str(main), subs))
+    return found
+
+
+def read_usage(u):
+    u = u if isinstance(u, dict) else {}
+    n = lambda k: u.get(k) or 0
+    split = u.get("cache_creation") if isinstance(u.get("cache_creation"), dict) else None
+    if split:
+        w5, w1 = split.get("ephemeral_5m_input_tokens") or 0, split.get("ephemeral_1h_input_tokens") or 0
+    else:
+        w5, w1 = n("cache_creation_input_tokens"), 0
+    return {"input": n("input_tokens"), "output": n("output_tokens"), "cache_read": n("cache_read_input_tokens"),
+            "cache_write_5m": w5, "cache_write_1h": w1}
+
+
+def text_of(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list) and content and all(isinstance(b, dict) and b.get("type") == "text" for b in content):
+        return " ".join(b.get("text") or "" for b in content)
+    return None
+
+
+def locate(cwd):
+    """(repo, pipeline) from a working directory, by this box's layout."""
+    try:
+        path = Path(cwd)
+    except TypeError:
+        return None, None
+    pipeline = None
+    if path.is_relative_to(HOME / ".no-mistakes"):
+        pipeline = "no-mistakes"
+    elif any(part.startswith("agent-audit-insights-") for part in path.parts):
+        pipeline = "agent-audit"
+    for root in (HOME / "projects", HOME / "worktrees"):
+        if path.is_relative_to(root):
+            parts = path.relative_to(root).parts
+            if len(parts) >= 2:
+                return clean_id(f"{parts[0]}/{parts[1]}"), pipeline
+    return None, pipeline
+
+
+def build_row(main_path, sub_paths):
+    """One schema-1 row for a main session and its subagents, or None when
+    the files hold no timestamped record."""
+    ident = {}
+    times, prompt_times = [], set()
+    msgs, order = {}, []           # message id -> usage; main-session ids in first-seen order
+    counts = Counter()
+    tools, skills, sub_types = Counter(), Counter(), Counter()
+    pending, seen_tools = {}, set()
+    pr_links = []
+
+    for path, is_sub in [(main_path, False)] + [(p, True) for p in sub_paths]:
+        try:
+            fh = open(path, errors="replace")
+        except OSError:
+            continue
+        with fh:
+            for line in fh:
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    counts["bad_lines"] += 1
+                    continue
+                if not isinstance(d, dict):
+                    continue
+                t = d.get("type")
+                ts = parse_ts(d["timestamp"]) if d.get("timestamp") else None
+                if not is_sub and t in TIMED_TYPES:
+                    if ts is not None:
+                        times.append(ts)
+                    for key, field in (("session_id", "sessionId"), ("entrypoint", "entrypoint"),
+                                       ("cli_version", "version"), ("cwd", "cwd")):
+                        if key not in ident and d.get(field):
+                            ident[key] = d[field]
+                m = d.get("message") if isinstance(d.get("message"), dict) else {}
+                content = m.get("content")
+                if t == "assistant":
+                    if d.get("isApiErrorMessage"):
+                        counts["api_errors"] += 1
+                        if d.get("apiErrorStatus") == 429 or d.get("error") == "rate_limit":
+                            counts["rate_limits"] += 1
+                    model, mid = m.get("model"), m.get("id")
+                    # Error and placeholder turns carry a bracketed pseudo-model.
+                    if model and mid and not str(model).startswith("<"):
+                        u = read_usage(m.get("usage"))
+                        if mid not in msgs:
+                            msgs[mid] = {"model": clean_id(model), "where": "subagent" if is_sub else "main", **u}
+                            if not is_sub:
+                                order.append(mid)
+                        else:
+                            # One message is written as several records with growing usage.
+                            for k in USAGE_FIELDS:
+                                msgs[mid][k] = max(msgs[mid][k], u[k])
+                    for b in content if isinstance(content, list) else []:
+                        if not isinstance(b, dict) or b.get("type") != "tool_use" or b.get("id") in seen_tools:
+                            continue
+                        seen_tools.add(b.get("id"))
+                        name, inp = str(b.get("name") or "unknown"), b.get("input") if isinstance(b.get("input"), dict) else {}
+                        tools[clean_id(name)] += 1
+                        if name == "Skill":
+                            skills[clean_id(inp.get("skill") or "unknown")] += 1
+                        elif name in ("Agent", "Task"):
+                            sub_types[clean_id(inp.get("subagent_type") or "general-purpose")] += 1
+                        elif name == "Bash":
+                            cmd = str(inp.get("command") or "")
+                            kinds = [k for k, rx in OUTPUT_CMDS if rx.search(cmd)]
+                            if kinds:
+                                pending[b.get("id")] = kinds
+                elif t == "user":
+                    if d.get("toolDenialKind"):
+                        counts["denials"] += 1
+                    for b in content if isinstance(content, list) else []:
+                        if isinstance(b, dict) and b.get("type") == "tool_result":
+                            failed = b.get("is_error") is True
+                            counts["tool_errors"] += failed
+                            for k in pending.pop(b.get("tool_use_id"), []):
+                                counts[k] += not failed
+                    text = text_of(content)
+                    if is_sub or text is None or d.get("isMeta") or d.get("isCompactSummary"):
+                        continue
+                    stripped = text.lstrip()
+                    if stripped.startswith(INTERRUPTED):
+                        counts["interrupts"] += 1
+                    elif "<command-name>" in text or not stripped.startswith("<"):
+                        counts["prompts"] += 1
+                        if ts is not None:
+                            prompt_times.add(ts)
+                elif t == "system" and d.get("subtype") == "compact_boundary":
+                    counts["compactions"] += 1
+                elif t == "pr-link" and d.get("prRepository") and isinstance(d.get("prNumber"), int):
+                    link = {"repo": clean_id(d["prRepository"]), "number": d["prNumber"]}
+                    if link not in pr_links:
+                        pr_links.append(link)
+
+    if not times:
+        return None
+    times.sort()
+    active = idle = wait = 0.0
+    for prev, cur in zip(times, times[1:]):
+        gap = cur - prev
+        if gap > IDLE_GAP_S:
+            idle += gap
+            if cur in prompt_times:
+                wait += gap
+        else:
+            active += gap
+
+    models = {"main": {}, "subagent": {}}
+    for u in msgs.values():
+        agg = models[u["where"]].setdefault(u["model"], {"calls": 0, **dict.fromkeys(USAGE_FIELDS, 0)})
+        agg["calls"] += 1
+        for k in USAGE_FIELDS:
+            agg[k] += u[k]
+    total, unpriced, tok = 0.0, set(), Counter()
+    for group in models.values():
+        for model, agg in group.items():
+            cost = cost_of(model, agg)
+            agg["cost_usd"] = None if cost is None else round(cost, 6)
+            if cost is None:
+                unpriced.add(model)
+            else:
+                total += cost
+            for k in USAGE_FIELDS:
+                tok[k] += agg[k]
+    seq = [msgs[mid]["model"] for mid in order]
+    denom = tok["cache_read"] + tok["cache_write_5m"] + tok["cache_write_1h"] + tok["input"]
+    repo, pipeline = locate(ident.get("cwd"))
+    entry = ident.get("entrypoint")
+    mcp = Counter()
+    for name, n in tools.items():
+        if name.startswith("mcp__") and name.count("__") >= 2:
+            mcp[name.split("__")[1]] += n
+
+    return {
+        "schema": SCHEMA,
+        "session_id": clean_id(ident.get("session_id") or Path(main_path).stem),
+        "entrypoint": clean_id(entry) if entry else None,
+        "cli_version": clean_id(ident["cli_version"]) if ident.get("cli_version") else None,
+        "started_at": iso(times[0]), "ended_at": iso(times[-1]),
+        "population": "interactive" if entry == "cli" else "scripted",
+        "pipeline": pipeline, "repo": repo,
+        "cwd_hash": hashlib.sha256(str(ident.get("cwd") or "").encode()).hexdigest()[:12],
+        "wall_s": round(times[-1] - times[0]), "active_s": round(active), "idle_s": round(idle),
+        "wait_human_s": round(wait),
+        "prompts": counts["prompts"], "interrupts": counts["interrupts"],
+        "models": models, "cost_usd": round(total, 6), "unpriced_models": sorted(unpriced),
+        "subagent_runs": len(sub_paths), "subagent_types": dict(sub_types), "skills": dict(skills),
+        "tools": dict(tools), "mcp": dict(mcp),
+        "cache_read_share": round(tok["cache_read"] / denom, 4) if denom else None,
+        "model_switches": sum(1 for a, b in zip(seq, seq[1:]) if a != b),
+        "compactions": counts["compactions"],
+        "tool_errors": counts["tool_errors"], "denials": counts["denials"],
+        "rate_limits": counts["rate_limits"], "api_errors": counts["api_errors"],
+        "commits": counts["commits"], "pushes": counts["pushes"], "prs_created": counts["prs_created"],
+        "pr_links": pr_links, "bad_lines": counts["bad_lines"],
+    }
+
+
 # ── Store ────────────────────────────────────────────────────────────────────
 
 def child_env():
@@ -201,6 +453,11 @@ def cmd_home(_args):
     return 0
 
 
+def cmd_row(args):
+    print(json.dumps(build_row(args.path, subagent_files(args.path)), sort_keys=True))
+    return 0
+
+
 def cmd_budget(_args):
     b = load_config("budget.json")
     emit({"pricing_as_of": pricing()["as_of"], "plan_pct": b.get("plan_pct"), "hard_pct": b.get("hard_pct")})
@@ -227,6 +484,9 @@ def build_parser():
     c.add_argument("--since", type=int, default=3, metavar="DAYS")
     c.add_argument("--dry-run", action="store_true")
     c.add_argument("--no-push", action="store_true")
+    r = sub.add_parser("row", help="print the row one transcript would produce, as JSON")
+    r.add_argument("path")
+    r.set_defaults(func=cmd_row)
     b = sub.add_parser("budget", help="show the budget, or check and record a spend")
     b.set_defaults(func=cmd_budget)
     return p

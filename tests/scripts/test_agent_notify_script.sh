@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016  # backticks in the strings are literal markdown, not substitutions
 # shellcheck disable=SC2015  # `A && B || fail`: fail exits, so it never runs after a true B
 # agent-notify posts to GitHub and runs at every shell start, so the tests
 # run it against a fixture state directory and a stub gh that records its calls.
@@ -37,14 +38,22 @@ echo "$*" >>"$GH_LOG"
 if [ -e "$GH_FAIL" ]; then echo "gh: HTTP 502" >&2; exit 1; fi
 case "$1 $2" in
     "issue list") cat "$GH_LIST" ;;
-    "issue create") echo "https://github.com/acme/metrics/issues/41" ;;
-    "issue comment") cat >"$GH_BODY" ;;
+    "issue create") echo "https://github.com/acme/metrics/issues/$(cat "$GH_CREATE_N" 2>/dev/null || echo 41)" ;;
+    "issue comment")
+        if [ -e "$GH_SLOW" ]; then sleep "$(cat "$GH_SLOW")"; fi
+        if grep -qx "$3" "$GH_COMMENT_FAIL" 2>/dev/null; then echo "gh: issue is locked" >&2; exit 1; fi
+        echo "$*" >>"$GH_COMMENTS"
+        cat >"$GH_BODY" ;;
+    "issue view")
+        if [ -e "$GH_GONE" ]; then echo "GraphQL: Could not resolve to an issue with the number of $3." >&2; exit 1; fi
+        echo "{\"state\":\"$(cat "$GH_VIEW" 2>/dev/null || echo OPEN)\"}" ;;
     "issue pin") [ -e "$GH_NOPIN" ] && exit 1 ;;
 esac
 exit 0
 STUB
 chmod +x "$tmp/bin/gh"
 export GH_LOG="$tmp/gh.log" GH_FAIL="$tmp/gh.fail" GH_LIST="$tmp/gh.list" GH_BODY="$tmp/gh.body" GH_NOPIN="$tmp/gh.nopin"
+export GH_SLOW="$tmp/gh.slow" GH_COMMENT_FAIL="$tmp/gh.commentfail" GH_COMMENTS="$tmp/gh.comments" GH_VIEW="$tmp/gh.view" GH_GONE="$tmp/gh.gone" GH_CREATE_N="$tmp/gh.createn"
 echo '[]' >"$GH_LIST"
 : >"$GH_LOG"
 export PATH="$tmp/bin:$PATH"
@@ -56,6 +65,14 @@ run() {
     shift
     "$notify" "$@" >"$out" 2>"$err" || got=$?
     [ "$got" = "$want" ] || fail "agent-notify $* exited $got, want $want" "$(cat "$out" "$err")"
+}
+issue_mem() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["repo"], d["number"])' "$state/notify-issue"; }
+comments() { if [ -e "$GH_COMMENTS" ]; then wc -l <"$GH_COMMENTS" | tr -d ' '; else echo 0; fi; }
+trun() {  # like run, but a hang is a failure
+    local want="$1" got=0
+    shift
+    timeout 10 "$notify" "$@" >"$out" 2>"$err" || got=$?
+    [ "$got" = "$want" ] || fail "agent-notify $* exited $got, want $want (124 is a hang)" "$(cat "$out" "$err")"
 }
 calls() { wc -l <"$GH_LOG" | tr -d ' '; }
 write_flags() {  # $1 date
@@ -95,7 +112,7 @@ grep -q "^issue list --repo acme/metrics" "$GH_LOG" || fail "send did not look f
 grep -q '^issue create --repo acme/metrics --title Agent metrics: flagged days' "$GH_LOG" || fail "send did not create the tracking issue" "$(cat "$GH_LOG")"
 grep -q '^issue pin 41 --repo acme/metrics' "$GH_LOG" || fail "send did not try to pin the issue" "$(cat "$GH_LOG")"
 grep -q '^issue comment 41 --repo acme/metrics' "$GH_LOG" || fail "send did not comment on the new issue" "$(cat "$GH_LOG")"
-[ "$(cat "$state/notify-issue")" = 41 ] || fail "issue number not remembered"
+[ "$(issue_mem)" = "acme/metrics 41" ] || fail "issue number not remembered with its repo" "$(cat "$state/notify-issue")"
 grep -q "2026-10-08" "$GH_BODY" && grep -q "critical" "$GH_BODY" && grep -q "spend-spike" "$GH_BODY" \
     && grep -q "Spend was 3.1x the baseline" "$GH_BODY" && grep -q "warn" "$GH_BODY" && grep -q "cache-drop" "$GH_BODY" \
     || fail "comment is missing the date or a flag" "$(cat "$GH_BODY")"
@@ -133,13 +150,13 @@ echo '[{"number": 3, "title": "Agent metrics: flagged days (old)"}, {"number": 7
 run 0 send
 grep -q '^issue comment 7 ' "$GH_LOG" || fail "did not reuse the exact-title issue" "$(cat "$GH_LOG")"
 grep -q '^issue create' "$GH_LOG" && fail "created a second tracking issue"
-[ "$(cat "$state/notify-issue")" = 7 ] || fail "found issue not remembered"
+[ "$(issue_mem)" = "acme/metrics 7" ] || fail "found issue not remembered"
 rm -f "$GH_NOPIN"
 echo '[{"number": 3, "title": "Agent metrics: flagged days (old)"}]' >"$GH_LIST"
 rm -f "$state/notify-issue" "$state/notified.json"
 touch "$GH_NOPIN"
 run 0 send
-[ "$(cat "$state/notify-issue")" = 41 ] || fail "a near-match title must not be adopted"
+[ "$(issue_mem)" = "acme/metrics 41" ] || fail "a near-match title must not be adopted"
 rm -f "$GH_NOPIN"
 
 # ── Repo derivation ──
@@ -202,6 +219,187 @@ echo '{"date": "../../x", "flags": [{"id": "a", "severity": "warn", "message": "
 run 2 send
 grep -q "date" "$out" || fail "a date that is not YYYY-MM-DD must be refused" "$(cat "$out")"
 rm -f "$state/flags.json"
+
+
+# ── State files are untrusted: a FIFO or a device never hangs or floods ──
+reset_state() { rm -rf "$state"; mkdir -p "$state"; : >"$GH_LOG"; rm -f "$GH_COMMENTS" "$GH_SLOW" "$GH_FAIL" "$GH_COMMENT_FAIL" "$GH_VIEW" "$GH_GONE" "$GH_CREATE_N"; echo '[]' >"$GH_LIST"; }
+for kind in fifo zero; do
+    reset_state
+    if [ "$kind" = fifo ]; then mkfifo "$state/flags.json"; else ln -s /dev/zero "$state/flags.json"; fi
+    trun 0 shell
+    [ ! -s "$out" ] || fail "shell printed for a $kind flags file" "$(cat "$out")"
+    trun 2 send
+    grep -q "flags.json" "$out" || fail "send does not name a $kind flags file" "$(cat "$out")"
+    trun 2 show
+    rm -f "$state/flags.json"
+    write_flags 2026-10-08
+    for f in acked.json notified.json notify-issue; do
+        rm -f "$state/$f"
+        if [ "$kind" = fifo ]; then mkfifo "$state/$f"; else ln -s /dev/zero "$state/$f"; fi
+    done
+    trun 0 shell
+    trun 0
+    rm -f "$state/acked.json" "$state/notified.json" "$state/notify-issue"
+done
+
+# ── Nothing from the file reaches the terminal, the shell line or the comment ──
+reset_state
+python3 - "$state/flags.json" <<'PY'
+import json, sys
+json.dump({"date": "2026-10-08", "flags": [
+    {"id": "\x1b[31mspoof", "severity": "critical", "metric": "m", "message": "red \x1b]0;title\x07 text \u009b31m end ‮evil⁦  done"},
+    {"id": "ok-id", "severity": "\x1b[2Jwarn", "message": "plain message"}]}, open(sys.argv[1], "w"))
+PY
+run 0 show
+python3 - "$out" <<'PY' || fail "show let a control or format character through" "$(cat "$out")"
+import sys, unicodedata
+text = open(sys.argv[1], encoding="utf-8").read()
+bad = [c for c in text if c != "\n" and unicodedata.category(c)[0] == "C"]
+assert not bad, [hex(ord(c)) for c in bad]
+assert "_invalid" in text and "plain message" in text and "red" in text and "done" in text
+PY
+run 0 send --dry-run
+python3 - "$out" <<'PY' || fail "the comment preview let a control or format character through" "$(cat "$out")"
+import sys, unicodedata
+text = open(sys.argv[1], encoding="utf-8").read()
+bad = [c for c in text if c != "\n" and unicodedata.category(c)[0] == "C"]
+assert not bad, [hex(ord(c)) for c in bad]
+PY
+
+# ── The comment interprets nothing from the file ──
+reset_state
+python3 - "$state/flags.json" <<'PY'
+import json, sys
+json.dump({"date": "2026-10-08", "flags": [
+    {"id": "spend", "severity": "warn", "message": "[click](http://evil.invalid) ![i](http://e.invalid/i.png) <img src=x> #1 owner/repo#2 @bob `tick`"}]},
+    open(sys.argv[1], "w"))
+PY
+run 0 send
+grep -qF '`[click](http://evil.invalid) ![i](http://e.invalid/i.png) <img src=x> #1 owner/repo#2 @bob tick`' "$GH_BODY" || fail "a flag message is not wrapped whole in inline code with backticks stripped" "$(cat "$GH_BODY")"
+grep -qF -- '- `warn` `spend`: ' "$GH_BODY" || fail "severity and id are not in inline code" "$(cat "$GH_BODY")"
+grep -qF 'Daily report: `reports/2026-10-08-daily.json`' "$GH_BODY" || fail "the report location should be a plain path in code" "$(cat "$GH_BODY")"
+if grep -F "blob/main" "$GH_BODY"; then fail "the comment still links to the report"; fi
+
+# ── Repo names are validated ──
+for bad in "https://github.com/acme/r).git" "git@github.com:acme/a b" "https://github.com/-x/y" "https://github.com/acme/.."; do
+    echo "{\"store_remote\": \"$bad\"}" >"$tmp/config/config.json"
+    reset_state
+    write_flags 2026-10-08
+    run 2 send
+    [ "$(calls)" = 0 ] || fail "send called gh for the repo $bad"
+done
+echo '{"store_remote": "git@github.com:acme/metrics.git"}' >"$tmp/config/config.json"
+reset_state
+write_flags 2026-10-08
+AGENT_NOTIFY_REPO='acme/x y' run 2 send
+AGENT_NOTIFY_REPO='acme/metrics' run 0 send --dry-run
+
+# ── Non-ASCII digits are not a date ──
+reset_state
+python3 - "$state/flags.json" <<'PY'
+import json, sys
+json.dump({"date": "٢٠٢٦-١٠-٠٨", "flags": [{"id": "a", "severity": "warn", "message": "m"}]}, open(sys.argv[1], "w"))
+PY
+run 2 send
+trun 0 shell
+[ ! -s "$out" ] || fail "shell showed a file with a non-ASCII date" "$(cat "$out")"
+
+# ── Two sends at once post one comment ──
+reset_state
+write_flags 2026-10-08
+echo 1 >"$GH_SLOW"
+"$notify" send >"$tmp/o1" 2>&1 &
+p1=$!
+"$notify" send >"$tmp/o2" 2>&1 &
+p2=$!
+wait "$p1" "$p2" || fail "a concurrent send failed" "$(cat "$tmp/o1" "$tmp/o2")"
+[ "$(comments)" = 1 ] || fail "concurrent sends posted $(comments) comments" "$(cat "$tmp/o1" "$tmp/o2")"
+
+# ── A timeout may have posted: record first, report loudly, never repost silently ──
+reset_state
+write_flags 2026-10-08
+echo 5 >"$GH_SLOW"
+AGENT_NOTIFY_GH_TIMEOUT=1 run 1 send
+grep -q "may have been posted" "$out" || fail "a timeout is not reported as possibly posted" "$(cat "$out")"
+grep -q "2026-10-08" "$state/notified.json" || fail "a timed-out send must keep the date recorded"
+rm -f "$GH_SLOW"
+run 0 send
+grep -qi "already" "$out" || fail "the run after a timeout should not repost" "$(cat "$out")"
+[ "$(comments)" = 0 ] || fail "reposted after a timeout"
+run 0 send --force
+[ "$(comments)" = 1 ] || fail "--force should post again"
+
+# ── Unwritable state: nothing is posted ──
+reset_state
+write_flags 2026-10-08
+mkdir "$state/notified.json"
+run 1 send
+grep -q "notified.json" "$out" || fail "an unwritable notified.json is not named" "$(cat "$out")"
+[ "$(comments)" = 0 ] || fail "posted although the date could not be recorded"
+rmdir "$state/notified.json"
+
+# ── A closed or deleted tracking issue is replaced once ──
+for mode in closed gone; do
+    reset_state
+    write_flags 2026-10-08
+    echo '{"repo": "acme/metrics", "number": 41}' >"$state/notify-issue"
+    echo 41 >"$GH_COMMENT_FAIL"
+    echo 52 >"$GH_CREATE_N"
+    if [ "$mode" = closed ]; then echo CLOSED >"$GH_VIEW"; else touch "$GH_GONE"; fi
+    run 0 send
+    [ "$(issue_mem)" = "acme/metrics 52" ] || fail "the replacement issue ($mode) was not remembered" "$(cat "$state/notify-issue")"
+    grep -q '^issue comment 52 ' "$GH_COMMENTS" || fail "the comment did not land on the replacement ($mode)" "$(cat "$GH_COMMENTS" "$GH_LOG")"
+    grep -q "2026-10-08" "$state/notified.json" || fail "date not recorded after replacing the issue ($mode)"
+done
+# An open issue that refuses a comment is a real failure, not a reason to open another.
+reset_state
+write_flags 2026-10-08
+echo '{"repo": "acme/metrics", "number": 41}' >"$state/notify-issue"
+echo 41 >"$GH_COMMENT_FAIL"
+run 1 send
+grep -q '^issue create' "$GH_LOG" && fail "created an issue although the remembered one is open"
+if grep -q "2026-10-08" "$state/notified.json" 2>/dev/null; then fail "a definite failure left the date recorded"; fi
+
+# ── A remembered issue belongs to one repository ──
+for mem in '{"repo": "other/place", "number": 9}' '41' '{"number": 9}'; do
+    reset_state
+    write_flags 2026-10-08
+    echo "$mem" >"$state/notify-issue"
+    run 0 send
+    grep -q '^issue list --repo acme/metrics' "$GH_LOG" || fail "a remembered issue for another repo was trusted ($mem)" "$(cat "$GH_LOG")"
+    grep -q '^issue comment 9 ' "$GH_LOG" && fail "commented on another repo's issue number ($mem)"
+    [ "$(issue_mem)" = "acme/metrics 41" ] || fail "memory not rewritten for this repo ($mem)"
+done
+
+# ── Shell hook: terminals only, and quiet once acknowledged ──
+hook="$here/home/dot_config/shell/functions.sh"
+mkdir -p "$tmp/hookbin"
+printf '#!/bin/sh\necho "STUB-CALLED"\n' >"$tmp/hookbin/agent-notify"
+chmod +x "$tmp/hookbin/agent-notify"
+hook_run() {  # $1 tty|pipe -> stdout of a shell sourcing the hook
+    python3 - "$1" "$hook" "$tmp/hookbin" <<'PY'
+import os, pty, subprocess, sys
+mode, hook, binpath = sys.argv[1:]
+env = {**os.environ, "PATH": binpath + ":" + os.environ["PATH"]}
+cmd = ["bash", "-c", f'source "{hook}"']
+if mode == "pipe":
+    sys.stdout.write(subprocess.run(cmd, env=env, capture_output=True, text=True).stdout)
+else:
+    master, slave = pty.openpty()
+    subprocess.run(cmd, env=env, stdout=slave, stderr=subprocess.DEVNULL)
+    os.close(slave)
+    sys.stdout.write(os.read(master, 4096).decode())
+PY
+}
+reset_state
+write_flags 2026-10-08
+[ -z "$(hook_run pipe)" ] || fail "the shell hook wrote to a pipe"
+hook_run tty 2>/dev/null | grep -q STUB-CALLED || fail "the shell hook did not run for a terminal with pending flags"
+touch -d "2 hours ago" "$state/flags.json"
+echo '{"dates": ["2026-10-08"]}' >"$state/acked.json"
+if hook_run tty 2>/dev/null | grep -q STUB-CALLED; then fail "the shell hook started agent-notify for an acknowledged date"; fi
+touch "$state/flags.json"
+hook_run tty 2>/dev/null | grep -q STUB-CALLED || fail "a newer flags file must be announced again"
 
 # ── Wiring: shell start, units, trigger ──
 grep -q "agent-notify shell" "$here/home/dot_config/shell/functions.sh" || fail "shell start does not call agent-notify"

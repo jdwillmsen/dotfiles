@@ -1,0 +1,42 @@
+{
+  "repo_path": "~/.local/share/chezmoi",
+  "repo_slug": "jdwillmsen/dotfiles",
+  "base_branch": "main",
+  "checker_path": "scripts/check-agent-diff",
+  "settings_source": "home/private_dot_claude/modify_settings.json.json.tmpl",
+  "workflow_instruction_file": "home/AGENTS.md",
+  "instruction_sources": {
+    "~/.claude/CLAUDE.md": "home/private_dot_claude/CLAUDE.md",
+    "~/.claude/RTK.md": "home/private_dot_claude/RTK.md",
+    "~/CLAUDE.md": "home/CLAUDE.md",
+    "~/AGENTS.md": "home/AGENTS.md",
+    "~/.codex/AGENTS.md": "home/private_dot_codex/AGENTS.md"
+  },
+  "caps_usd": { "daily": 3.0, "weekly": 5.0, "monthly": 10.0 },
+  "per_finding_usd": 0.5,
+  "review_usd": 3.0,
+  "review_min_usd": 1.0,
+  "max_findings": 4,
+  "max_changed_lines": 60,
+  "max_turns": 12,
+  "call_timeout_s": 300,
+  "test_timeout_s": 600,
+  "author_model": { "id": "claude-sonnet-5-5", "name": "Claude Sonnet 5.5" },
+  "review_model": { "id": "claude-opus-5-5", "name": "Claude Opus 5.5" },
+  "unattributed_share_threshold": 0.5,
+  "rejection_memory_days": 90,
+  "strict_finders": [],
+  "test_globs": ["tests/template/*.sh", "tests/scripts/*.sh"],
+  "protected_paths": [
+    ".devcontainer/*",
+    "renovate.json",
+    "scripts/*",
+    "tests/*",
+    "home/run_*",
+    "home/dot_local/bin/*",
+    "home/dot_config/agent-metrics/*",
+    "home/dot_config/systemd/*",
+    "home/dot_gitconfig*",
+    "home/dot_config/private_git/*"
+  ]
+}

@@ -722,6 +722,15 @@ func renderLinesWithJira(p Payload, git *gitState, cols int, verbose bool, cfg *
 		joinSections(secCtx, secRate, secVer),
 	}
 
+	// The marker rides on an existing line so it never adds one.
+	if badge := flagsBadge(activeFlags, false); badge != "" {
+		if lines[1] != "" {
+			lines[1] = joinSections(lines[1], badge)
+		} else {
+			lines[0] = joinSections(lines[0], badge)
+		}
+	}
+
 	// ── LINE 3 (wide or verbose only — diagnostics, not glanceable) ──────────
 	if showDiag {
 		var cacheParts []string
@@ -860,9 +869,11 @@ func renderCompact(p Payload, git *gitState, cols int, cfg *jiraConfig) []string
 		}
 	}
 	// Token counts are the first thing to go: the bar and percent already say it.
-	usage := fitSections(budget, compactSep, append([]string{ctx + ctxTokens}, rates...)...)
+	// The flags marker goes last: it is the first thing to give way.
+	badge := flagsBadge(activeFlags, true)
+	usage := fitSections(budget, compactSep, append(append([]string{ctx + ctxTokens}, rates...), badge)...)
 	if visibleLen(usage) > budget || strings.Count(usage, compactSep) < len(rates) {
-		usage = fitSections(budget, compactSep, append([]string{ctx}, rates...)...)
+		usage = fitSections(budget, compactSep, append(append([]string{ctx}, rates...), badge)...)
 	}
 	lines = append(lines, usage)
 
@@ -1117,6 +1128,7 @@ func main() {
 	var p Payload
 	json.NewDecoder(os.Stdin).Decode(&p) //nolint:errcheck
 	logQuota(p, quotaLogPath(), time.Now())
+	activeFlags, _ = readFlagsSummary()
 
 	cols, _ := strconv.Atoi(os.Getenv("COLUMNS"))
 	verbose := os.Getenv("CLAUDE_STATUS_VERBOSE") == "1"

@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from contextlib import redirect_stdout
@@ -81,32 +82,52 @@ TRUNCATION_MARKER = "\n[... middle of the conversation omitted ...]\n"
 REDACTED = "[REDACTED]"
 # Conversation text can hold anything the owner ever pasted, so every pattern
 # errs toward over-matching; a lost word costs nothing and a leaked key does.
-CREDENTIALS = [re.compile(p, re.S) for p in (
-    r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)",
-    r"(?<![A-Za-z0-9])(?:gh[pousr]_|github_pat_|sk-|xox[baprs]-)[A-Za-z0-9_-]{16,}",
-    r"(?<![A-Za-z0-9])(?:AKIA|ASIA)[A-Z0-9]{16}",
-    r"(?<![A-Za-z0-9])AIza[A-Za-z0-9_-]{30,}",
-    r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*",
-    r"(?i:\bBearer)[ \t]+[A-Za-z0-9._~+/=-]{8,}",
-    r"""(?i:[\w.-]*(?:password|passwd|pwd|token|secret|api[_-]?key|access[_-]?key)[\w.-]*[ \t]*[=:][ \t]*(?:"[^"\n]*"|'[^'\n]*'|[^\s"',;]+))""",
+# Every pattern below is linear because LONG_RUN has already removed any
+# unbroken run long enough to make a leading character class quadratic, and
+# each quantified group is bounded.
+PEM = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY[A-Z ]*-----.*?(?:-----END [A-Z ]*PRIVATE KEY[A-Z ]*-----|\Z)", re.S)
+LONG_RUN = re.compile(r"[A-Za-z0-9_+/=.\-]{120,}")
+_VALUE = r"""(?:[|>][-+]?\d?[ \t]*\n(?:[ \t]+[^\n]*\n?|\n){0,200}|"[^"]{0,2000}"|'[^']{0,2000}'|[^\n]*)"""
+_CLI_VALUE = r"""(?:"[^"]{0,2000}"|'[^']{0,2000}'|\S+)"""
+CREDENTIALS = [re.compile(p) for p in (
+    r"(?:gh[pousr]_|github_pat_|sk_live_|sk_test_|rk_live_|pk_live_|glpat-|tskey-|xox[baprs]-|xapp-|ya29\.)[A-Za-z0-9_.-]{8,}",
+    r"(?<![A-Za-z0-9])(?:sk-|npm_|hf_)[A-Za-z0-9_.-]{8,}",
+    r"(?:AKIA|ASIA)[A-Z0-9]{16}",
+    r"AIza[A-Za-z0-9_-]{30,}",
+    r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*",
+    r"(?<=://)[^\s/@]{1,200}@",
+    r"(?i:\b(?:proxy-)?authorization)[ \t]*[:=][^\n]*",
+    r"(?i:\b(?:set-)?cookie)[ \t]*:[^\n]*",
+    r"(?i:\bBearer)[ \t]+\S+",
+    r"(?i:\bBasic)[ \t]+[A-Za-z0-9+/=]{8,}",
+    r"(?i:(?<![\w-])(?:-u|--user|--password|--passwd|--pass|--token|--secret|--api-?key|--key|--auth|--credentials?|--cookie)(?:[ \t]+|=)" + _CLI_VALUE + ")",
+    r"(?i:(?<![\w.-])[\w.-]{0,100}?(?:pass(?:w(?:or)?d|phrase)?|pwd|token|secret|key|credential)[\w.-]{0,40}[\"']?[ \t]*(?:=>|:=|[=:])\s{0,40}" + _VALUE + ")",
 )]
 
 DEFAULT_SINCE_DAYS = 7
 DEFAULT_LIMIT = 200
 LABEL_MAX_TOKENS = 48
-REPLY_MAX_BYTES = 1 << 20
+# A label is three short words; anything bigger is not a label.
+REPLY_MAX_BYTES = 64 * 1024
 CONSECUTIVE_TIMEOUTS_TO_STOP = 2
+CONSECUTIVE_REJECTIONS_TO_STOP = 3
+# The unit allows 45 minutes; this leaves room for a lock wait and the final push.
+RUN_BUDGET_S = 1200.0
+FLUSH_EVERY = 20
+# Text beyond this multiple of the budget is dropped before redaction, to bound the work.
+PRE_CUT_FACTOR = 10
 
 VERIFY_MODEL = "opus"
 VERIFY_CAP_USD = 3.00
+MIN_CALL_USD = 0.01
 VERIFY_PER_SESSION_USD = 0.10
 VERIFY_BATCH = 5
 VERIFY_CHARS = 24000
 VERIFY_TIMEOUT_S = int(os.environ.get("AGENT_LABEL_VERIFY_TIMEOUT", "900"))
 VERIFY_DEFAULT_SAMPLE = 30
-# Claude Code authenticates through these; the rest of the credential-shaped
-# environment has no business reaching a model process.
-CLAUDE_AUTH_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+# Claude Code logs in from its credentials file under its own config
+# directory, so nothing else from the environment is needed or passed.
+VERIFIER_ENV = ("PATH", "HOME", "LANG", "LANGUAGE", "TERM", "COLORTERM", "CLAUDE_CONFIG_DIR")
 
 PRIVATE_NETS = [ipaddress.ip_network(n) for n in (
     "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10",
@@ -131,13 +152,13 @@ def private_base_url(url):
     if u.scheme not in ("http", "https") or not host or u.username is not None or u.password is not None:
         return False
     host = host.lower()
-    if host == "localhost" or (host.endswith(".local") and len(host) > len(".local")):
+    if host == "localhost":
         return True
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
-        # A bare hostname resolves wherever DNS says, so only the mDNS suffix
-        # above is trusted by name.
+        # A hostname resolves wherever DNS says, including on this box for
+        # names that look local, so only literals are trusted.
         return False
     if ip.version == 6 and ip.ipv4_mapped:
         ip = ip.ipv4_mapped
@@ -167,13 +188,30 @@ def labeller_config():
 
 # ── Reading the conversation ─────────────────────────────────────────────────
 
-def block_text(content):
+def text_blocks(content):
     if isinstance(content, str):
-        return content
+        return [content]
     if isinstance(content, list):
-        return "\n".join(b["text"] for b in content
-                         if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str))
-    return ""
+        return [b["text"] for b in content if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)]
+    return []
+
+
+COMMAND_NAME = re.compile(r"<command-name>([^<]{0,200})</command-name>")
+COMMAND_ARGS = re.compile(r"<command-args>([^<]{0,2000})</command-args>")
+
+
+def typed_prompt(text):
+    """What a person typed, or "". The harness also writes user text for task
+    notifications (a subagent's whole report), shell output and reminders, all
+    as markup, so only text that does not open a tag counts, as in the metrics
+    row builder. A slash command is kept as its name and arguments: the rest of
+    its record is the expanded skill body."""
+    name = COMMAND_NAME.search(text)
+    if name:
+        args = COMMAND_ARGS.search(text)
+        return " ".join(x.strip() for x in (name.group(1), args.group(1) if args else "") if x.strip())
+    stripped = text.strip()
+    return "" if stripped.startswith("<") else stripped
 
 
 def conversation(path):
@@ -190,13 +228,17 @@ def conversation(path):
         msg = rec.get("message")
         if not isinstance(msg, dict) or msg.get("model") == "<synthetic>":
             continue
-        text = block_text(msg.get("content")).strip()
+        blocks = text_blocks(msg.get("content"))
+        if role == "user":
+            blocks = [typed_prompt(b) for b in blocks]
+        text = "\n".join(b.strip() for b in blocks if b.strip())
         if text:
             parts.append(f"{'User' if role == 'user' else 'Assistant'}: {text}")
     return "\n\n".join(parts)
 
 
 def redact(text):
+    text = LONG_RUN.sub(REDACTED, PEM.sub(REDACTED, text))
     for pattern in CREDENTIALS:
         text = pattern.sub(REDACTED, text)
     return text
@@ -211,15 +253,35 @@ def fit(text, limit):
     return text[:head] + TRUNCATION_MARKER + text[len(text) - (keep - head):], True
 
 
+def bounded_redact(text, limit):
+    """Redact, first dropping the middle of a text far past the budget. The
+    cut falls on whitespace, so it never lands inside a token, and each side
+    is redacted on its own, so an unterminated key block still ends the match
+    at the cut. Returns the text and whether anything was dropped."""
+    pre = PRE_CUT_FACTOR * limit
+    if len(text) <= pre:
+        return redact(text), False
+    half = pre // 2
+    head, tail = text[:half], text[len(text) - half:]
+    i = max(head.rfind(c) for c in " \n\t")
+    head = head[:i] if i >= 0 else ""
+    firsts = [i for i in (tail.find(c) for c in " \n\t") if i >= 0]
+    tail = tail[min(firsts) + 1:] if firsts else ""
+    return redact(head) + TRUNCATION_MARKER + redact(tail), True
+
+
 def prepared_text(path, limit):
     """Redacted, budget-fitted conversation and whether it was cut; None when
-    there is nothing to read. Redaction runs on the whole text first so a cut
+    there is nothing to read. Redaction runs before the final fit so a cut
     can never leave half a credential."""
     text = conversation(path)
     if not text:
         return None
-    text, cut = fit(redact(text), limit)
-    return re.sub(r"</?conversation\b[^>]*>", "[tag]", text), cut
+    text, dropped = bounded_redact(text, limit)
+    text, cut = fit(text, limit)
+    # A lone surrogate from a malformed escape cannot be encoded for a request.
+    text = text.encode("utf-8", "replace").decode("utf-8")
+    return re.sub(r"</?conversation\b[^>]*>", "[tag]", text), cut or dropped
 
 
 def find_transcript(session_id):
@@ -321,7 +383,7 @@ def validated_labels(obj):
 
 
 def ask_labeller(cfg, text):
-    """('ok', labels) | ('invalid', None) | ('timeout', None) | ('down', None)."""
+    """('ok', labels) | ('invalid', None) | ('client', None) | ('timeout', None) | ('down', None)."""
     body = {"model": cfg["model"], "temperature": 0, "max_tokens": LABEL_MAX_TOKENS,
             "messages": [{"role": "system", "content": LABEL_SYSTEM},
                          {"role": "user", "content": f"Classify this conversation.\n\n<conversation>\n{text}\n</conversation>"}],
@@ -332,8 +394,10 @@ def ask_labeller(cfg, text):
     try:
         with OPENER.open(req, timeout=cfg["timeout_s"]) as resp:
             raw = resp.read(REPLY_MAX_BYTES + 1)
-    except urllib.error.HTTPError:
-        return "invalid", None
+    except urllib.error.HTTPError as e:
+        # A request the server will never accept (wrong model, wrong path)
+        # looks different from a server having a bad moment.
+        return ("client" if 400 <= e.code < 500 and e.code not in (408, 429) else "invalid"), None
     except urllib.error.URLError as e:
         return ("timeout" if isinstance(e.reason, TimeoutError) else "down"), None
     except TimeoutError:
@@ -345,7 +409,7 @@ def ask_labeller(cfg, text):
     try:
         content = json.loads(raw)["choices"][0]["message"]["content"]
         labels = validated_labels(json.loads(content))
-    except (ValueError, KeyError, IndexError, TypeError):
+    except (ValueError, KeyError, IndexError, TypeError, RecursionError):
         return "invalid", None
     return ("ok", labels) if labels else ("invalid", None)
 
@@ -365,9 +429,16 @@ def label_one(cfg, text):
     verdict = None
     for _ in range(2):
         verdict, labels = ask_labeller(cfg, text)
-        if verdict in ("ok", "down"):
+        if verdict in ("ok", "down", "client"):
             return verdict, labels
     return verdict, None
+
+
+def env_number(name, default):
+    try:
+        return float(os.environ.get(name, default))
+    except ValueError:
+        return default
 
 
 def cmd_run(args):
@@ -379,10 +450,17 @@ def cmd_run(args):
     cfg = labeller_config()
     candidates = pending_by_cost(args.since)
     stamp = am.iso(am.now().timestamp())
-    new, dist = [], {k: {} for k in FIELDS}
-    counts = {"missing": 0, "empty": 0, "errors": 0, "truncated": 0}
-    unreachable = timeouts = 0
+    deadline = time.monotonic() + env_number("AGENT_LABEL_RUN_BUDGET", RUN_BUDGET_S)
+    flush_every = max(1, int(env_number("AGENT_LABEL_FLUSH_EVERY", FLUSH_EVERY)))
+    new, unsaved, dist = [], [], {k: {} for k in FIELDS}
+    counts = {"missing": 0, "empty": 0, "errors": 0, "truncated": 0, "sent": 0, "rejected": 0}
+    out = {}
+    stopped = None
+    timeouts = rejections = 0
     for row in candidates[:args.limit]:
+        if time.monotonic() >= deadline:
+            stopped = "time budget reached"
+            break
         path = find_transcript(row["session_id"])
         if path is None:
             counts["missing"] += 1
@@ -392,46 +470,68 @@ def cmd_run(args):
             counts["empty"] += 1
             continue
         text, cut = prepared
+        counts["sent"] += 1
         verdict, labels = label_one(cfg, text)
         if verdict == "down":
-            unreachable = 1
+            stopped = "labeller unreachable"
             break
         timeouts = timeouts + 1 if verdict == "timeout" else 0
+        rejections = rejections + 1 if verdict == "client" else 0
         if verdict != "ok":
             counts["errors"] += 1
+            counts["rejected"] += verdict == "client"
             if timeouts >= CONSECUTIVE_TIMEOUTS_TO_STOP:
-                unreachable = 1
+                stopped = "labeller unreachable"
+                break
+            if rejections >= CONSECUTIVE_REJECTIONS_TO_STOP:
+                stopped = "labeller rejects every request"
                 break
             continue
-        new.append({"schema": am.SCHEMA, "session_id": row["session_id"], "started_at": row["started_at"], **labels,
-                    "labeller": cfg["model"], "labelled_at": stamp, "truncated": cut})
+        label = {"schema": am.SCHEMA, "session_id": row["session_id"], "started_at": row["started_at"], **labels,
+                 "labeller": cfg["model"], "labelled_at": stamp, "truncated": cut}
+        new.append(label)
+        unsaved.append(label)
         counts["truncated"] += cut
         for k in FIELDS:
             dist[k][labels[k]] = dist[k].get(labels[k], 0) + 1
-    out = {"candidates": len(candidates), "labelled": len(new), "skipped_missing_transcript": counts["missing"],
-           "skipped_empty": counts["empty"], "labeller_errors": counts["errors"], "truncated": counts["truncated"],
-           "pending": len(candidates) - len(new), "dry_run": bool(args.dry_run)}
-    if unreachable:
-        out["labeller"] = "unreachable"
-        log(f"labeller at {cfg['base_url']} is unreachable; {out['pending']} sessions stay pending")
+        # Each batch is on disk and pushed before the next call, so a run that
+        # is killed or times out keeps everything answered so far.
+        if not args.dry_run and len(unsaved) >= flush_every:
+            flush(unsaved, out)
+            unsaved = []
+    if unsaved and not args.dry_run:
+        flush(unsaved, out)
+    summary = {"candidates": len(candidates), "labelled": len(new), "skipped_missing_transcript": counts["missing"],
+               "skipped_empty": counts["empty"], "labeller_errors": counts["errors"], "truncated": counts["truncated"],
+               "pending": len(candidates) - len(new), "dry_run": bool(args.dry_run)}
+    if stopped:
+        summary["stopped"] = stopped
+    if stopped == "labeller unreachable":
+        summary["labeller"] = "unreachable"
+        log(f"labeller at {urlsplit(cfg['base_url']).hostname} is unreachable; {summary['pending']} sessions stay pending")
     if new:
-        out["distribution"] = {k: dict(sorted(v.items())) for k, v in dist.items()}
-    if args.dry_run or not new:
-        emit_run(out)
-        return 0
+        summary["distribution"] = {k: dict(sorted(v.items())) for k, v in dist.items()}
+    summary.update(out)
+    failed = counts["sent"] and counts["rejected"] == counts["sent"]
+    if failed:
+        summary["error"] = "the labeller answered every request with an HTTP client error; check model and base_url in labeller.json"
+    summary["help"] = ["Run `agent-label verify` monthly to measure label quality"] if new else \
+        ["Run `agent-label` for the labeller's reachability and the backlog"]
+    am.emit(summary)
+    return EXIT_FAIL if failed or summary.get("pushed") is False else 0
+
+
+def flush(batch, out):
+    """Merge a batch into the store under the lock and fold the publish result into out."""
     with am.Lock():
         try:
-            out.update(store_labels(new))
+            result = store_labels(batch)
         except RuntimeError as e:
             am.die(EXIT_FAIL, str(e), f"Inspect with `git -C {am.tilde(am.STORE)} status`")
-    emit_run(out)
-    return EXIT_FAIL if out.get("pushed") is False else 0
-
-
-def emit_run(out):
-    out["help"] = ["Run `agent-label verify` monthly to measure label quality"] if out["labelled"] else \
-        ["Run `agent-label` for the labeller's reachability and the backlog"]
-    am.emit(out)
+    out["committed"] = out.get("committed", False) or result["committed"]
+    out["pushed"] = result["pushed"]
+    if "error" in result:
+        out["error"] = result["error"]
 
 
 def store_labels(new):
@@ -451,7 +551,7 @@ def store_labels(new):
                 have[r["session_id"]] = r
                 added += 1
         write_labels(path, have)
-    return am.publish(f"labels: {am.now():%Y-%m-%d}, {added} sessions")
+    return am.publish(f"labels: {am.now():%Y-%m-%d}, {added} sessions", dirs=("labels",))
 
 
 # ── verify ───────────────────────────────────────────────────────────────────
@@ -483,12 +583,18 @@ def parse_verdicts(result, count):
 
 
 def verifier_env():
-    return {k: v for k, v in os.environ.items() if k in CLAUDE_AUTH_ENV or not am.CRED_ENV.search(k)}
+    return {k: v for k, v in os.environ.items() if k in VERIFIER_ENV or k.startswith("LC_")}
 
 
-def run_verifier(batch, budget):
-    """(verdicts by position, usd spent or None when unreported, model id)."""
+def find_claude():
     claude = shutil.which("claude") or str(am.HOME / ".local/bin/claude")
+    if not os.access(claude, os.X_OK):
+        am.die(EXIT_USAGE, "claude CLI not found", "Install Claude Code or put `claude` on PATH")
+    return claude
+
+
+def run_verifier(claude, batch, budget):
+    """(verdicts by position, usd spent or None when unreported, model id)."""
     prompt = VERIFY_INSTRUCTIONS + "\n\n" + "\n\n".join(
         f'<conversation n="{i}">\n{text}\n</conversation>' for i, (_, text) in enumerate(batch, 1))
     # An empty working directory and project-only settings keep user plugins,
@@ -523,6 +629,14 @@ def run_verifier(batch, budget):
     return parse_verdicts(j["result"], len(batch)), usd, model
 
 
+def record_spend(usd):
+    """Appended to the ledger at once, without the store lock: a spend that
+    waits for a lock can be lost with the process."""
+    if usd > 0:
+        with redirect_stdout(open(os.devnull, "w")):
+            am.cmd_budget_record(argparse.Namespace(usd=round(usd, 4), run="label-verify", critical=False))
+
+
 def cmd_verify(args):
     if args.sample < 1:
         am.usage_error("--sample needs a whole number, 1 or more", USAGE_SHORT)
@@ -530,19 +644,26 @@ def cmd_verify(args):
     if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", month):
         am.usage_error("--month must look like 2026-09", USAGE_SHORT)
     am.require_store()
+    # Everything that can fail on bad stored data is read before anything is spent.
+    read_agreement()
     stored = read_labels(am.STORE / "labels" / f"{month}.jsonl")
-    eligible = [(r, p) for r in sorted(stored.values(), key=lambda r: r["session_id"])
+    usable = {sid: r for sid, r in stored.items() if validated_labels({k: r.get(k) for k in FIELDS})}
+    eligible = [(r, p) for r in sorted(usable.values(), key=lambda r: r["session_id"])
                 if (p := find_transcript(r["session_id"]))]
+    skipped_bad = len(stored) - len(usable)
     if not eligible:
-        am.emit({"month": month, "status": f"no labelled sessions with a transcript left in {month}", "sample": 0})
+        am.emit({"month": month, "status": f"no labelled sessions with a transcript left in {month}", "sample": 0,
+                 "skipped_bad_labels": skipped_bad})
         return 0
     chosen = random.Random(os.environ.get("AGENT_LABEL_SEED")).sample(eligible, min(args.sample, len(eligible)))
     cap = min(VERIFY_CAP_USD, round(VERIFY_PER_SESSION_USD * len(chosen), 2))
     state = am.budget_state(need=cap)
-    plan = {"month": month, "sample": len(chosen), "cap_usd": cap, "calls": -(-len(chosen) // VERIFY_BATCH)}
+    plan = {"month": month, "sample": len(chosen), "cap_usd": cap, "calls": -(-len(chosen) // VERIFY_BATCH),
+            "skipped_bad_labels": skipped_bad}
     if args.dry_run:
         am.emit({**plan, "dry_run": True, "budget": state})
         return 0
+    claude = find_claude()
     if not state["allowed"]:
         am.emit({**state, "help": "No verification this run; the labels stay unchecked until the budget allows"})
         return EXIT_DENIED
@@ -556,13 +677,24 @@ def cmd_verify(args):
     checked = invalid = 0
     spent = 0.0
     model = VERIFY_MODEL
+    stopped = None
     for i in range(0, len(items), VERIFY_BATCH):
         batch = items[i:i + VERIFY_BATCH]
-        budget = cap * len(batch) / len(chosen)
-        verdicts, usd, used = run_verifier(batch, budget)
+        remaining = cap - spent
+        if remaining < MIN_CALL_USD:
+            stopped = "spending cap reached"
+            break
+        budget = min(cap * len(batch) / len(items), remaining)
+        try:
+            verdicts, usd, used = run_verifier(claude, batch, budget)
+        except Exception as e:  # noqa: BLE001 - one bad batch must not lose the others or the ledger
+            log(f"verifier batch failed: {type(e).__name__}")
+            verdicts, usd, used = {}, None, None
         # No cost report means the spend is unknown: charge the call's cap so
         # the ledger can only over-count.
-        spent += budget if usd is None else usd
+        charge = budget if usd is None else usd
+        spent += charge
+        record_spend(charge)
         model = used or model
         invalid += len(batch) - len(verdicts)
         for n, labels in verdicts.items():
@@ -570,11 +702,10 @@ def cmd_verify(args):
             for k in FIELDS:
                 agree[k] += labels[k] == batch[n - 1][0][k]
     out = {**plan, "verified": checked, "invalid_verdicts": invalid, "spent_usd": round(spent, 4)}
+    if stopped:
+        out["stopped"] = stopped
     with am.Lock():
         try:
-            if spent > 0:
-                with redirect_stdout(open(os.devnull, "w")):
-                    am.cmd_budget_record(argparse.Namespace(usd=round(spent, 4), run="label-verify", critical=False))
             if checked:
                 path, rows = read_agreement()
                 rows[month] = {"month": month, "sample": checked, "verifier": model,
@@ -582,7 +713,7 @@ def cmd_verify(args):
                                **{f"agree_{k}": round(agree[k] / checked, 4) for k in FIELDS}}
                 am.write_lines(path, [rows[m] for m in sorted(rows)])
                 out.update({f"agree_{k}": rows[month][f"agree_{k}"] for k in FIELDS})
-            out.update(am.publish(f"labels: verify {month}, {checked} sessions"))
+            out.update(am.publish(f"labels: verify {month}, {checked} sessions", dirs=("labels", "ledger")))
         except RuntimeError as e:
             am.die(EXIT_FAIL, str(e), f"Inspect with `git -C {am.tilde(am.STORE)} status`")
     if not checked:

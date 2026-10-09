@@ -10,14 +10,22 @@ requested.
 - Conversation text is the only input. Tool inputs and results, thinking,
   attachments, system and meta records, compaction summaries, synthetic API
   errors and subagent files are excluded because that is where code and
-  credentials live and the conversation carries the intent.
-- Redact the whole text, then truncate. Cutting first could leave half a
-  credential that no pattern matches.
+  credentials live and the conversation carries the intent. The harness also
+  writes user text for task notifications, shell output and reminders; a user
+  text counts as a prompt only if it does not open with `<` (the metrics row
+  builder's rule), and a slash command is sent as name plus arguments, never
+  its expanded body.
+- Redact, then truncate to the budget. Cutting first could leave half a
+  credential that no pattern matches. The one earlier cut, at ten times the
+  budget, only bounds the work: it falls on whitespace and each side is
+  redacted alone. Unbroken runs of 120+ token characters are replaced before
+  the patterns run, which keeps every pattern's leading class linear.
 - Safety rests on structure, not on the prompt. The prompt says to ignore
   instructions in the data, but the schema constrains the reply, a strict
   validator re-checks it, and only the three values survive.
-- Private addresses are checked on the literal host. Bare DNS names are refused
-  because DNS can point anywhere; `*.local` and `localhost` are trusted by name.
+- Private addresses are checked on the literal host. Names are refused
+  because DNS can point anywhere, `.local` ones included on this box; only
+  `localhost` is trusted by name.
   Proxies and redirects are disabled so the check holds for the connection made.
 - Unreachable means a refused or failed connection, or two sessions in a row
   timing out. The first ends the run at once; a single timeout is treated as one
@@ -38,8 +46,13 @@ requested.
   ones are dropped, so one malformed item does not void a batch.
 - Agreement is computed over verified sessions only, and written only when at
   least one verdict was usable. A call that reports no cost is charged at its cap.
-- Claude's own auth variables are kept for the verifier call (as the audit
-  does); every other credential-shaped variable is removed.
+- The verifier gets an allowlisted environment (PATH, HOME, locale, terminal,
+  `CLAUDE_CONFIG_DIR`); Claude logs in from its credentials file, confirmed with
+  one real call.
+- Output is written in batches of 20 labels with a 20-minute clock, so a run
+  killed anywhere keeps what was answered. Repeated HTTP client errors stop the
+  run and fail it.
+- `verify` records each call's cost at once and without the store lock.
 - `verify --dry-run` spends nothing; `run --dry-run` does call the labeller
   because that costs nothing and shows the real distribution.
 

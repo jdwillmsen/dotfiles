@@ -7,8 +7,9 @@ Type=oneshot
 ExecStart=%h/.local/bin/agent-label run
 # A user manager starts with a bare PATH; git lives in /usr/bin.
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-# Bounds the whole run: up to ten minutes waiting on another store writer's
-# lock, then at most 200 labeller calls and one push.
+# The run stops labelling after 20 minutes of its own clock and publishes in
+# batches; the rest of this allows up to ten minutes waiting on another store
+# writer's lock, a last push, and a call still in flight.
 TimeoutStartSec=45min
 NoNewPrivileges=yes
 PrivateTmp=yes

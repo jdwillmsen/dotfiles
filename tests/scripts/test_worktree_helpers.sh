@@ -73,11 +73,19 @@ mkrepo h git@github.com:acme/widget.git
 git -C "$tmp/h" config stream.owner ../..
 mkrepo i git@github.com:acme/widget.git
 git -C "$tmp/i" config stream.owner a/b
+# Sloppy remotes must resolve the same way in both implementations.
+mkrepo j https://github.com/acme/widget//
+mkrepo k https://github.com/acme/widget.git//
+mkrepo l https://github.com/acme/widget/.git
+mkrepo m "https://github.com/acme/widget.git "
+mkrepo n git@github.com:acme/widget.git
+git -C "$tmp/n" config stream.owner " jdwillmsen "
 
 stream_bin="$here/home/dot_local/bin/executable_stream"
 for case in "a:jdwlabs/platform" "b:dotablaze-tech/platform" "c:jdwillmsen/career" \
     "d:jdwillmsen/gameops" "e:e" "f:jdwillmsen/no-mistakes" "inside:jdwlabs/platform" \
-    "g:g" "h:acme/widget" "i:acme/widget"; do
+    "g:g" "h:acme/widget" "i:acme/widget" \
+    "j:acme/widget" "k:acme/widget" "l:acme/widget" "m:acme/widget" "n:jdwillmsen/widget"; do
     dir="${case%%:*}" want="${case#*:}"
     got="$(slug_in "$tmp/$dir")"
     [ "$got" = "$want" ] || { echo "FAIL: __wt_project in $dir gave '$got', expected '$want'"; exit 1; }

@@ -38,14 +38,14 @@ __wt_ok_segment() { [[ "$1" =~ ^[A-Za-z0-9_.-]+$ && "$1" != "." && "$1" != ".." 
 
 __wt_project() {
     local url slug owner root
-    url=$(git remote get-url origin 2>/dev/null)
-    url="${url%/}"
-    url="${url%.git}"
+    # Tolerate what a hand-typed remote tends to carry: whitespace, trailing
+    # slashes, and one .git suffix, as a suffix or as a final path segment.
+    url=$(git remote get-url origin 2>/dev/null | sed -E 's#^[[:space:]]+##; s#[[:space:]]+$##; s#/+$##; s#\.git$##; s#/+$##')
     slug=$(printf '%s' "$url" | sed -nE 's#^.*[:/]([^/:]+)/([^/]+)$#\1/\2#p')
     if [[ -n "$slug" ]] && ! { __wt_ok_segment "${slug%/*}" && __wt_ok_segment "${slug#*/}"; }; then
         slug=""
     fi
-    owner=$(git config --get stream.owner 2>/dev/null)
+    owner=$(git config --get stream.owner 2>/dev/null | sed -E 's#^[[:space:]]+##; s#[[:space:]]+$##')
     __wt_ok_segment "$owner" || owner=""
     if [[ -z "$slug" ]]; then
         root=$(git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | head -1)

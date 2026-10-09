@@ -68,6 +68,7 @@ MODEL_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9 .-]{0,63}")
 FINDING_ID = re.compile(r"[a-z][a-z-]{0,40}:[A-Za-z0-9_.@/-]{1,200}")
 AUDIT_BRANCH = re.compile(r"chore/agent-audit-\d{4}-\d\d-\d\d")
 METRIC = re.compile(r"[a-z_]{1,40}")
+SUBJECT = re.compile(r"chore\(agent-audit\): [A-Za-z0-9 ._/@+-]{1,250}(?: \[!strict\])?")
 OUTCOMES = ("pending", "open", "merged", "dropped", "closed", "rejected")
 REJECT_REASONS = ("timeout", "spawn_failed", "claude_exit", "claude_error", "no_change", "no_effect", "shape",
                   "outside_worktree", "checker_error", "tests_failed", "review_rejected", "review_failed",
@@ -282,8 +283,8 @@ def newest_inventory(not_after):
     return best
 
 
-def window_rows(lo_date, hi_date):
-    lo, hi = f"{lo_date}T00:00:00Z", f"{hi_date}T00:00:00Z"
+def window_rows(lo, hi):
+    """Session rows started in [lo, hi), both UTC stamps."""
     rows = []
     for path in sorted((am.STORE / "sessions").glob("*.jsonl")):
         if lo[:7] <= path.stem <= hi[:7]:
@@ -425,7 +426,9 @@ def load_history():
                 and (r.get("pr") is None or (isinstance(r["pr"], int) and not isinstance(r["pr"], bool) and r["pr"] > 0)) \
                 and (r.get("branch") is None or (isinstance(r["branch"], str) and AUDIT_BRANCH.fullmatch(r["branch"]))) \
                 and all(r.get(k) is None or (isinstance(r[k], str) and STAMP.fullmatch(r[k])) for k in ("resolved_at", "merged_at", "judged_at")) \
-                and (r.get("reason") is None or r["reason"] in REJECT_REASONS)
+                and (r.get("reason") is None or r["reason"] in REJECT_REASONS) \
+                and r.get("verdict") in (None, "hit", "miss") \
+                and (r.get("commit_subject") is None or (isinstance(r["commit_subject"], str) and SUBJECT.fullmatch(r["commit_subject"])))
         except (ValueError, KeyError, TypeError):
             ok = False
         if not ok:
@@ -1318,7 +1321,7 @@ def cmd_run(args):
             "Check `gh auth status`, then run again")
 
     ctx = {"cfg": cfg, "budget": budget_cfg, "report": report, "inventory": inv, "inventory_label": inv_label,
-           "rows": window_rows(report["start"], report["end"])}
+           "rows": window_rows(f"{report['start']}T00:00:00Z", f"{report['end']}T00:00:00Z")}
     findings = select(run_finders(ctx), history, args.window, cfg)
     planned = [f for f in findings if f["status"] == "planned"]
     cap = cfg["caps_usd"][args.window]
@@ -1412,6 +1415,104 @@ def cmd_run(args):
     return code
 
 
+# ── Verify ───────────────────────────────────────────────────────────────────
+
+VERIFY_DAYS = 14
+
+
+def stored_inventories(lo, hi):
+    """(label, inventory) of stored reports whose whole window lies in
+    [lo, hi], oldest first. An unreadable report is skipped: it cannot
+    speak for the period."""
+    out = []
+    for path in sorted((am.STORE / "reports").glob("*.json")):
+        try:
+            j = json.loads(path.read_text())
+            start, end = dt.date.fromisoformat(j["start"]), dt.date.fromisoformat(j["end"])
+            label = j["label_date"]
+            if not (isinstance(label, str) and DATE.fullmatch(label)):
+                continue
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        inv = inventory_of(j)
+        if inv and lo <= start and end <= hi:
+            out.append((label, inv))
+    return sorted(out, key=lambda x: x[0])
+
+
+def measure(row, lo, hi):
+    """A finding's metric over [lo, hi) from the store, or None when the
+    store cannot say."""
+    metric, ev = row.get("metric"), row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+    if metric == "interactive_unattributed_share":
+        inter = [r for r in window_rows(am.iso(lo.timestamp()), am.iso(hi.timestamp())) if r.get("population") == "interactive"]
+        return round(sum(1 for r in inter if not r.get("repo")) / len(inter), 4) if inter else None
+    reports = stored_inventories(lo.date(), hi.date())
+    if not reports:
+        return None
+    if metric == "hook_injected_bytes":
+        plugin = ev.get("plugin")
+        if not (isinstance(plugin, str) and PLUGIN.fullmatch(plugin)):
+            return None
+        totals = [sum(h["bytes"] for h in inv["hooks"] if h.get("plugin") == plugin and am.is_amount(h.get("bytes")))
+                  for _, inv in reports]
+        return round(sum(totals) / len(totals), 2)
+    if metric in ("instruction_lines", "instruction_bytes"):
+        key = metric.split("_")[1]
+        for f in reports[-1][1]["instructions"]["files"]:
+            if f.get("path") == ev.get("path") and am.is_amount(f.get(key)):
+                return f[key]
+    return None
+
+
+def cmd_verify(args):
+    am.require_store()
+    cfg = load_cfg()
+    dry = args.dry_run
+    if not dry:
+        with am.Lock():
+            sync_store()
+    history = load_history()
+    changed = False
+    try:
+        changed = refresh_history(cfg, history)
+    except GhError as e:
+        # New merges go unnoticed until GitHub answers; what is already
+        # known to be merged can still be judged from the store.
+        log(f"outcomes not refreshed ({e.code})")
+    now = am.now()
+    span = dt.timedelta(days=VERIFY_DAYS)
+    judged, waiting, no_data = [], 0, 0
+    for r in history:
+        if r["outcome"] != "merged" or r.get("verdict") or not r.get("merged_at"):
+            continue
+        merged = dt.datetime.fromtimestamp(am.parse_ts(r["merged_at"]), dt.timezone.utc)
+        if now - merged < span:
+            waiting += 1
+            continue
+        before, after = measure(r, merged - span, merged), measure(r, merged, merged + span)
+        if before is None or after is None:
+            no_data += 1
+            continue
+        r.update(verdict="hit" if after < before else "miss", before=before, after=after, judged_at=am.iso(now.timestamp()))
+        judged.append(r)
+    pushed = True
+    if not dry and (judged or changed):
+        with am.Lock():
+            save_history(history)
+        pushed = publish(f"propose: verify, {len(judged)} judged")
+    metric = lambda r: r["metric"] if isinstance(r.get("metric"), str) and METRIC.fullmatch(r["metric"]) else "_invalid"
+    misses = [r for r in history if r.get("verdict") == "miss"]
+    emit({"dry_run": bool(dry),
+          "judged": [{"id": r["id"], "pr": r.get("pr"), "verdict": r["verdict"], "metric": metric(r), "before": r["before"],
+                      "after": r["after"]} for r in judged] or "0 findings judged this run",
+          "waiting": waiting, "no_data": no_data,
+          "revert_candidates": [{"id": r["id"], "pr": r.get("pr"), "commit_subject": r.get("commit_subject")} for r in misses]
+          or "none",
+          "help": [f"A miss did not lower its metric in the {VERIFY_DAYS} days after the merge; revert its commit if nothing else explains it"]})
+    return 0 if pushed else EXIT_FAIL
+
+
 def cmd_home(_args):
     out = {"bin": tilde(Path(sys.argv[0]).resolve()),
            "description": "Turns audit findings into one reviewable pull request; verify judges merged ones later",
@@ -1450,6 +1551,9 @@ def build_parser():
     r.add_argument("--dry-run", action="store_true", help="print findings, gates and caps; no model call, worktree, push, PR or store change")
     r.add_argument("--report", metavar="FILE", help="with --dry-run: read this report JSON, not the newest stored one")
     r.set_defaults(func=cmd_run)
+    v = sub.add_parser("verify", help="judge findings merged 14 or more days ago against their metric; calls no model")
+    v.add_argument("--dry-run", action="store_true", help="print the verdicts; write and push nothing")
+    v.set_defaults(func=cmd_verify)
     return p
 
 

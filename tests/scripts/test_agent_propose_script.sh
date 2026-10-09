@@ -1052,4 +1052,69 @@ p = json.load(open(sys.argv[1]))["prompt"]
 assert "earlier.md" not in p and "caveman@market" in p, p
 PY
 
+# ── verify: a merged finding is judged on its own metric, a fortnight each side of the merge ──
+reset_all
+python3 - "$store" <<'PY'
+import json, sys
+store = sys.argv[1]
+# Four interactive sessions before the 09-20 merge, none in a repo: 4 of 4.
+# After it the fixture holds w1..w5 (w6 falls outside the fortnight): 3 of 5.
+rows = [json.loads(l) for l in open(f"{store}/sessions/2026-09.jsonl")]
+proto = next(r for r in rows if r["session_id"] == "w4")
+rows += [{**proto, "session_id": f"v{i}", "started_at": f"2026-09-10T1{i}:00:00Z"} for i in range(4)]
+open(f"{store}/sessions/2026-09.jsonl", "w").write("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
+# The week before the 09-21 merges: caveman injected 300 bytes then as it does after; CLAUDE.md was 300 lines, now 250.
+j = json.load(open(f"{store}/reports/2026-10-04-weekly.json"))
+j.update(label_date="2026-09-20", start="2026-09-14", end="2026-09-21")
+for f in j["audit"]["instructions"]["files"]:
+    if f["path"] == "~/.claude/CLAUDE.md":
+        f["lines"] = 300
+json.dump(j, open(f"{store}/reports/2026-09-20-weekly.json", "w"))
+PY
+ev_plugin='evidence={"plugin": "caveman"}'
+write_history \
+    "unattributed-sessions:interactive|2026-09-15T10:00:00Z|30|merged|merged_at=\"2026-09-20T00:00:00Z\"|metric=\"interactive_unattributed_share\"" \
+    "unused-plugin:caveman|2026-09-15T10:00:00Z|31|merged|merged_at=\"2026-09-21T00:00:00Z\"|$ev_plugin" \
+    "oversize-instructions:.claude/CLAUDE.md|2026-09-15T10:00:00Z|32|merged|merged_at=\"2026-09-21T00:00:00Z\"|metric=\"instruction_lines\"|evidence={\"path\": \"~/.claude/CLAUDE.md\"}" \
+    "unused-plugin:quiet|2026-09-28T10:00:00Z|33|merged|merged_at=\"2026-10-01T00:00:00Z\"|evidence={\"plugin\": \"quiet\"}" \
+    "unused-plugin:ghost|2026-08-01T10:00:00Z|20|merged|merged_at=\"2026-08-10T00:00:00Z\"|evidence={\"plugin\": \"ghost\"}" \
+    "unused-plugin:old|2026-07-01T10:00:00Z|10|merged|merged_at=\"2026-07-10T00:00:00Z\"|verdict=\"miss\"|before=5|after=9|judged_at=\"2026-07-30T00:00:00Z\"" \
+    "unused-plugin:pending|2026-10-08T10:00:00Z|34|open"
+pr_view 34 OPEN null null unused-plugin:pending
+before_hist="$(cat "$hist")"
+vrow() { sed -n "s|^  \"$1\",||p" "$out" | head -1; }
+run 0 verify --dry-run
+[ "$(vrow unattributed-sessions:interactive)" = "30,hit,interactive_unattributed_share,1.0,0.6" ] || fail "share went from 4/4 to 3/5: a hit" "$(cat "$out" "$err")"
+[ "$(vrow unused-plugin:caveman)" = "31,miss,hook_injected_bytes,300.0,300.0" ] || fail "bytes unchanged: a miss" "$(cat "$out")"
+[ "$(vrow oversize-instructions:.claude/CLAUDE.md)" = "32,hit,instruction_lines,300,250" ] || fail "lines went from 300 to 250: a hit" "$(cat "$out")"
+# Merged eight days ago: not yet. No report either side of the August merge: unknown, never a guess.
+[ "$(field waiting)" = 1 ] && [ "$(field no_data)" = 1 ] || fail "waiting and no-data counts" "$(cat "$out")"
+grep -qF '"unused-plugin:quiet"' "$out" && fail "a finding merged eight days ago was judged"
+# Misses are revert candidates, including one judged on an earlier run.
+python3 - "$out" <<'PY' || fail "revert candidates" "$(cat "$out")"
+import re, sys
+text = open(sys.argv[1]).read()
+block = text[text.index("revert_candidates["):]
+ids = re.findall(r'^  "([^"]+)",(\d+),', block, re.M)
+assert sorted(ids) == [("unused-plugin:caveman", "31"), ("unused-plugin:old", "10")], ids
+PY
+[ "$before_hist" = "$(cat "$hist")" ] || fail "verify --dry-run rewrote history"
+[ "$(calls)" = 0 ] || fail "verify called a model"
+run 0 verify
+[ "$(hist unused-plugin:caveman verdict) $(hist unused-plugin:caveman before) $(hist unused-plugin:caveman after)" = '"miss" 300.0 300.0' ] || fail "verdict not recorded" "$(cat "$hist")"
+[ "$(hist unattributed-sessions:interactive verdict) $(hist unattributed-sessions:interactive judged_at)" = '"hit" "2026-10-09T12:00:00Z"' ] || fail "hit not recorded" "$(cat "$hist")"
+[ "$(hist unused-plugin:quiet verdict)" = null ] || fail "a waiting finding got a verdict"
+[ "$(hist unused-plugin:old before)" = 5 ] || fail "an earlier verdict was rewritten"
+store_published "verify"
+[ "$(calls)" = 0 ] || fail "verify called a model"
+# A second run has nothing new to judge and commits nothing.
+head_before="$(gs rev-parse HEAD)"
+run 0 verify
+grep -q "^judged: " "$out" || fail "an idle verify should say it judged nothing" "$(cat "$out")"
+[ "$head_before" = "$(gs rev-parse HEAD)" ] || fail "an idle verify committed"
+# GitHub being unreachable does not stop a judgement the store can make alone.
+rm "$stub/gh/pr-view-34.json"
+run 0 verify --dry-run
+has "revert_candidates" "verify needs GitHub only to learn of new merges"
+
 echo "test_agent_propose_script: OK"

@@ -353,6 +353,85 @@ def write_flags_file(report):
         path.unlink(missing_ok=True)
 
 
+# ── Config inventory ─────────────────────────────────────────────────────────
+
+AUDIT_WINDOWS = ("weekly", "biweekly", "monthly", "quarterly")
+
+
+def audit_dir():
+    return Path(os.environ.get("AGENT_REPORT_AUDIT_DIR")
+                or Path(os.environ.get("XDG_DATA_HOME", am.HOME / ".local/share")) / "agent-audit/reports")
+
+
+def scrub(v):
+    """The audit's sections carry hook names that can be a fragment of
+    injected text; only identifier-shaped strings pass into a report."""
+    if isinstance(v, dict):
+        return {scrub(k): scrub(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [scrub(x) for x in v]
+    if not isinstance(v, str) or v == "":
+        return v
+    if v.startswith("unattributed"):
+        return "unattributed"
+    if v.startswith("~/"):
+        rest = am.clean_id(v[2:])
+        return "_invalid" if rest == "_invalid" else v
+    return am.clean_id(v)
+
+
+def embed_audit(window, label):
+    if window not in AUDIT_WINDOWS:
+        return None
+    path = audit_dir() / f"{label}-{window}.json"
+    if not path.exists():
+        return None
+    j = load_json_file(path)
+    cur = j.get("current")
+    hooks = cur.get("hooks") if isinstance(cur, dict) else None
+    if not (isinstance(hooks, list) and isinstance(j.get("disable_candidates"), dict)
+            and isinstance(j.get("instructions"), dict)):
+        die(EXIT_USAGE, f"{tilde(path)} lacks the hooks, disable_candidates or instructions sections")
+    return {"source": path.name, "hooks": scrub(hooks), "disable_candidates": scrub(j["disable_candidates"]),
+            "instructions": scrub(j["instructions"])}
+
+
+# ── Thresholds review ────────────────────────────────────────────────────────
+
+# Each threshold maps to the flag metric it raises, and the severity that
+# separates its own level from a neighbour's on the same metric.
+FLAG_OF = {"spend_warn_multiple": ("day_spend_usd", None), "spend_critical_multiple": ("day_spend_usd", "critical"),
+           "session_warn_usd": ("session_cost_usd", None), "runaway_session_usd": ("session_cost_usd", "critical"),
+           "runaway_session_calls": ("session_api_calls", None), "weekly_quota_warn_pct": ("weekly_quota_pct", None)}
+BUDGET_STATES_OF = {"plan_pct": ("critical-only", "stopped"), "hard_pct": ("stopped",),
+                    "weekly_quota_cutoff_pct": ("quota-hold",)}
+
+
+def thresholds_review(start, end, th):
+    """How often each threshold fired in the month, counted from the stored
+    daily reports. With no daily report the count is unknown, never zero."""
+    daily = []
+    for path in sorted((am.STORE / "reports").glob("*-daily.json")):
+        j = load_json_file(path)
+        label = j.get("label_date")
+        if not isinstance(label, str) or not isinstance(j.get("flags"), list):
+            die(EXIT_USAGE, f"{tilde(path)} has no label_date or flags")
+        if start.isoformat() <= label < end.isoformat():
+            daily.append(j)
+    known = bool(daily)
+    rows = []
+    for key, value in th.items():
+        metric, severity = FLAG_OF[key]
+        n = sum(1 for j in daily for f in j["flags"] if f.get("metric") == metric and severity in (None, f.get("severity")))
+        rows.append({"source": "thresholds.json", "key": key, "value": value, "fired": n if known else None})
+    for key, value in am.budget_config().items():
+        states = [((j.get("current") or {}).get("budget") or {}).get("state") for j in daily]
+        seen = [x for x in states if x]
+        rows.append({"source": "budget.json", "key": key, "value": value,
+                     "fired": sum(1 for x in seen if x in BUDGET_STATES_OF[key]) if seen else None})
+    return {"daily_reports": len(daily), "thresholds": rows}
+
+
 # ── Report ───────────────────────────────────────────────────────────────────
 
 def build_report(opts, w, th):
@@ -367,13 +446,15 @@ def build_report(opts, w, th):
         # The gate's state when the day was reported, which the monthly
         # thresholds review counts.
         current["budget"] = am.budget_state()
+    if opts.window == "monthly":
+        current["thresholds_review"] = thresholds_review(cs, ce, th)
     return {
         "schema": SCHEMA, "window": opts.window, "start": cs.isoformat(), "end": ce.isoformat(),
         "label_date": label, "generated_at": am.iso(am.now().timestamp()),
         "current": current,
         "previous": {"start": ps.isoformat(), "end": pe.isoformat(), **summarize_window(ps, pe)},
         "trend": trend(opts.window, label),
-        "flags": flags, "delivery": None, "audit": None, "insights": None,
+        "flags": flags, "delivery": None, "audit": embed_audit(opts.window, label), "insights": None,
     }
 
 
@@ -471,7 +552,41 @@ def render_trend(rows):
     return lines + [""]
 
 
-SECTION_RENDERERS = []
+def render_audit(r):
+    if r["window"] not in AUDIT_WINDOWS:
+        return []
+    a = r["audit"]
+    lines = ["## Config inventory", ""]
+    if not a:
+        return lines + [f"The config inventory was not available: no audit report for {r['label_date']} {r['window']}.", ""]
+    hooks = sorted(a["hooks"], key=lambda h: -(h.get("bytes") or 0))[:10]
+    lines += [f"From `{a['source']}`.", "", "Injected context by hook:", ""]
+    lines += table(["Plugin", "Event", "Fires", "Bytes"], [(h.get("plugin"), h.get("event"), num(h.get("fires")), num(h.get("bytes")))
+                                                          for h in hooks])
+    dc = a["disable_candidates"]
+    lines += ["", "Disable candidates: "
+              + ", ".join(f"{k} {len(dc.get(k) or [])}" for k in ("plugins", "mcp_servers", "skills", "agents"))]
+    for p in dc.get("plugins") or []:
+        lines.append(f"- plugin {p.get('plugin')}: {num(p.get('hook_bytes'))} hook bytes")
+    files = (a["instructions"].get("files") or [])
+    if files:
+        lines += ["", "Instruction files:", ""]
+        lines += table(["Path", "Lines", "Bytes", "Flag"], [(f.get("path"), num(f.get("lines")), num(f.get("bytes")), f.get("flag") or "")
+                                                            for f in files])
+    return lines + [""]
+
+
+def render_thresholds(r):
+    t = r["current"].get("thresholds_review")
+    if not t:
+        return []
+    lines = ["## Thresholds review", "",
+             f"Counted from {t['daily_reports']} stored daily reports in the month; n/a means there was nothing to count.", ""]
+    lines += table(["File", "Threshold", "Value", "Fired"], [(x["source"], x["key"], num(x["value"]), num(x["fired"])) for x in t["thresholds"]])
+    return lines + [""]
+
+
+SECTION_RENDERERS = [render_audit, render_thresholds]
 
 
 def render(r):

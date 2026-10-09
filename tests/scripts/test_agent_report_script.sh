@@ -412,4 +412,76 @@ grep -q "^pushed: false" "$out" || fail "a failed push is not reported" "$(cat "
 mv "$remote.gone" "$remote"
 reset_store
 
+# ── Config inventory from the audit's JSON ──
+mkdir -p "$AGENT_REPORT_AUDIT_DIR"
+python3 - "$AGENT_REPORT_AUDIT_DIR/2026-10-04-weekly.json" <<'PY'
+import json, sys
+json.dump({"label_date": "2026-10-04",
+           "current": {"sessions": 99, "hooks": [
+               {"plugin": "superpowers", "event": "SessionStart", "fires": 201, "bytes": 686817},
+               {"plugin": "unattributed: LAUNCH CODES are purple", "event": "UserPromptSubmit", "fires": 5, "bytes": 55}]},
+           "disable_candidates": {"plugins": [{"plugin": "caveman", "provides": "hooks", "hook_bytes": 338822}],
+                                  "skills": ["pr", "standup"], "mcp_servers": [], "agents": []},
+           "instructions": {"files": [{"path": "~/.claude/CLAUDE.md", "lines": 97, "bytes": 5503, "flag": ""}], "combined": {"bytes": 5503}},
+           "prs": {"current": {"body_words_median": 40}}}, open(sys.argv[1], "w"))
+PY
+run 0 --window weekly --end 2026-10-09 --dry-run --no-insights --no-github
+wjson="$(field json)"
+python3 - "$wjson" "$(field md)" <<'PY' || fail "the audit inventory is embedded wrongly"
+import json, sys
+j = json.load(open(sys.argv[1]))
+a = j["audit"]
+assert a["source"] == "2026-10-04-weekly.json", a
+assert [h["fires"] for h in a["hooks"]] == [201, 5], a["hooks"]
+assert a["hooks"][1]["plugin"] == "unattributed", a["hooks"][1]
+assert a["disable_candidates"]["plugins"][0]["plugin"] == "caveman" and a["disable_candidates"]["skills"] == ["pr", "standup"]
+assert a["instructions"]["files"][0]["path"] == "~/.claude/CLAUDE.md", a["instructions"]
+raw = open(sys.argv[1]).read() + open(sys.argv[2]).read()
+assert "LAUNCH CODES" not in raw and "body_words" not in raw, "audit text or unrelated sections leaked"
+assert "caveman" in open(sys.argv[2]).read(), "the Markdown omits the disable candidates"
+PY
+run 0 --window weekly --end 2026-10-16 --dry-run --no-insights --no-github
+python3 - "$(field json)" "$(field md)" <<'PY' || fail "a window without an audit report is mishandled"
+import json, sys
+assert json.load(open(sys.argv[1]))["audit"] is None
+assert "config inventory was not available" in open(sys.argv[2]).read()
+PY
+run 0 --window daily --end 2026-10-09 --dry-run --no-insights
+grep -q "config inventory" "$(field md)" && fail "a daily report should not mention the inventory"
+echo '{broken' >"$AGENT_REPORT_AUDIT_DIR/2026-10-11-biweekly.json"
+run 2 --window biweekly --end 2026-10-12 --dry-run --no-insights --no-github
+grep -q "2026-10-11-biweekly.json" "$out" || fail "an unreadable audit report is not named" "$(cat "$out")"
+rm "$AGENT_REPORT_AUDIT_DIR/2026-10-11-biweekly.json"
+
+# ── Monthly thresholds review ──
+run 0 --window monthly --end 2026-10-09 --dry-run --no-insights --no-github
+python3 - "$(field json)" "$(field md)" <<'PY' || fail "the thresholds review is wrong"
+import json, sys
+t = json.load(open(sys.argv[1]))["current"]["thresholds_review"]
+assert t["daily_reports"] == 3, t
+got = {(x["source"], x["key"]): x for x in t["thresholds"]}
+want = {("thresholds.json", "spend_warn_multiple"): 2, ("thresholds.json", "spend_critical_multiple"): 1,
+        ("thresholds.json", "session_warn_usd"): 1, ("thresholds.json", "runaway_session_usd"): 0,
+        ("thresholds.json", "runaway_session_calls"): 0, ("thresholds.json", "weekly_quota_warn_pct"): 0,
+        ("budget.json", "plan_pct"): 2, ("budget.json", "hard_pct"): 1, ("budget.json", "weekly_quota_cutoff_pct"): 0}
+assert {k: v["fired"] for k, v in got.items()} == want, {k: v["fired"] for k, v in got.items()}
+assert got[("thresholds.json", "spend_warn_multiple")]["value"] == 1.5 and got[("budget.json", "hard_pct")]["value"] == 5
+assert "spend_warn_multiple" in open(sys.argv[2]).read()
+PY
+run 0 --window monthly --end 2026-09-10 --dry-run --no-insights --no-github
+python3 - "$(field json)" <<'PY' || fail "a month with no daily reports must not read as zero firings"
+import json, sys
+t = json.load(open(sys.argv[1]))["current"]["thresholds_review"]
+assert t["daily_reports"] == 0 and all(x["fired"] is None for x in t["thresholds"]), t
+PY
+run 0 --window weekly --end 2026-10-09 --dry-run --no-insights --no-github
+python3 - "$(field json)" <<'PY' || fail "only the monthly report carries a thresholds review"
+import json, sys
+assert "thresholds_review" not in json.load(open(sys.argv[1]))["current"]
+PY
+echo '{broken' >"$store/reports/2026-09-12-daily.json"
+run 2 --window monthly --end 2026-10-09 --dry-run --no-insights --no-github
+grep -q "2026-09-12-daily.json" "$out" || fail "an unreadable daily report is not named" "$(cat "$out")"
+reset_store
+
 echo "test_agent_report_script: OK"

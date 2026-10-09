@@ -36,7 +36,7 @@ collected.
    suggested cuts. A failure or timeout is recorded in the report and the run
    carries on.
 6. Writes `~/.local/share/agent-audit/reports/<date>-<window>.md` and the
-   matching `.json`, then creates a Jira Task in `JDWLABS` labelled
+   matching `.json`, then creates a Jira Task in `JDW` labelled
    `agent-audit`, parented under the epic "Agent tooling usage audits". The
    epic is looked up (or created) once, and its key is kept in
    `~/.local/share/agent-audit/epic-key`.

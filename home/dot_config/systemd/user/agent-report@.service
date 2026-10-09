@@ -1,0 +1,17 @@
+[Unit]
+Description=Agent metrics report (%i window)
+Documentation=file://%h/.local/share/chezmoi/docs/agent-report.md
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/agent-report --window %i
+# A user manager starts with a bare PATH; claude lives in ~/.local/bin, and gh
+# and git in /usr/bin.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Bounds the whole run: up to ten minutes waiting on the store lock, five of
+# GitHub requests, the insights call (itself capped at 240s) and one push.
+TimeoutStartSec=30min
+NoNewPrivileges=yes
+PrivateTmp=yes
+Nice=10
+IOSchedulingClass=idle

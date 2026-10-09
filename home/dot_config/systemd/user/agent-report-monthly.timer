@@ -1,0 +1,14 @@
+[Unit]
+Description=Monthly agent metrics report
+
+[Timer]
+# After the 06:30 collect, so the window is already in the store, and after the
+# audit timer whose config inventory the longer reports embed.
+OnCalendar=*-*-01 09:10:00
+Unit=agent-report@monthly.service
+# A box that was off at the scheduled time runs the missed report at next boot
+# instead of silently skipping a window.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

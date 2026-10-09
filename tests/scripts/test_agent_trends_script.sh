@@ -191,8 +191,12 @@ path="$(sed -n 's/^path: //p' "$out")"
 [ -f "$path" ] && [ "$path" != "$store/site/index.html" ] || fail "--dry-run should write to a temp dir" "$(cat "$out")"
 [ ! -e "$store/site" ] || fail "--dry-run wrote into the store"
 
-# ── Default build publishes under the store ──
+# ── Default build publishes under the store, and only the page ──
+echo '{}' >"$store/reports/inflight.json"
 run 0 build
+[ "$(git -C "$store" show --name-only --format= HEAD)" = "site/index.html" ] || fail "build committed more than the page" "$(git -C "$store" show --name-only --format= HEAD)"
+git -C "$store" status --porcelain | grep -q "reports/inflight.json" || fail "build swept up another tool's in-progress file"
+rm "$store/reports/inflight.json"
 [ -f "$store/site/index.html" ] || fail "build did not write site/index.html"
 [ "$(git -C "$store" log -1 --format=%s)" = "site: 2026-10-09" ] || fail "commit message" "$(git -C "$store" log -1 --format=%s)"
 [ "$(git -C "$store" rev-parse HEAD)" = "$(git -C "$remote" rev-parse main)" ] || fail "build did not push"
@@ -224,6 +228,64 @@ echo '{nope' >"$store/reports/2026-10-08-daily.json"
 run 2 build --out "$tmp/bad"
 grep -q "reports/2026-10-08-daily.json" "$out" || fail "a bad report is not named" "$(cat "$out")"
 git -C "$store" checkout -q -- reports
+
+# ── Chart range ──
+run 0 build --days 180 --out "$tmp/page180"
+python3 - "$tmp/page180/index.html" <<'PY' || fail "a long range draws bars with no width"
+import re, sys
+page = open(sys.argv[1]).read()
+widths = [float(w) for w in re.findall(r'<rect class="s\d"[^>]* width="([0-9.]+)"', page)]
+assert widths and min(widths) >= 1, (len(widths), min(widths, default=None))
+PY
+run 2 build --days 181 --out "$tmp/page181"
+grep -q "days" "$out" || fail "--days past the chart's limit should be refused" "$(cat "$out")"
+run 2 build --days 0 --out "$tmp/page0"
+
+# ── The 30-day tables do not depend on the chart range ──
+AGENT_METRICS_NOW="2026-10-25T12:00:00+00:00" run 0 build --days 7 --out "$tmp/page7"
+grep -qF "<td>claude-haiku-4-5</td><td>2</td><td>\$2.00</td>" "$tmp/page7/index.html" || fail "a short --days dropped sessions from the 30-day tables" \
+    "$(grep -o '<td>claude-haiku[^/]*/td><td>[^/]*/td><td>[^/]*/td>' "$tmp/page7/index.html")"
+
+# ── Values that would crash the renderer are named and write no page ──
+bad_store() {  # $1: python statement editing rows
+    python3 - "$store/sessions/2026-10.jsonl" "$1" <<'PY'
+import json, sys
+path, edit = sys.argv[1:]
+rows = [json.loads(l) for l in open(path)]
+exec(edit)
+open(path, "w").write("".join(json.dumps(r) + "\n" for r in rows))
+PY
+}
+bad_store 'rows[0]["cost_usd"] = 1e308; rows[1]["cost_usd"] = 1e308'
+rm -rf "$tmp/ovf"
+run 2 build --out "$tmp/ovf"
+grep -q "sessions/2026-10.jsonl" "$out" && [ ! -e "$tmp/ovf/index.html" ] || fail "overflowing costs must exit 2 naming the file and write no page" "$(cat "$out" "$err")"
+git -C "$store" checkout -q -- sessions
+bad_store 'rows[0]["pr_links"] = [{"repo": "a/b", "number": [1]}]'
+run 2 build --out "$tmp/ovf"
+grep -q "sessions/2026-10.jsonl" "$out" && [ ! -e "$tmp/ovf/index.html" ] || fail "a list-valued PR number must exit 2 naming the file" "$(cat "$out" "$err")"
+git -C "$store" checkout -q -- sessions
+python3 - "$store/reports/2026-10-05-weekly.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); d["delivery"]["failed_check_share"] = 1.7e308
+json.dump(d, open(sys.argv[1], "w"))
+PY
+run 0 build --out "$tmp/huge"
+git -C "$store" checkout -q -- reports
+
+# A report whose name has non-ASCII digits is not a report.
+echo '{nope' >"$store/reports/٢٠٢٦-١٠-٠٨-daily.json"
+run 0 build --out "$tmp/arabic"
+rm "$store/reports/٢٠٢٦-١٠-٠٨-daily.json"
+
+# ── A failed pull reads as text ──
+other="$tmp/other"
+git clone -q "$remote" "$other" 2>/dev/null
+git -C "$other" commit -q --allow-empty -m remote-only && git -C "$other" push -q origin HEAD:main
+git -C "$store" commit -q --allow-empty -m local-only
+run 1 build
+grep -q "pull failed" "$out" || fail "a failed pull is not reported" "$(cat "$out")"
+if grep -q "\['" "$out"; then fail "a failed pull printed a Python list" "$(cat "$out")"; fi
 
 # ── Units ──
 svc="$units/agent-trends.service"

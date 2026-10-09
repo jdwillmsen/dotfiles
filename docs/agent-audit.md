@@ -10,6 +10,13 @@ collected.
 Per-session rows, the plan-quota log and the budget for model spend live in a
 separate store: see [`agent-metrics.md`](agent-metrics.md).
 
+**Reports now come from `agent-report`** (see [`agent-report.md`](agent-report.md)).
+The audit timers run with `--no-jira --no-insights`, so they file no Jira
+tickets and call no model; their only job is to write the config inventory
+JSON (hooks and injected context, disable candidates, instruction files) that
+`agent-report` embeds in its weekly, biweekly, monthly and quarterly reports.
+The Jira and insights paths described below still exist for manual runs.
+
 ## What a run does
 
 1. Streams every Claude Code transcript under `~/.claude/projects` touched

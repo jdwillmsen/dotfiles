@@ -854,18 +854,25 @@ def table(headers, rows):
     return lines
 
 
+LABELS = {"api_errors": "API errors", "prs_created": "PRs created", "linked_prs": "Linked PRs", "wait_human_s": "Waiting on a human",
+          "active_s": "Active", "idle_s": "Idle"}
+
+
+def label(key):
+    return LABELS.get(key) or key.replace("_", " ").capitalize()
+
+
 def population_rows(c, p):
     f, o, t, lp = c["friction"], c["output"], c["time"], c["linked_pr_cost"]
     pf, po, pt, plp = p["friction"], p["output"], p["time"], p["linked_pr_cost"]
     rows = [("Sessions", num(c["sessions"]), num(p["sessions"]), change(c["sessions"], p["sessions"])),
             ("Estimated cost (list price)", usd(c["cost_usd"]), usd(p["cost_usd"]), change(c["cost_usd"], p["cost_usd"])),
             ("Cache read share", pct_share(c["cache_read_share"]), pct_share(p["cache_read_share"]), "")]
-    rows += [(k.replace("_", " ").capitalize(), num(f[k]), num(pf[k]), change(f[k], pf[k])) for k in FRICTION]
-    rows += [(k.replace("_", " ").capitalize(), num(o[k]), num(po[k]), change(o[k], po[k])) for k in (*OUTPUT, "linked_prs")]
+    rows += [(label(k), num(f[k]), num(pf[k]), change(f[k], pf[k])) for k in FRICTION]
+    rows += [(label(k), num(o[k]), num(po[k]), change(o[k], po[k])) for k in (*OUTPUT, "linked_prs")]
     rows += [("Cost per linked PR (list price)", usd(lp["cost_per_linked_pr_usd"]), usd(plp["cost_per_linked_pr_usd"]), ""),
              ("Spend covered by linked PRs", pct_share(lp["share_of_spend"]), pct_share(plp["share_of_spend"]), "")]
-    rows += [(k.replace("_s", "").replace("_", " ").capitalize() + " time (h)", f"{t[k] / 3600:.1f}", f"{pt[k] / 3600:.1f}",
-              change(t[k], pt[k])) for k in TIME]
+    rows += [(f"{label(k)} (h)", f"{t[k] / 3600:.1f}", f"{pt[k] / 3600:.1f}", change(t[k], pt[k])) for k in TIME]
     return rows
 
 

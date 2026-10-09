@@ -22,6 +22,7 @@ pressure is how a five-minute outage becomes an hour.
 | `t3-session-expiry.timer` → `.service` | user | `home/dot_config/systemd/user/`, enabled by `run_onchange_51-enable-t3-session-expiry.sh.tmpl` — **repo-owned** | yes, installed by a home apply; a box that has not applied since the units landed reads `not-found` here | — | `systemctl --user list-timers t3-session-expiry` |
 | `agent-audit-{weekly,biweekly,monthly,quarterly}.timer` → `agent-audit@.service` | user | `home/dot_config/systemd/user/`, enabled by `run_onchange_52-enable-agent-audit.sh.tmpl` — **repo-owned**; see [`agent-audit.md`](agent-audit.md) | yes, installed by a home apply; `not-found` until one runs | — | `systemctl --user list-timers 'agent-audit-*'` |
 | `agent-metrics-collect.timer` → `.service` | user | `home/dot_config/systemd/user/`, enabled by `run_onchange_53-enable-agent-metrics.sh.tmpl` — **repo-owned**; see [`agent-metrics.md`](agent-metrics.md) | yes, installed by a home apply; `not-found` until one runs | — | `systemctl --user list-timers 'agent-metrics-*'` |
+| `agent-report-{daily,weekly,biweekly,monthly,quarterly,yearly}.timer` → `agent-report@.service` | user | `home/dot_config/systemd/user/`, enabled by `run_onchange_54-enable-agent-report.sh.tmpl` — **repo-owned**; see [`agent-report.md`](agent-report.md) | yes, installed by a home apply; `not-found` until one runs | — | `systemctl --user list-timers 'agent-report-*'` |
 | `atop.service`, `atopacct.service`, `atop-rotate.timer` | system | `scripts/provision-monitoring.sh` (root step) | yes | — | `atop -r /var/log/atop/atop_$(date +%Y%m%d)` |
 | `user@1000.service` + linger | system/user | `scripts/provision-persistence.sh` (root step) | `Linger=yes` | — | `loginctl show-user dev-admin -p Linger` |
 
@@ -44,8 +45,8 @@ is a record of one boot, not a guarantee about the next.
 
 Everything else in `systemctl list-units` is stock Ubuntu (journald, resolved,
 logind, udev, cron, rsyslog, oomd, qemu-guest-agent, unattended-upgrades).
-`t3-session-expiry.timer`, the four `agent-audit-*.timer`s and
-`agent-metrics-collect.timer` are the only timers this repo owns. Baseline for the
+`t3-session-expiry.timer`, the four `agent-audit-*.timer`s,
+`agent-metrics-collect.timer` and the six `agent-report-*.timer`s are the only timers this repo owns. Baseline for the
 user manager is `launchpadlib-cache-clean.timer` and for the system manager is
 apt/fwupd/logrotate housekeeping; a timer outside those and the repo-owned ones
 is new.
@@ -56,7 +57,7 @@ is new.
 document exists to preserve. Sorted by how much a rebuild gets for free:
 
 **1. `chezmoi apply` recreates it.** `t3-session-expiry.timer` and its service
-(and likewise the `agent-audit` and `agent-metrics` timers),
+(and likewise the `agent-audit`, `agent-metrics` and `agent-report` timers),
 whose units are repo-owned and whose trigger enables them on a normal home
 apply — which is why a box that reads them as `not-found` is still fully
 recoverable: one apply is the whole remedy. And

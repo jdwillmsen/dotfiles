@@ -219,7 +219,9 @@ audit = {
     "hooks": [hook("superpowers", 540), hook("caveman", 300), hook("unmapped", 100), hook("busy", 40), hook("quiet", 20)],
     "disable_candidates": {"plugins": [
         {"plugin": "caveman", "provides": "_invalid", "hook_bytes": 300},
-        {"plugin": "quiet", "provides": "hooks", "hook_bytes": 20},
+        {"plugin": "quiet", "provides": "skills", "hook_bytes": 20},
+        # Hooks are all it is, so it is never invoked by name: zero calls is no evidence.
+        {"plugin": "hookonly", "provides": "hooks", "hook_bytes": 30},
         # Listed by the audit, but the store shows a busy:run skill call in the window.
         {"plugin": "busy", "provides": "skills", "hook_bytes": 40},
         {"plugin": "nohooks", "provides": "skills", "hook_bytes": 0},
@@ -393,7 +395,7 @@ run 0 run --window weekly --dry-run
 # Four of six interactive sessions without a repo: 66.67% against 50%.
 [ "$(row unattributed-sessions:interactive)" = "true,16.67,interactive_unattributed_share,0.6667,0.5,planned,null" ] || fail "unattributed finding" "$(cat "$out")"
 # busy was invoked, nohooks injects nothing, _invalid is no identifier, AGENTS.md sits exactly on the limit.
-for absent in unused-plugin:busy unused-plugin:nohooks unused-plugin:_invalid oversize-instructions:AGENTS.md; do
+for absent in unused-plugin:busy unused-plugin:nohooks unused-plugin:hookonly unused-plugin:_invalid oversize-instructions:AGENTS.md; do
     grep -qF "\"$absent\"" "$out" && fail "$absent should not be a finding" "$(cat "$out")"
 done
 # Files this repo does not own, and the quota default, are reported for a person.

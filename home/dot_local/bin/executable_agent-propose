@@ -322,7 +322,9 @@ def find_unused_plugins(ctx):
         name, b = p.get("plugin"), p.get("hook_bytes")
         if not (isinstance(name, str) and PLUGIN.fullmatch(name)) or not am.is_amount(b) or b <= 0 or total <= 0 or b > total:
             continue
-        if invoked(name, ctx["rows"]):
+        # A plugin that is only hooks is never invoked by name, so a count
+        # of zero says nothing about whether it is used.
+        if p.get("provides") == "hooks" or invoked(name, ctx["rows"]):
             continue
         out.append(finding("unused-plugin", name, "hook_injected_bytes", b, total, b / total * 100,
                            {"plugin": name, "hook_bytes": b, "all_hook_bytes": total, "invocations": 0,

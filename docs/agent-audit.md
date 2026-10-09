@@ -39,7 +39,8 @@ collected.
    matching `.json`, then creates a Jira Task in `JDW` labelled
    `agent-audit`, parented under the epic "Agent tooling usage audits". The
    epic is looked up (or created) once, and its key is kept in
-   `~/.local/share/agent-audit/epic-key`.
+   `~/.local/share/agent-audit/epic-key`. A stored key from another project
+   is ignored and replaced, so an epic moved between projects is found again.
 
 `<date>` is the last day inside the window. A window that already has a Jira
 key in its JSON is a no-op on re-run, and `--force` files it again. Runs of

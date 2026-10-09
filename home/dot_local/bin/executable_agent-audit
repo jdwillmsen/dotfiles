@@ -1138,6 +1138,11 @@ def jira_description(md, report_path):
     return {"type": "doc", "version": 1, "content": blocks + [note]}
 
 
+def cached_epic():
+    key = EPIC_FILE.read_text().strip() if EPIC_FILE.is_file() else ""
+    return key if key.rpartition("-")[0] == JIRA_PROJECT else None
+
+
 def issue_payload(summary, adf, epic_key):
     fields = {"project": {"key": JIRA_PROJECT}, "issuetype": {"name": "Task"}, "summary": summary,
               "labels": [JIRA_LABEL], "description": adf}
@@ -1240,10 +1245,9 @@ class Jira:
         return None, searched
 
     def ensure_epic(self):
-        if EPIC_FILE.is_file():
-            key = EPIC_FILE.read_text().strip()
-            if key:
-                return key, False
+        key = cached_epic()
+        if key:
+            return key, False
         jql = f'project = {JIRA_PROJECT} AND issuetype = Epic AND summary ~ "\\"{EPIC_SUMMARY}\\"" ORDER BY created ASC'
         r = self.call("POST", "/rest/api/3/search/jql", {"jql": jql, "fields": ["summary"], "maxResults": 10})
         hits = [i["key"] for i in r.get("issues", []) if (i.get("fields") or {}).get("summary") == EPIC_SUMMARY]
@@ -1276,7 +1280,7 @@ def home_view():
     out = {"bin": str(Path(sys.argv[0]).resolve()).replace(str(HOME), "~", 1),
            "description": "Audit agent usage per window: tokens, cost, plugin/skill/MCP use, instruction-file size, PR hygiene; files a Jira task",
            "reports_dir": str(REPORTS_DIR).replace(str(HOME), "~", 1),
-           "epic": EPIC_FILE.read_text().strip() if EPIC_FILE.is_file() else "none yet (created on first filed run)"}
+           "epic": cached_epic() or "none yet (found or created on the next filed run)"}
     if rows:
         out["count"] = f"{min(total, 8)} of {total} reports"
         out["reports"] = rows[:8]
@@ -1421,7 +1425,7 @@ def main(argv):
     if opts.get("no_jira"):
         result["jira"] = "skipped (--no-jira)"
     elif dry:
-        epic = EPIC_FILE.read_text().strip() if EPIC_FILE.is_file() else None
+        epic = cached_epic()
         payload = issue_payload(summary_title, jira_description(md, md_path), epic or "<epic: found or created on a real run>")
         payload_path = out_dir / "jira-payload.json"
         payload_path.write_text(json.dumps(payload, indent=1))

@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily agent metrics collect
+
+[Timer]
+# Ahead of the 08:00 audits, so their window is already in the store.
+OnCalendar=*-*-* 06:30:00
+Unit=agent-metrics-collect.service
+# A box that was off at the scheduled time collects at next boot; the run
+# looks back three days, so one missed day loses nothing.
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

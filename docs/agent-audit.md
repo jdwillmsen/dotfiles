@@ -7,6 +7,9 @@ commits follow the attribution rules. It runs on systemd user timers and files
 each report as a Jira task, so the trend is reviewed rather than just
 collected.
 
+Per-session rows, the plan-quota log and the budget for model spend live in a
+separate store: see [`agent-metrics.md`](agent-metrics.md).
+
 ## What a run does
 
 1. Streams every Claude Code transcript under `~/.claude/projects` touched

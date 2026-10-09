@@ -8,6 +8,8 @@ here="$(cd "$(dirname "$0")/../.." && pwd)"
 metrics="$here/home/dot_local/bin/executable_agent-metrics"
 audit="$here/home/dot_local/bin/executable_agent-audit"
 cfgsrc="$here/home/dot_config/agent-metrics"
+units="$here/home/dot_config/systemd/user"
+trigger="$here/home/run_onchange_53-enable-agent-metrics.sh.tmpl"
 
 fail() {
     echo "FAIL: $1"
@@ -458,5 +460,52 @@ run 0 budget record --usd 2.5 --run weekly
 run 0 collect --since 1
 want committed true "ledger entry"
 [ -z "$(sg status --porcelain)" ] && sg show --stat --format= HEAD | grep -q "ledger/2026-10.jsonl" || fail "collect did not commit the ledger"
+
+# ── Units: one daily collect ──
+svc="$units/agent-metrics-collect.service"
+timer="$units/agent-metrics-collect.timer"
+grep -qx 'ExecStart=%h/.local/bin/agent-metrics collect' "$svc" || fail "service ExecStart"
+grep -qx 'NoNewPrivileges=yes' "$svc" && grep -qx 'PrivateTmp=yes' "$svc" || fail "service hardening missing"
+grep -q '^TimeoutStartSec=' "$svc" || fail "service needs a hard timeout"
+grep -q '^Environment=PATH=' "$svc" || fail "service needs a PATH: a user manager starts with a bare one"
+grep -qxF "OnCalendar=*-*-* 06:30:00" "$timer" || fail "timer calendar"
+grep -qx "Unit=agent-metrics-collect.service" "$timer" || fail "timer target"
+grep -qx "Persistent=true" "$timer" || fail "timer must catch up after downtime"
+grep -qx "WantedBy=timers.target" "$timer" || fail "timer install target"
+if command -v systemd-analyze >/dev/null 2>&1; then
+    systemd-analyze calendar "*-*-* 06:30:00" >/dev/null || fail "calendar rejected by systemd"
+fi
+
+# ── Trigger: stubbed systemctl/loginctl ──
+shellcheck -s bash "$trigger"
+trig="$tmp/trig"
+mkdir -p "$trig/bin" "$trig/home/.config/systemd/user"
+cp "$svc" "$trig/home/.config/systemd/user/"
+cat >"$trig/bin/systemctl" <<'STUB'
+#!/bin/sh
+if [ "$2" = "show-environment" ]; then echo "HOME=$STUB_MANAGER_HOME"; exit 0; fi
+echo "$*" >>"$CALL_LOG"
+STUB
+cat >"$trig/bin/loginctl" <<'STUB'
+#!/bin/sh
+echo "${STUB_LINGER:-no}"
+STUB
+chmod +x "$trig/bin"/*
+run_trigger() {  # $1 manager home, $2 linger
+    : >"$trig/calls"
+    trig_out="$(PATH="$trig/bin:/usr/bin:/bin" HOME="$trig/home" USER=tester BASH_ENV=/dev/null \
+        XDG_CONFIG_HOME="$trig/home/.config" CALL_LOG="$trig/calls" STUB_MANAGER_HOME="$1" \
+        STUB_LINGER="$2" AGENT_METRICS_STORE="$trig/home/no-store" bash "$trigger" 2>&1)"
+}
+run_trigger /elsewhere no
+grep -q "skipping enable" <<<"$trig_out" && [ ! -s "$trig/calls" ] || fail "trigger must skip a scratch-dest apply" "$trig_out"
+run_trigger "$trig/home" no
+grep -qx -- "--user daemon-reload" "$trig/calls" || fail "trigger never reloads systemd"
+grep -qx -- "--user enable --now agent-metrics-collect.timer" "$trig/calls" || fail "trigger does not enable the timer" "$(cat "$trig/calls")"
+grep -q "start" "$trig/calls" && fail "trigger must not start a collect"
+grep -q "linger is off" <<<"$trig_out" || fail "trigger should warn when linger is off"
+grep -q "agent-metrics init" <<<"$trig_out" || fail "trigger should say the store still needs cloning" "$trig_out"
+run_trigger "$trig/home" yes
+grep -q "linger is off" <<<"$trig_out" && fail "no linger warning expected when linger is on"
 
 echo "test_agent_metrics_script: OK"

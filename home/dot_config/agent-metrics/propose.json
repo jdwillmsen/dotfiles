@@ -17,6 +17,7 @@
   "review_usd": 3.0,
   "review_min_usd": 1.0,
   "max_findings": 4,
+  "max_attempts": 3,
   "max_changed_lines": 60,
   "max_turns": 12,
   "call_timeout_s": 300,

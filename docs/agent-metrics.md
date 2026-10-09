@@ -13,8 +13,9 @@ session labelling all read from this store. The design is in
 `agent-metrics collect` runs daily at 06:30 from a systemd user timer:
 
 1. Takes a lock, so a timer firing during a manual run waits for it.
-2. Refuses a store with changes it did not make, then pulls fast-forward
-   only.
+2. Refuses a store with changes outside its own `sessions/`, `quota/` and
+   `ledger/` directories, then pulls fast-forward only. Uncommitted changes
+   inside them are leftovers of a run that died, and this run commits them.
 3. Finds main transcripts under `~/.claude/projects` where the file or any of
    its subagent files changed in the last 3 days (`--since`), and builds one
    row for each.
@@ -60,8 +61,10 @@ Reading the numbers:
   upper bound.
 - **`interrupts`** matches one message format and probably undercounts.
 - **Identifier fields** (skill, tool, MCP server, subagent type, model) are
-  cut to 64 characters and stripped of anything outside
-  `[A-Za-z0-9:_.@/-]`.
+  cut to 64 characters. A value with any character outside
+  `[A-Za-z0-9:_.@/-]` is stored as `_invalid`, and one shaped like a common
+  credential as `_redacted`.
+- **`session_id`** is the transcript's file name.
 - **Not handled:** forked or resumed sessions are not de-duplicated, and a
   session resumed across months stays in the month it started.
 
@@ -94,10 +97,12 @@ per calendar month from `ledger/YYYY-MM.jsonl` and never carries over.
 | `quota-hold` | Weekly quota at or above the cut-off and not yet reset | 3 |
 | `no-baseline` | No priced sessions in the last 30 days | 3 |
 
+The hold uses the newest reading that carries a weekly percentage. When that
+reading has no usable reset time, it holds until the reading is 7 days old.
 An unknown quota does not block, because readings stop when no interactive
 session is open; the dollar caps still apply and the output says the quota is
-unknown. A ledger or config file that cannot be read exits 2: it is never
-treated as an allowance.
+unknown. A ledger, config file or stored cost that cannot be read as a
+finite, non-negative amount exits 2: it is never treated as an allowance.
 
 Anything that spends on a model runs `budget check` first and
 `budget record` after. `budget.json` is not for agents to edit.

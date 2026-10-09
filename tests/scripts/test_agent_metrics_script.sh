@@ -113,6 +113,8 @@ write("-a/aaaa-1.jsonl", [
     A("10:00:11", type="assistant", message={"id": "m1", "model": "claude-opus-5-5", "usage": usage(100, 80, 1000, 200, 0),
         "content": [tu("tu2", "Bash", command="gh pr create --fill"),
                     tu("tu3", "Skill", skill="bad name $ " + "x" * 100),
+                    tu("tu6", "Skill", skill="ghp_" + "Q" * 36),
+                    tu("tu7", "Skill", skill="x" * 100),
                     tu("tu4", "mcp__jira__search", q="purple"),
                     tu("tu5", "Agent", subagent_type="Explore", prompt="purple")]}),
     A("10:00:20", type="user", message={"role": "user", "content": [tr("tu1"), tr("tu2", True), tr("tu3"), tr("tu4"), tr("tu5")]}),
@@ -186,10 +188,9 @@ eq("cache_read_share", 0.4149); eq("model_switches", 1); eq("compactions", 1)
 eq("tool_errors", 1); eq("denials", 0); eq("rate_limits", 1); eq("api_errors", 1)
 eq("commits", 1); eq("pushes", 0); eq("prs_created", 0)
 eq("pr_links", [{"repo": "acme/app", "number": 7}])
-eq("tools", {"Agent": 1, "Bash": 2, "Skill": 1, "mcp__jira__search": 1})
+eq("tools", {"Agent": 1, "Bash": 2, "Skill": 3, "mcp__jira__search": 1})
 eq("mcp", {"jira": 1}); eq("subagent_types", {"Explore": 1}); eq("subagent_runs", 1)
-(skill, n), = r["skills"].items()
-assert n == 1 and len(skill) == 64 and re.fullmatch(r"[A-Za-z0-9:_.@/-]+", skill), skill
+eq("skills", {"_invalid": 1, "_redacted": 1, "x" * 64: 1})
 eq("bad_lines", 1)
 for leak in ("ghp_", "purple", "secret tool output", "example.invalid"):
     assert leak not in raw, f"{leak!r} leaked into the row"
@@ -465,6 +466,89 @@ run 0 budget record --usd 2.5 --run weekly
 run 0 collect --since 1
 want committed true "ledger entry"
 [ -z "$(sg status --porcelain)" ] && sg show --stat --format= HEAD | grep -q "ledger/2026-10.jsonl" || fail "collect did not commit the ledger"
+
+# ── Hostile and malformed input ──
+# Records whose fields have the wrong type must not stop the run or the row.
+python3 - "$P" <<'PY'
+import json, os, sys
+d = os.path.join(sys.argv[1], "-odd"); os.makedirs(d, exist_ok=True)
+def rec(t, **kw):
+    return {"sessionId": "odd-6", "cwd": "/x", "entrypoint": "cli", "timestamp": f"2026-10-08T{t}.000Z", **kw}
+lines = [json.dumps(r) for r in [
+    rec("13:00:00", type="user", message={"role": "user", "content": [{"type": "text", "text": 42}]}),
+    rec("13:00:01", type="assistant", message={"id": ["not", "a", "string"], "model": "claude-opus-5-5",
+        "usage": {"input_tokens": 5}, "content": [{"type": "tool_use", "id": {"a": 1}, "name": "Bash", "input": {"command": "git push"}}]}),
+    rec("13:00:02", type="user", message={"role": "user", "content": [{"type": "tool_result", "tool_use_id": {"a": 1}}]}),
+    rec("13:00:03", type="assistant", message={"id": "o1", "model": "claude-opus-5-5",
+        "usage": {"input_tokens": "many", "output_tokens": 3.5, "cache_read_input_tokens": -4}, "content": "text"}),
+]]
+# json.loads accepts these; they must never reach a cost.
+lines.append('{"sessionId":"odd-6","cwd":"/x","entrypoint":"cli","timestamp":"2026-10-08T13:00:04.000Z","type":"assistant",'
+             '"message":{"id":"o2","model":"claude-opus-5-5","usage":{"input_tokens":NaN,"output_tokens":1e999,"cache_read_input_tokens":Infinity},"content":[]}}')
+lines += ["[1, 2, 3]", '"just a string"', "null"]
+open(os.path.join(d, "odd-6.jsonl"), "w").write("\n".join(lines) + "\n")
+PY
+run 0 row "$P/-odd/odd-6.jsonl"
+python3 - "$out" <<'PY' || fail "odd field types broke the row or reached the cost" "$(cat "$out")"
+import json, math, sys
+r = json.load(open(sys.argv[1]))
+m = r["models"]["main"]["claude-opus-5-5"]
+assert m == {"calls": 2, "input": 0, "output": 0, "cache_read": 0, "cache_write_5m": 0, "cache_write_1h": 0,
+             "cost_usd": 0.0}, m
+assert r["cost_usd"] == 0.0 and math.isfinite(r["cost_usd"]), r["cost_usd"]
+assert r["prompts"] == 1 and r["wall_s"] == 4, r
+PY
+run 0 collect --since 1
+want sessions_written 1 "the odd transcript still gets a row"
+
+# A cost in the store that is not a finite amount is an error, never a budget.
+for bad in NaN Infinity -5 '"lots"'; do
+    mkbstore "$bstore"
+    echo "{\"session_id\":\"s9\",\"started_at\":\"2026-10-02T00:00:00Z\",\"cost_usd\":$bad}" >>"$bstore/sessions/2026-10.jsonl"
+    brun 2 check --need 1000000
+    grep -q "sessions/2026-10.jsonl" "$out" || fail "a bad stored cost ($bad) is not named" "$(cat "$out")"
+done
+mkbstore "$bstore"
+echo "not a row" >>"$bstore/sessions/2026-10.jsonl"
+brun 2 check --need 1
+grep -q "sessions/2026-10.jsonl" "$out" || fail "a corrupt session line is not named" "$(cat "$out")"
+
+# The weekly hold survives a newer reading without a weekly value, and a reset time it cannot use.
+mkbstore "$bstore"
+later="$(date -u -d "2026-10-09T11:30:00Z" +%s)"
+{
+    echo "{\"at\":$at,\"seven_day_pct\":95,\"seven_day_resets_at\":$soon}"
+    echo "{\"at\":$later,\"five_hour_pct\":10,\"five_hour_resets_at\":$soon}"
+} >"$bstate/quota.jsonl"
+brun 3 check --need 1
+state quota-hold "a newer five-hour-only reading"
+{
+    echo "{\"at\":$at,\"seven_day_pct\":95,\"seven_day_resets_at\":$soon}"
+    echo "{\"at\":$later,\"seven_day_pct\":\"95\",\"seven_day_resets_at\":$soon}"
+} >"$bstate/quota.jsonl"
+brun 3 check --need 1
+state quota-hold "a newer reading with a non-numeric percentage"
+echo "{\"at\":$at,\"seven_day_pct\":99,\"seven_day_resets_at\":0}" >"$bstate/quota.jsonl"
+brun 3 check --need 1
+state quota-hold "a reset time that cannot be used"
+old="$(date -u -d "2026-09-25T00:00:00Z" +%s)"
+echo "{\"at\":$old,\"seven_day_pct\":99,\"seven_day_resets_at\":0}" >"$bstate/quota.jsonl"
+brun 0 check --need 1
+state ok "a reading older than the weekly window"
+rm "$bstate/quota.jsonl"
+
+# A run that died after writing rows must not block the next one.
+echo '{"at":Infinity,"seven_day_pct":1}' >>"$qlog"
+echo '{"session_id":"left-behind","started_at":"2026-10-07T00:00:00Z","cost_usd":0}' >>"$month"
+: >"$store/sessions/2026-10.tmp"
+run 0 collect --since 1
+want committed true "leftovers from a dead run"
+[ -z "$(sg status --porcelain)" ] || fail "leftovers from a dead run were not cleaned up" "$(sg status --porcelain)"
+[ ! -e "$store/sessions/2026-10.tmp" ] || fail "a stale temp file survived"
+if sg ls-files | grep -q '\.tmp$'; then fail "a temp file was committed"; fi
+echo stray >"$store/stray.txt"
+run 1 collect --since 1
+rm "$store/stray.txt"
 
 # ── Units: one daily collect ──
 svc="$units/agent-metrics-collect.service"

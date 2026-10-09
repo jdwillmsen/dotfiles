@@ -36,6 +36,15 @@ touched block; never comment out dead code. Match surrounding density.
   line-by-line; rationale recorded in the description.
 - Preferred ship path: `/no-mistakes` pipeline (intent → rebase → review →
   test+evidence → docs → lint → push → PR → CI babysit).
+- **A PR that needs an approving review is opened as the bot.** GitHub blocks
+  self-approval and these repos have one maintainer, so one opened under the
+  human's `gh` auth can only merge by bypass. Before `gh pr create`, check the
+  base branch for a required approval or CODEOWNERS gate in both places it can
+  live — rulesets (`gh api repos/<owner>/<repo>/rules/branches/<base>`) and
+  classic protection (`.../branches/<base>/protection`); an access error is
+  not a "no". If gated, author it as `jdwlabs-agent-bot` (jdwlabs repos;
+  elsewhere, say so before opening).
+  Method: `docs/bot-authored-prs.md` (dotfiles repo).
 - **Rebase merge, always** — every repo is rebase-only, so each commit lands
   on `main` as-is and must stand alone. Tidy a messy branch locally before
   merging; resolve conflicts with `git rebase origin/main`, never a merge

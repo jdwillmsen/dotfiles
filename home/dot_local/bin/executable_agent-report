@@ -293,18 +293,87 @@ def trend(window, label):
     return sorted(rows, key=lambda r: r["label_date"])[-6:]
 
 
+# ── Flags ────────────────────────────────────────────────────────────────────
+
+TREND_DAYS = 7
+SEVERITY_ORDER = {"critical": 0, "warn": 1}
+
+
+def flag(fid, severity, metric, message, value, baseline):
+    return {"id": fid, "severity": severity, "metric": metric, "message": message,
+            "value": value, "baseline": baseline}
+
+
+def daily_flags(rows, trailing_usd, peak_weekly, label, th):
+    """Flags for one day. Messages are built from numbers and store
+    identifiers only, so a flag can be shown anywhere without leaking text."""
+    out = []
+    spend = sum(r["cost_usd"] for r in rows)
+    avg = trailing_usd / TREND_DAYS
+    # With no spend in the trailing week there is no multiple to take.
+    if avg > 0:
+        x = spend / avg
+        level = "critical" if x > th["spend_critical_multiple"] else "warn" if x > th["spend_warn_multiple"] else None
+        if level:
+            out.append(flag("day-spend", level, "day_spend_usd",
+                            f"day spend ${spend:.2f} is {x:.1f}x the trailing {TREND_DAYS}-day daily average of ${avg:.2f}",
+                            round(spend, 4), round(avg, 4)))
+    for r in rows:
+        sid = am.clean_id(r["session_id"])
+        who = f"session {sid} ({am.clean_id(r['repo']) if r['repo'] else 'no repo'}, " \
+              f"{am.clean_id(r['pipeline']) if r['pipeline'] else 'no pipeline'})"
+        cost = r["cost_usd"]
+        if cost > th["runaway_session_usd"]:
+            out.append(flag(f"runaway-cost:{sid}", "critical", "session_cost_usd",
+                            f"{who} cost ${cost:.2f}, above ${th['runaway_session_usd']:g}", round(cost, 4),
+                            th["runaway_session_usd"]))
+        elif cost > th["session_warn_usd"]:
+            out.append(flag(f"session-cost:{sid}", "warn", "session_cost_usd",
+                            f"{who} cost ${cost:.2f}, above ${th['session_warn_usd']:g}", round(cost, 4),
+                            th["session_warn_usd"]))
+        calls = sum(m["calls"] for part in r["models"].values() for m in part.values())
+        if calls > th["runaway_session_calls"]:
+            out.append(flag(f"runaway-calls:{sid}", "critical", "session_api_calls",
+                            f"{who} made {calls:g} API calls, above {th['runaway_session_calls']:g}", calls,
+                            th["runaway_session_calls"]))
+    if peak_weekly is not None and peak_weekly >= th["weekly_quota_warn_pct"]:
+        out.append(flag("weekly-quota", "warn", "weekly_quota_pct",
+                        f"peak weekly plan quota {peak_weekly:g}% on {label}, at or above {th['weekly_quota_warn_pct']:g}%",
+                        peak_weekly, th["weekly_quota_warn_pct"]))
+    return sorted(out, key=lambda f: (SEVERITY_ORDER[f["severity"]], f["id"]))
+
+
+def write_flags_file(report):
+    """Other tools read this file, so it holds the newest daily run only and
+    is removed when that run found nothing."""
+    path = am.STATE / "flags.json"
+    if report["flags"]:
+        write_text(path, json.dumps({"date": report["label_date"], "window": "daily", "flags": report["flags"]}, indent=1) + "\n")
+    else:
+        path.unlink(missing_ok=True)
+
+
 # ── Report ───────────────────────────────────────────────────────────────────
 
-def build_report(opts, w):
+def build_report(opts, w, th):
     (cs, ce), (ps, pe) = w
     label = (ce - dt.timedelta(days=1)).isoformat()
+    current = summarize_window(cs, ce)
+    flags = []
+    if opts.window == "daily":
+        flags = daily_flags(load_sessions(stamp(cs), stamp(ce)),
+                            sum(r["cost_usd"] for r in load_sessions(stamp(cs - dt.timedelta(days=TREND_DAYS)), stamp(cs))),
+                            current["quota"]["peak_seven_day_pct"], label, th)
+        # The gate's state when the day was reported, which the monthly
+        # thresholds review counts.
+        current["budget"] = am.budget_state()
     return {
         "schema": SCHEMA, "window": opts.window, "start": cs.isoformat(), "end": ce.isoformat(),
         "label_date": label, "generated_at": am.iso(am.now().timestamp()),
-        "current": summarize_window(cs, ce),
+        "current": current,
         "previous": {"start": ps.isoformat(), "end": pe.isoformat(), **summarize_window(ps, pe)},
         "trend": trend(opts.window, label),
-        "flags": [], "delivery": None, "audit": None, "insights": None,
+        "flags": flags, "delivery": None, "audit": None, "insights": None,
     }
 
 
@@ -368,13 +437,16 @@ def cmd_run(args):
     except ValueError:
         am.usage_error(f"--end must be YYYY-MM-DD, got {args.end}", USAGE_SHORT)
     am.require_store()
-    load_thresholds()
+    th = load_thresholds()
     w = compute_windows(args.window, end)
-    report = build_report(args, w)
+    report = build_report(args, w, th)
     directory = Path(tempfile.mkdtemp(prefix="agent-report-")) if args.dry_run else am.STORE / "reports"
     paths = write_outputs(report, directory)
+    if args.window == "daily" and not args.dry_run:
+        write_flags_file(report)
     emit({"dry_run": bool(args.dry_run), "window": report["window"], "start": report["start"],
           "end": report["end"], "label_date": report["label_date"], "previous_start": report["previous"]["start"],
+          "flags": len(report["flags"]),
           **{k: str(v) for k, v in paths.items()}})
     return 0
 

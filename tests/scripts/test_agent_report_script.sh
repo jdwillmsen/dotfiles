@@ -297,4 +297,59 @@ run 2 --window weekly --end 2026-10-09 --dry-run --no-insights --no-github
 grep -q "quota/2026-10.jsonl" "$out" || fail "a bad quota reading does not name the file" "$(cat "$out")"
 reset_store
 
+# ── Flags: deterministic thresholds on the daily window ──
+flagsfile="$tmp/state/flags.json"
+run 0 --window daily --end 2026-10-09 --no-insights
+[ -f "$flagsfile" ] || fail "a daily run with flags did not write flags.json" "$(cat "$out" "$err")"
+python3 - "$flagsfile" "$store/reports/2026-10-08-daily.json" <<'PY' || fail "daily flags are wrong"
+import json, sys
+f = json.load(open(sys.argv[1]))
+assert sorted(f) == ["date", "flags", "window"], sorted(f)
+assert (f["date"], f["window"]) == ("2026-10-08", "daily"), f
+for x in f["flags"]:
+    assert sorted(x) == ["baseline", "id", "message", "metric", "severity", "value"], sorted(x)
+by = {x["id"]: x for x in f["flags"]}
+assert sorted(by) == ["day-spend", "runaway-calls:s-d3", "session-cost:s-d2", "weekly-quota"], sorted(by)
+assert (by["day-spend"]["severity"], by["day-spend"]["metric"], by["day-spend"]["value"], by["day-spend"]["baseline"]) \
+    == ("critical", "day_spend_usd", 91.0, 2.2857), by["day-spend"]
+assert "39.8x" in by["day-spend"]["message"], by["day-spend"]["message"]
+assert (by["session-cost:s-d2"]["severity"], by["session-cost:s-d2"]["value"], by["session-cost:s-d2"]["baseline"]) \
+    == ("warn", 60.0, 50), by["session-cost:s-d2"]
+assert by["session-cost:s-d2"]["message"] == "session s-d2 (acme/app, no-mistakes) cost $60.00, above $50", by["session-cost:s-d2"]["message"]
+assert (by["runaway-calls:s-d3"]["severity"], by["runaway-calls:s-d3"]["metric"], by["runaway-calls:s-d3"]["value"]) \
+    == ("critical", "session_api_calls", 600), by["runaway-calls:s-d3"]
+assert (by["weekly-quota"]["severity"], by["weekly-quota"]["value"], by["weekly-quota"]["baseline"]) == ("warn", 91, 85)
+assert json.load(open(sys.argv[2]))["flags"] == f["flags"], "the report and flags.json disagree"
+PY
+
+# A quiet day removes the file, so a stale flag never outlives its day.
+run 0 --window daily --end 2026-10-03 --no-insights
+[ ! -e "$flagsfile" ] || fail "a daily run without flags left flags.json behind" "$(cat "$flagsfile")"
+grep -q "^flags: 0" "$out" || fail "the run does not report its flag count" "$(cat "$out")"
+
+# Other windows never touch the flag file.
+echo '{"date": "x", "window": "daily", "flags": []}' >"$flagsfile"
+run 0 --window weekly --end 2026-10-09 --no-insights --no-github
+grep -q '"date": "x"' "$flagsfile" || fail "a weekly run rewrote flags.json"
+rm "$flagsfile"
+
+# Warn below critical: a 2.3x day fires the warn level only.
+run 0 --window daily --end 2026-10-02 --no-insights
+python3 - "$flagsfile" <<'PY' || fail "a warn-level spend day is flagged wrongly"
+import json, sys
+f = json.load(open(sys.argv[1]))["flags"]
+assert [(x["id"], x["severity"], x["value"]) for x in f] == [("day-spend", "warn", 3.0)], f
+PY
+
+# The same day under a looser threshold fires nothing.
+python3 - "$tmp/thresholds.bak" "$tmp/config/thresholds.json" <<'PY'
+import json, sys
+t = json.load(open(sys.argv[1])); t["spend_warn_multiple"] = 2.4
+json.dump(t, open(sys.argv[2], "w"))
+PY
+run 0 --window daily --end 2026-10-02 --no-insights
+[ ! -e "$flagsfile" ] || fail "a day under the threshold was flagged" "$(cat "$flagsfile")"
+cp "$tmp/thresholds.bak" "$tmp/config/thresholds.json"
+reset_store
+
 echo "test_agent_report_script: OK"

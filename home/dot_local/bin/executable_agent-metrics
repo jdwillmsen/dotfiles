@@ -47,6 +47,8 @@ SCHEMA = 1
 IDLE_GAP_S = 300
 ID_MAX = 64
 ID_UNSAFE = re.compile(r"[^A-Za-z0-9:_.@/-]")
+# Shapes of common credentials, which are otherwise valid identifier characters.
+ID_CREDENTIAL = re.compile(r"(?:gh[pousr]_|github_pat_|sk-|xox[baprs]-|AKIA|ASIA|AIza|eyJ)[A-Za-z0-9_-]{16,}")
 # A person is typing in these: the terminal, and T3 Code, which drives its
 # sessions through the TypeScript SDK. Everything else is pipeline-launched.
 INTERACTIVE_ENTRYPOINTS = ("cli", "sdk-ts")
@@ -59,6 +61,9 @@ OUTPUT_CMDS = (("commits", re.compile(r"\bgit\b[^|;&\n]*\bcommit\b")),
 USAGE_FIELDS = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
 
 BASELINE_DAYS = 30
+WEEKLY_WINDOW_S = 7 * 86400
+# The only paths in the store this tool writes; anything else is someone else's.
+OWN_DIRS = ("sessions", "quota", "ledger")
 QUOTA_LOCAL_KEEP_S = 35 * 86400
 QUOTA_WINDOWS = ("five_hour", "seven_day")
 LOCK_WAIT_S = int(os.environ.get("AGENT_METRICS_LOCK_WAIT", "600"))
@@ -208,9 +213,15 @@ def cost_of(model, u):
 # ── Session rows ─────────────────────────────────────────────────────────────
 
 def clean_id(s):
-    """Identifier fields are the only strings a row stores, so a prompt
-    fragment that ends up in one must not survive verbatim."""
-    return ID_UNSAFE.sub("_", str(s))[:ID_MAX]
+    """Identifier fields are the only strings a row stores. A value that is
+    not identifier-shaped is replaced whole: cleaning it character by
+    character would leave a prompt fragment readable."""
+    s = str(s)
+    if not s or ID_UNSAFE.search(s):
+        return "_invalid"
+    if ID_CREDENTIAL.search(s):
+        return "_redacted"
+    return s[:ID_MAX]
 
 
 def parse_ts(s):
@@ -247,10 +258,17 @@ def find_sessions(since_days):
 
 def read_usage(u):
     u = u if isinstance(u, dict) else {}
-    n = lambda k: u.get(k) or 0
+
+    def tokens(d, k):
+        # json.loads accepts NaN and Infinity; one of those in a count would
+        # make every cost and budget comparison downstream meaningless.
+        v = d.get(k)
+        return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else 0
+
+    n = lambda k: tokens(u, k)
     split = u.get("cache_creation") if isinstance(u.get("cache_creation"), dict) else None
     if split:
-        w5, w1 = split.get("ephemeral_5m_input_tokens") or 0, split.get("ephemeral_1h_input_tokens") or 0
+        w5, w1 = tokens(split, "ephemeral_5m_input_tokens"), tokens(split, "ephemeral_1h_input_tokens")
     else:
         w5, w1 = n("cache_creation_input_tokens"), 0
     return {"input": n("input_tokens"), "output": n("output_tokens"), "cache_read": n("cache_read_input_tokens"),
@@ -261,7 +279,7 @@ def text_of(content):
     if isinstance(content, str):
         return content
     if isinstance(content, list) and content and all(isinstance(b, dict) and b.get("type") == "text" for b in content):
-        return " ".join(b.get("text") or "" for b in content)
+        return " ".join(b["text"] for b in content if isinstance(b.get("text"), str))
     return None
 
 
@@ -314,8 +332,7 @@ def build_row(main_path, sub_paths):
                 if not is_sub and t in TIMED_TYPES:
                     if ts is not None:
                         times.append(ts)
-                    for key, field in (("session_id", "sessionId"), ("entrypoint", "entrypoint"),
-                                       ("cli_version", "version"), ("cwd", "cwd")):
+                    for key, field in (("entrypoint", "entrypoint"), ("cli_version", "version"), ("cwd", "cwd")):
                         if key not in ident and d.get(field):
                             ident[key] = d[field]
                 m = d.get("message") if isinstance(d.get("message"), dict) else {}
@@ -327,7 +344,7 @@ def build_row(main_path, sub_paths):
                             counts["rate_limits"] += 1
                     model, mid = m.get("model"), m.get("id")
                     # Error and placeholder turns carry a bracketed pseudo-model.
-                    if model and mid and not str(model).startswith("<"):
+                    if isinstance(model, str) and isinstance(mid, str) and model and mid and not model.startswith("<"):
                         u = read_usage(m.get("usage"))
                         if mid not in msgs:
                             msgs[mid] = {"model": clean_id(model), "where": "subagent" if is_sub else "main", **u}
@@ -338,9 +355,13 @@ def build_row(main_path, sub_paths):
                             for k in USAGE_FIELDS:
                                 msgs[mid][k] = max(msgs[mid][k], u[k])
                     for b in content if isinstance(content, list) else []:
-                        if not isinstance(b, dict) or b.get("type") != "tool_use" or b.get("id") in seen_tools:
+                        if not isinstance(b, dict) or b.get("type") != "tool_use":
                             continue
-                        seen_tools.add(b.get("id"))
+                        tid = b.get("id") if isinstance(b.get("id"), str) else None
+                        if tid in seen_tools:
+                            continue
+                        if tid:
+                            seen_tools.add(tid)
                         name, inp = str(b.get("name") or "unknown"), b.get("input") if isinstance(b.get("input"), dict) else {}
                         tools[clean_id(name)] += 1
                         if name == "Skill":
@@ -350,8 +371,8 @@ def build_row(main_path, sub_paths):
                         elif name == "Bash":
                             cmd = str(inp.get("command") or "")
                             kinds = [k for k, rx in OUTPUT_CMDS if rx.search(cmd)]
-                            if kinds:
-                                pending[b.get("id")] = kinds
+                            if kinds and tid:
+                                pending[tid] = kinds
                 elif t == "user":
                     if d.get("toolDenialKind"):
                         counts["denials"] += 1
@@ -359,7 +380,8 @@ def build_row(main_path, sub_paths):
                         if isinstance(b, dict) and b.get("type") == "tool_result":
                             failed = b.get("is_error") is True
                             counts["tool_errors"] += failed
-                            for k in pending.pop(b.get("tool_use_id"), []):
+                            ref = b.get("tool_use_id")
+                            for k in pending.pop(ref, []) if isinstance(ref, str) else []:
                                 counts[k] += not failed
                     text = text_of(content)
                     if is_sub or text is None or d.get("isMeta") or d.get("isCompactSummary"):
@@ -419,7 +441,9 @@ def build_row(main_path, sub_paths):
 
     return {
         "schema": SCHEMA,
-        "session_id": clean_id(ident.get("session_id") or Path(main_path).stem),
+        # The file name, not the first record's sessionId: it is unique per
+        # transcript, so two files can never collapse into one row.
+        "session_id": clean_id(Path(main_path).stem),
         "entrypoint": clean_id(entry) if entry else None,
         "cli_version": clean_id(ident["cli_version"]) if ident.get("cli_version") else None,
         "started_at": iso(times[0]), "ended_at": iso(times[-1]),
@@ -473,22 +497,36 @@ def month_file(kind, stamp):
 
 
 def read_month(path):
+    """Rows of one month file by session id. A line that is not a row is a
+    setup error naming the file: guessing around it would rewrite history."""
     rows = {}
-    if path.is_file():
-        for line in path.read_text().splitlines():
-            if line.strip():
-                r = json.loads(line)
-                rows[r["session_id"]] = r
+    if not path.is_file():
+        return rows
+    for n, line in enumerate(path.read_text().splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            r = json.loads(line)
+            if not (isinstance(r, dict) and isinstance(r["session_id"], str) and isinstance(r["started_at"], str)):
+                raise ValueError
+        except (ValueError, KeyError):
+            die(EXIT_USAGE, f"{tilde(path)} line {n} is not a session row",
+                f"Fix or remove the line in {tilde(STORE)}/sessions/{path.name}")
+        rows[r["session_id"]] = r
     return rows
 
 
-def write_month(path, rows):
+def write_lines(path, objs):
     path.parent.mkdir(parents=True, exist_ok=True)
-    ordered = sorted(rows.values(), key=lambda r: (r["started_at"], r["session_id"]))
     tmp = path.with_suffix(".tmp")
-    # Sorted keys and a fixed order keep a one-session change a one-line diff.
-    tmp.write_text("".join(json.dumps(r, sort_keys=True, separators=(",", ":")) + "\n" for r in ordered))
+    # Sorted keys keep a one-row change a one-line diff; allow_nan=False keeps
+    # a non-finite number from ever being stored.
+    tmp.write_text("".join(json.dumps(o, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n" for o in objs))
     os.replace(tmp, path)
+
+
+def write_month(path, rows):
+    write_lines(path, sorted(rows.values(), key=lambda r: (r["started_at"], r["session_id"])))
 
 
 def upsert(rows, write=True):
@@ -511,16 +549,6 @@ def upsert(rows, write=True):
         if changed and write:
             write_month(path, have)
     return written, unchanged
-
-
-def iter_sessions(start, end):
-    """Rows whose start time falls in [start, end), both UTC datetimes."""
-    lo, hi = iso(start.timestamp()), iso(end.timestamp())
-    for path in sorted((STORE / "sessions").glob("*.jsonl")):
-        if lo[:7] <= path.stem <= hi[:7]:
-            for r in read_month(path).values():
-                if lo <= r["started_at"] < hi:
-                    yield r
 
 
 class Lock:
@@ -546,6 +574,11 @@ class Lock:
 
 # ── Quota ────────────────────────────────────────────────────────────────────
 
+def is_amount(v):
+    """A finite, non-negative number: the only kind a budget may be built on."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and v >= 0
+
+
 def read_jsonl(path):
     """Parsed object lines of a file; anything else on a line is skipped."""
     rows = []
@@ -564,7 +597,7 @@ def read_jsonl(path):
 
 
 def local_quota():
-    return [r for r in read_jsonl(STATE / "quota.jsonl") if isinstance(r.get("at"), (int, float))]
+    return [r for r in read_jsonl(STATE / "quota.jsonl") if is_amount(r.get("at"))]
 
 
 def rollup_quota(write=True):
@@ -582,7 +615,7 @@ def rollup_quota(write=True):
         agg["readings"] += 1
         for w in QUOTA_WINDOWS:
             pct = r.get(f"{w}_pct")
-            if isinstance(pct, (int, float)) and pct >= agg.get(f"{w}_pct", -1):
+            if is_amount(pct) and pct >= agg.get(f"{w}_pct", -1):
                 agg[f"{w}_pct"], agg[f"{w}_resets_at"] = pct, r.get(f"{w}_resets_at")
     added = 0
     by_file = {}
@@ -594,9 +627,7 @@ def rollup_quota(write=True):
         added += len(fresh)
         if fresh and write:
             have.update((a["hour"], a) for a in fresh)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("".join(json.dumps(have[h], sort_keys=True, separators=(",", ":")) + "\n"
-                                    for h in sorted(have)))
+            write_lines(path, [have[h] for h in sorted(have)])
     cutoff = now().timestamp() - QUOTA_LOCAL_KEEP_S
     # Rewriting races the status line's appends, so only do it when there is
     # something to drop; at worst one reading in a month is lost.
@@ -607,8 +638,8 @@ def rollup_quota(write=True):
     return added
 
 
-def latest_quota():
-    """The newest reading, from the local log or, failing that, the store."""
+def quota_readings():
+    """Every reading still at hand: the local log plus the store's newest month."""
     readings = local_quota()
     if store_exists():
         files = sorted((STORE / "quota").glob("*.jsonl"))
@@ -616,6 +647,18 @@ def latest_quota():
             at = parse_ts(r.get("hour"))
             if at is not None:
                 readings.append({**r, "at": at})
+    return readings
+
+
+def latest_quota():
+    readings = quota_readings()
+    return max(readings, key=lambda r: r["at"]) if readings else None
+
+
+def weekly_quota():
+    """The newest reading that carries a usable weekly percentage. A newer
+    reading without one says nothing about the weekly window."""
+    readings = [r for r in quota_readings() if is_amount(r.get("seven_day_pct"))]
     return max(readings, key=lambda r: r["at"]) if readings else None
 
 
@@ -681,50 +724,70 @@ def cmd_collect(args):
     if args.since < 1:
         usage_error("--since needs a whole number of days, 1 or more")
     with Lock():
-        # Ledger entries are written between runs by `budget record`.
-        dirty = [l for l in git("status", "--porcelain").stdout.splitlines() if not l[3:].startswith("ledger/")]
-        if dirty:
-            die(EXIT_FAIL, f"the store has changes this run did not make: {dirty[0].strip()}",
-                f"Inspect with `git -C {tilde(STORE)} status`")
-        if has_upstream():
-            pull = git("pull", "--quiet", "--ff-only", check=False)
-            if pull.returncode != 0:
-                die(EXIT_FAIL, f"git pull --ff-only failed: {(pull.stderr or pull.stdout).strip()}",
-                    f"Reconcile by hand in {tilde(STORE)}")
+        try:
+            return collect(args)
+        except RuntimeError as e:
+            die(EXIT_FAIL, str(e), f"Inspect with `git -C {tilde(STORE)} status`")
 
-        sessions = find_sessions(args.since)
-        rows, skipped = [], 0
-        for main, subs in sessions:
+
+def collect(args):
+    # A run that died after writing leaves rows uncommitted in the tool's own
+    # directories; those are picked up again here, so only changes outside
+    # them count as someone else's.
+    foreign = [l for l in git("status", "--porcelain").stdout.splitlines()
+               if not l[3:].startswith(tuple(d + "/" for d in OWN_DIRS))]
+    if foreign:
+        die(EXIT_FAIL, f"the store has changes this run did not make: {foreign[0].strip()}",
+            f"Inspect with `git -C {tilde(STORE)} status`")
+    if has_upstream():
+        pull = git("pull", "--quiet", "--ff-only", check=False)
+        if pull.returncode != 0:
+            die(EXIT_FAIL, f"git pull --ff-only failed: {(pull.stderr or pull.stdout).strip()}",
+                f"Reconcile by hand in {tilde(STORE)}")
+    if not args.dry_run:
+        for d in OWN_DIRS:
+            for stale in (STORE / d).glob("*.tmp"):
+                stale.unlink()
+
+    sessions = find_sessions(args.since)
+    rows, skipped = [], 0
+    for main, subs in sessions:
+        try:
             row = build_row(main, subs)
-            if row is None:
-                skipped += 1
-            else:
-                rows.append(row)
-        written, unchanged = upsert(rows, write=not args.dry_run)
-        out = {"files_scanned": len(sessions), "sessions_written": written, "sessions_unchanged": unchanged,
-               "files_skipped": skipped, "quota_hours_added": rollup_quota(write=not args.dry_run),
-               "dry_run": bool(args.dry_run)}
-        if args.dry_run:
-            emit(out)
-            return 0
-
-        out["committed"] = False
-        if git("status", "--porcelain").stdout.strip():
-            git("add", "-A")
-            git("commit", "--quiet", "-m", f"collect: {now():%Y-%m-%d}, {written} sessions")
-            out["committed"] = True
-        ahead = not has_upstream() or git("rev-list", "--count", "@{u}..HEAD").stdout.strip() != "0"
-        if args.no_push or not ahead:
-            out["pushed"] = "skipped" if args.no_push and ahead else "nothing to push"
-            emit(out)
-            return 0
-        push = git("push", "--quiet", "-u", "origin", "HEAD", check=False)
-        out["pushed"] = push.returncode == 0
-        if push.returncode != 0:
-            # The rows are committed locally, so the next run delivers them.
-            out["error"] = f"git push failed: {(push.stderr or push.stdout).strip().splitlines()[-1]}"
+        except Exception as e:  # noqa: BLE001 - one odd transcript must not stop the daily run
+            # The type alone: an exception message can quote transcript content.
+            log(f"skipped {Path(main).name}: {type(e).__name__}")
+            row = None
+        if row is None:
+            skipped += 1
+        else:
+            rows.append(row)
+    written, unchanged = upsert(rows, write=not args.dry_run)
+    out = {"files_scanned": len(sessions), "sessions_written": written, "sessions_unchanged": unchanged,
+           "files_skipped": skipped, "quota_hours_added": rollup_quota(write=not args.dry_run),
+           "dry_run": bool(args.dry_run)}
+    if args.dry_run:
         emit(out)
-        return 0 if out["pushed"] else EXIT_FAIL
+        return 0
+
+    own = [d for d in OWN_DIRS if (STORE / d).is_dir()]
+    out["committed"] = False
+    if own and git("status", "--porcelain", "--", *own).stdout.strip():
+        git("add", "-A", "--", *own)
+        git("commit", "--quiet", "-m", f"collect: {now():%Y-%m-%d}, {written} sessions")
+        out["committed"] = True
+    ahead = not has_upstream() or git("rev-list", "--count", "@{u}..HEAD").stdout.strip() != "0"
+    if args.no_push or not ahead:
+        out["pushed"] = "skipped" if args.no_push and ahead else "nothing to push"
+        emit(out)
+        return 0
+    push = git("push", "--quiet", "-u", "origin", "HEAD", check=False)
+    out["pushed"] = push.returncode == 0
+    if push.returncode != 0:
+        # The rows are committed locally, so the next run delivers them.
+        out["error"] = f"git push failed: {(push.stderr or push.stdout).strip().splitlines()[-1]}"
+    emit(out)
+    return 0 if out["pushed"] else EXIT_FAIL
 
 
 def cmd_row(args):
@@ -760,7 +823,7 @@ def ledger_spent():
             continue
         try:
             usd = json.loads(line)["usd"]
-            if isinstance(usd, bool) or not isinstance(usd, (int, float)) or not math.isfinite(usd) or usd < 0:
+            if not is_amount(usd):
                 raise ValueError("usd")
         except (ValueError, KeyError, TypeError):
             die(EXIT_USAGE, f"{tilde(path)} line {n} is not a ledger entry",
@@ -769,39 +832,64 @@ def ledger_spent():
     return total
 
 
+def baseline(end):
+    """Estimated spend of sessions started in the trailing window. A stored
+    cost that is not a finite amount is an error: it would turn every
+    comparison below into nonsense and let any spend through."""
+    lo, hi = iso((end - dt.timedelta(days=BASELINE_DAYS)).timestamp()), iso(end.timestamp())
+    total = 0.0
+    for path in sorted((STORE / "sessions").glob("*.jsonl")):
+        if not lo[:7] <= path.stem <= hi[:7]:
+            continue
+        for r in read_month(path).values():
+            if not is_amount(r.get("cost_usd")):
+                die(EXIT_USAGE, f"{tilde(path)}: session {clean_id(r['session_id'])} has no usable cost_usd",
+                    f"Fix or remove the row in {tilde(STORE)}/sessions/{path.name}")
+            if lo <= r["started_at"] <= hi:
+                total += r["cost_usd"]
+    return total
+
+
 def budget_state(need=0.0, critical=False):
     cfg = budget_config()
     end = now()
-    base = float(sum(r.get("cost_usd") or 0 for r in
-                     iter_sessions(end - dt.timedelta(days=BASELINE_DAYS), end + dt.timedelta(seconds=1))))
+    base = baseline(end)
     spent = ledger_spent()
     plan, hard = base * cfg["plan_pct"] / 100, base * cfg["hard_pct"] / 100
-    q = latest_quota()
-    weekly = q.get("seven_day_pct") if q else None
-    resets = q.get("seven_day_resets_at") if q else None
-    held = (isinstance(weekly, (int, float)) and weekly >= cfg["weekly_quota_cutoff_pct"]
-            and isinstance(resets, (int, float)) and resets > end.timestamp())
+    q = weekly_quota()
+    held = False
+    if q and q["seven_day_pct"] >= cfg["weekly_quota_cutoff_pct"]:
+        resets = q.get("seven_day_resets_at")
+        if is_amount(resets) and resets > 0:
+            held = resets > end.timestamp()
+        else:
+            # No usable reset time: assume the window is still open until the
+            # reading is older than the window itself.
+            held = end.timestamp() - q["at"] < WEEKLY_WINDOW_S
 
-    if base <= 0:
-        state, allowed = "no-baseline", False
+    total = spent + need
+    # Deny is the default; a spend is allowed only by an explicit comparison.
+    state, allowed = "stopped", False
+    reason = f"${total:.2f} would pass the {cfg['hard_pct']}% hard stop of ${hard:.2f}"
+    if not base > 0:
+        state = "no-baseline"
         reason = f"the store has no priced sessions in the last {BASELINE_DAYS} days"
     elif held:
-        state, allowed = "quota-hold", False
-        reason = f"weekly plan quota is {weekly}% used, at or above the {cfg['weekly_quota_cutoff_pct']}% cut-off"
-    elif spent + need > hard:
-        state, allowed = "stopped", False
-        reason = f"${spent + need:.2f} would pass the {cfg['hard_pct']}% hard stop of ${hard:.2f}"
-    elif spent + need > plan:
-        state, allowed = "critical-only", critical
-        reason = f"${spent + need:.2f} is over the {cfg['plan_pct']}% plan of ${plan:.2f}; only critical findings may spend"
-    else:
+        state = "quota-hold"
+        reason = (f"weekly plan quota is {q['seven_day_pct']}% used, at or above the "
+                  f"{cfg['weekly_quota_cutoff_pct']}% cut-off")
+    elif total <= plan:
         state, allowed = "ok", True
-        reason = f"${spent + need:.2f} is within the {cfg['plan_pct']}% plan of ${plan:.2f}"
+        reason = f"${total:.2f} is within the {cfg['plan_pct']}% plan of ${plan:.2f}"
+    elif total <= hard:
+        state, allowed = "critical-only", bool(critical)
+        reason = f"${total:.2f} is over the {cfg['plan_pct']}% plan of ${plan:.2f}; only critical findings may spend"
     out = {"state": state, "allowed": allowed, "reason": reason,
            "base_usd": round(base, 2), "plan_usd": round(plan, 2), "hard_usd": round(hard, 2),
            "spent_usd": round(spent, 2), "need_usd": round(need, 2)}
     if q:
-        out["quota"] = {"seven_day_pct": weekly, "age_hours": round(max(0, end.timestamp() - q["at"]) / 3600, 1)}
+        out["quota"] = {"seven_day_pct": q["seven_day_pct"],
+                        "age_hours": round(max(0, end.timestamp() - q["at"]) / 3600, 1)}
     else:
         # Unknown quota does not block: readings exist only while an
         # interactive session is open, and the dollar caps still apply.

@@ -131,10 +131,15 @@ One row per main session, with its subagent transcripts rolled in.
 Rules that make the row safe to store:
 
 - No field holds free text. Skill names, tool names, MCP server names,
-  subagent types and model ids are identifiers; each is cut to 64
-  characters and any character outside `[A-Za-z0-9:_.@/-]` is replaced, so
-  a prompt fragment that ended up in one of those fields cannot be stored
-  verbatim.
+  subagent types and model ids are identifiers. A value with any character
+  outside `[A-Za-z0-9:_.@/-]` is stored as `_invalid`, one shaped like a
+  common credential as `_redacted`, and the rest are cut to 64 characters,
+  so a prompt fragment or token that ended up in one of those fields is
+  not stored, even partly.
+- `session_id` is the transcript's file name, which is unique per file, not
+  the `sessionId` of its first record.
+- Token counts are accepted only as whole, non-negative integers; anything
+  else counts as zero, so a non-finite number cannot reach a cost.
 - Bash commands are matched for `git commit`, `git push` and `gh pr create`
   and counted. The command text is never stored.
 - Token usage is counted once per message id across the main and subagent
@@ -153,7 +158,9 @@ reliably.
 ### 4. Collector behaviour
 
 1. Take an exclusive lock so a timer firing during a manual run waits
-   instead of racing.
+   instead of racing. Refuse a store with changes outside `sessions/`,
+   `quota/` and `ledger/`; uncommitted changes inside them are leftovers of
+   a run that died, and this run commits them.
 2. `git pull --ff-only` in the store when it has a remote.
 3. Find main transcripts where the file or any of its subagent files was
    modified within `--since` days. Stream each line by line.
@@ -174,7 +181,7 @@ Failure handling:
 |---|---|
 | Store missing | Exit 2 naming `agent-metrics init` |
 | Pull fails or is not fast-forward | Exit 1 before writing anything |
-| A transcript cannot be read | Skip it, count it, continue |
+| A transcript cannot be read, or building its row fails | Skip it, count it, log the error type, continue |
 | A line does not parse | Count in `bad_lines`, continue |
 | Push fails | Rows stay committed locally, exit 1; the next run pushes them |
 
@@ -220,10 +227,11 @@ handled in the budget rules below.
 | `ok` | spent plus X is within the plan | 0 |
 | `critical-only` | over the plan, within the hard stop | 0 with `--critical`, otherwise 3 |
 | `stopped` | spent plus X would pass the hard stop | 3 |
-| `quota-hold` | the latest weekly reading is at or above the cut-off and its reset time is still in the future | 3 |
+| `quota-hold` | the newest reading that carries a weekly percentage is at or above the cut-off, and its reset time is in the future or, when unusable, the reading is under 7 days old | 3 |
 | `no-baseline` | the store has no sessions in the trailing 30 days | 3 |
 
-A missing or stale quota reading does not block: the dollar caps still
+A stored cost or ledger amount that is not a finite, non-negative number
+exits 2 naming the file. A missing quota reading does not block: the dollar caps still
 apply, and the output says the quota is unknown and how old the last
 reading is. Blocking on a missing reading would stop the audit whenever no
 interactive session had been open.

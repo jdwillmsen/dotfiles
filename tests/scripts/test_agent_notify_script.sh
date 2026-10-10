@@ -447,4 +447,18 @@ grep -qx -- "--user enable --now agent-notify.timer agent-trends.timer" "$trig/c
 grep -q "start " "$trig/calls" && fail "trigger must not start a run"
 grep -q "agent-trends.service" "$trigger" && grep -q "agent-trends.timer" "$trigger" || fail "trigger must hash the trends units too"
 
+# ── A replacement issue that cannot be found or created posts nothing, so the date is not kept ──
+rm -f "$state/notify-issue" "$state/notified.json" "$GH_FAIL" "$GH_GONE" "$GH_SLOW" "$GH_COMMENT_FAIL" "$GH_NOPIN"
+echo '[]' >"$GH_LIST"
+write_flags 2026-10-20
+run 0 send
+write_flags 2026-10-21
+issue_mem | cut -d' ' -f2 >"$GH_COMMENT_FAIL"
+echo CLOSED >"$GH_VIEW"
+echo 'not a list' >"$GH_LIST"
+run 1 send
+if grep -q "2026-10-21" "$state/notified.json"; then fail "a send that could not find a replacement issue kept the date as notified"; fi
+rm -f "$GH_COMMENT_FAIL" "$GH_VIEW"
+echo '[]' >"$GH_LIST"
+
 echo "test_agent_notify_script: OK"

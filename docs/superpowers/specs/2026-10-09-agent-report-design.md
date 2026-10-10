@@ -35,8 +35,10 @@ Usage is in `docs/agent-report.md`.
   Flag ids end in the session id so the monthly review can count them.
 - **No spend flag without a baseline.** A trailing week with no spend gives no
   average to multiply, so none is raised.
-- **Delivery covers the current window only.** Previous-window GitHub numbers
-  would double the request count; trends come from stored reports.
+- **Delivery also fetches the previous window's merged PRs**, for the settled
+  follow-up rates only (`followup_previous`): a report written right after
+  its window ends has had no time to see follow-ups. Other trends come from
+  stored reports.
 - **`--no-github` skips GitHub but not no-mistakes**, which is a local
   read-only query. The brief tied delivery to GitHub only loosely.
 - **First-pass rate excludes runs still going** from its denominator; they
@@ -63,8 +65,9 @@ Usage is in `docs/agent-report.md`.
   budget state (`plan_pct`: critical-only or stopped; `hard_pct`: stopped;
   `weekly_quota_cutoff_pct`: quota-hold), recorded when the report was made.
   It sits in the monthly `current.thresholds_review`.
-- **Re-runs re-spend** on insights. Overwriting is the contract, so a second
-  weekly run asks the model again; `--no-insights` avoids it.
+- **Re-runs reuse stored commentary.** A second run of a window keeps the
+  insights text already in its report and makes no model call;
+  `--force-insights` asks again.
 - **A stored report that cannot be read** while building the trend or the
   thresholds review stops the run with exit 2 naming the file.
 

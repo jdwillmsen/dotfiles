@@ -559,11 +559,15 @@ def publish(message, push=True, dirs=None):
     with the Lock held. `pushed` is True, False (the commit is kept and the
     next publish delivers it) or a string saying why nothing was sent. `dirs`
     narrows what is staged, so one tool does not commit another's work in progress."""
-    own = [d for d in (OWN_DIRS if dirs is None else dirs) if (STORE / d).is_dir()]
+    # A directory that was removed outright is still a change to publish, so
+    # tracked paths count even when nothing is left on disk.
+    own = [d for d in (OWN_DIRS if dirs is None else dirs)
+           if (STORE / d).is_dir() or git("ls-files", "--", d).stdout.strip()]
     out = {"committed": False}
     if own and git("status", "--porcelain", "--", *own).stdout.strip():
         git("add", "-A", "--", *own)
-        git("commit", "--quiet", "-m", message)
+        # Committing by path keeps anything another tool already staged out of this commit.
+        git("commit", "--quiet", "-m", message, "--", *own)
         out["committed"] = True
     ahead = not has_upstream() or git("rev-list", "--count", "@{u}..HEAD").stdout.strip() != "0"
     if not push or not ahead:

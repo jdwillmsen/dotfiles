@@ -174,7 +174,7 @@ def labeller_config():
 
     url, model = cfg.get("base_url"), cfg.get("model")
     if not isinstance(url, str) or not private_base_url(url):
-        bad("base_url must be an http(s) URL to a loopback, private, link-local, .local or tailnet host")
+        bad("base_url must be an http(s) URL to localhost or to a loopback, private, link-local or tailnet IP address")
     if not isinstance(model, str) or not model or len(model) > am.ID_MAX or am.ID_UNSAFE.search(model):
         bad("model must be a short identifier")
     timeout = cfg.get("timeout_s")

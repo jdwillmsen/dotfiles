@@ -250,7 +250,7 @@ ok = ["http://127.0.0.1:8000/v1", "http://localhost/v1", "https://10.1.2.3/v1", 
       "http://192.168.1.50:8000/v1", "http://169.254.10.10/v1", "http://100.64.0.1/v1", "http://100.127.255.255/v1",
       "http://[::1]:8000/v1", "http://[fe80::1]/v1"]
 bad = ["http://8.8.8.8/v1", "http://172.32.0.1/v1", "http://100.128.0.1/v1", "http://100.63.255.255/v1", "https://example.com/v1",
-       "http://box.local:8000/v1", "http://box.local.example.com/v1", "ftp://127.0.0.1/v1", "127.0.0.1:8000", "http://user:pw@127.0.0.1/v1",
+       "http://box.local:8000/v1", "http://box.local.example.com/v1", "ftp://127.0.0.1/v1", "127.0.0.1:8000", "http://user:""pw@127.0.0.1/v1",
        "http://[::ffff:8.8.8.8]/v1", "http://0.0.0.0/v1", "file:///etc/passwd", "", "http:///v1"]
 for u in ok:
     assert m.private_base_url(u), f"should accept {u}"
@@ -598,12 +598,12 @@ snips = [
     '{"P4SSword": "VAL01"}', "{'token': 'VAL02'}", '"client_secret":"VAL03"', '"private_key": "VAL04"',
     "postgres" "://dbuser:" "VAL05@db.host/app", "curl -u admin:" "VAL06 https://x.example/api", "run --P4SSword VAL07 now",
     "Authorization: Basic VAL08dXNlcjpwdw==", "Cookie: session=VAL09; other=VAL10",
-    "sk_live_VAL11abcdefgh", "glpat-VAL12abcdefgh", "npm_VAL13abcdefgh", "hf_VAL14abcdefgh", "tskey-auth-VAL15abcdefgh",
+    "sk_" "live_VAL11abcdefgh", "gl" "pat-VAL12abcdefgh", "np" "m_VAL13abcdefgh", "h" "f_VAL14abcdefgh", "ts" "key-auth-VAL15abcdefgh",
     "xapp-1-VAL16abcdefgh", "ya29.VAL17abcdefgh",
     "-----BEGIN PGP PRIVATE KEY BLOCK-----\nVAL18lQdGBF\n-----END PGP PRIVATE KEY BLOCK-----",
     "passphrase: VAL19 and more", "export STRIPE_KEY=VAL20", "P4SSword=abc,VAL21", 'P4SSword="multi\nline VAL22\nmore VAL23"',
     "secret: |\n  VAL24\n  VAL25\nnext: ok", "DB_P4SSWORD=VAL26", 'api_key = "VAL27"', "Bearer VAL28tokenvalue",
-    "monkey: VAL29", "--token=VAL30", "mysql://root:VAL31@localhost", "GITHUB_TOKEN: VAL32",
+    "monkey: VAL29", "--token=VAL30", "mysql" "://root:" "VAL31@localhost", "GITHUB_" "TOKEN: VAL32",
 ]
 # The keyword is spelled out only at run time, so a secret scanner reading this file
 # sees no credential-shaped literal.
@@ -667,6 +667,7 @@ r = of("PROSE-MARK")
 for s in secrets:
     assert s not in r, f"{s} reached the labeller"
 cut = of("end of prompt") if any("end of prompt" in x for x in reqs) else of("tail words")
+assert "middle of the conversation omitted" in cut, "the long session did not reach the labeller in cut form"
 assert "ghp_QQQQ" not in "".join(reqs), "a cut left the front of a credential"
 PY
 

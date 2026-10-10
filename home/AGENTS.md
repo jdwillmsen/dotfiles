@@ -57,7 +57,7 @@ no stream; never file planned work there. Detail: dotfiles `docs/streams.md`.
 
 ## Ticket-aware Claude launch — `cj`
 
-Prefer `cj` over bare `claude` inside a ticket-named worktree: it launches
+Start each session in a repo worktree via `cj`, not `claude`: it launches
 with `-n <KEY>` resolved from the branch, so `/resume` and the tab title are
 scannable. Defined in dotfiles `home/dot_config/shell/functions.sh`; never
 rename it to `claude` — shadowing the binary breaks `claude agents --json`.

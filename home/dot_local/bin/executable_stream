@@ -24,6 +24,7 @@ if len(sys.argv) == 2 and sys.argv[1] in ("-v", "-V", "--version"):
 HOME = Path(os.environ.get("HOME") or Path.home())
 MAP_PATH = HOME / ".config/streams.json"
 JIRA_CONFIG = HOME / ".config/claude-jira.json"
+PROJECTS = HOME / "projects"
 # Marks a config this tool wrote. One without it was written by hand, typically
 # for an employer's site, and is never replaced.
 GENERATED_FROM = "streams.json"
@@ -75,7 +76,9 @@ its folder name alone.""",
     "key": """Usage: stream key [path]
 
 Print the Jira project key for the repo at path (default: cwd). Exits 1 when
-the repo's owner is not a stream in ~/.config/streams.json.""",
+the repo's owner is not a stream in ~/.config/streams.json. Outside a repo, a
+path under ~/projects/<owner> prints that stream's own key; a repo override
+applies only inside the repo.""",
     "jira-config": """Usage: stream jira-config [--write]
 
 Print the Jira allowlist that cj and the statusline read. With --write, save it
@@ -207,6 +210,16 @@ def require_slug(path):
     return s
 
 
+def stream_folder(streams, path):
+    """The stream whose grouping folder holds path, or None. Only asked outside
+    a repo: inside one the remote decides, wherever the checkout sits."""
+    try:
+        parts = Path(path).resolve().relative_to(PROJECTS.resolve()).parts
+    except ValueError:
+        return None
+    return stream_name(streams, parts[0]) if parts else None
+
+
 def stream_name(streams, owner):
     """The map's own spelling of an owner, or None. GitHub owner and repo names
     are case-insensitive, so one typed in another case is still the same."""
@@ -234,12 +247,16 @@ def cmd_home():
                     for o, s in smap["streams"].items()],
     }
     here = slug(".")
+    folder = None if here else stream_folder(smap["streams"], ".")
     if here:
         out["here"] = here
         try:
             out["here_jira"] = jira_key(smap, here)
         except Fail:
             out["here_jira"] = "none (owner is not a stream)"
+    elif folder:
+        out["here"] = f"{folder} (stream folder)"
+        out["here_jira"] = smap["streams"][folder]["jira"]
     out["help"] = ["stream status", "stream status <owner>", "stream key"]
     emit(out)
     return 0
@@ -260,7 +277,10 @@ def cmd_slug(args):
 
 
 def cmd_key(args):
-    print(jira_key(load_map(), require_slug(path_arg("key", args))))
+    path = path_arg("key", args)
+    smap = load_map()
+    folder = None if slug(path) else stream_folder(smap["streams"], path)
+    print(smap["streams"][folder]["jira"] if folder else jira_key(smap, require_slug(path)))
     return 0
 
 

@@ -29,6 +29,11 @@ stream status --no-alerts # skip the per-repo alert requests
 stream jira-config        # print the Jira allowlist; --write saves it
 ```
 
+Outside a repo, `stream key` under `~/projects/<owner>/` prints that stream's
+own project, so a session started in a grouping folder still resolves one.
+That is the stream's default only: `career` gives `CAREER` from inside the
+repo, and `JDW` from the folder above it. `stream slug` still fails there.
+
 Read-only against GitHub and Jira. A repo whose alerts could not be read is
 counted as not measured, never as zero. Output is TOON for agents; errors are
 structured on stdout, exit 1 for a failure and 2 for a usage error.

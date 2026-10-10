@@ -483,26 +483,42 @@ def render(sessions, quota, reports, days, now):
 
     # Delivery from weekly reports
     sec.append("<h2>Delivery</h2>")
-    getters = [("Follow-up fix rate, 7 days", lambda d: d.get("followup_fix_rate_7d")),
-               ("Follow-up fix rate, 14 days", lambda d: d.get("followup_fix_rate_14d")),
-               ("Failed-check share", lambda d: d.get("failed_check_share")),
-               ("No-mistakes first-pass rate", lambda d: (d.get("no_mistakes") or {}).get("first_pass_rate") if isinstance(d.get("no_mistakes"), dict) else None)]
-    weekly = []
+    names = ["Follow-up fix rate, 7 days", "Follow-up fix rate, 14 days", "Failed-check share",
+             "No-mistakes first-pass rate"]
+
+    def dig(obj, *path):
+        for key in path:
+            obj = obj.get(key) if isinstance(obj, dict) else None
+        return number(obj)
+
+    by_week = {}
     for r in sorted((r for r in reports if r["window"] == "weekly"), key=lambda r: r["date"]):
         delivery = r["data"].get("delivery")
-        vals = [number(g(delivery)) if isinstance(delivery, dict) else None for _n, g in getters]
-        if any(v is not None for v in vals):
-            weekly.append((r["date"], vals))
+        vals = by_week.setdefault(r["date"], [None] * len(names))
+        for i, path in enumerate((("github", "followup", "d7", "rate"), ("github", "followup", "d14", "rate"),
+                                  ("github", "failed_check_share"), ("no_mistakes", "first_pass_rate"))):
+            found = dig(delivery, *path)
+            if found is not None:
+                vals[i] = found
+        # A report run right after its week ends has had no time to see
+        # follow-ups; the next report carries that week's settled figures.
+        week_before = (dt.date.fromisoformat(r["date"]) - dt.timedelta(days=7)).isoformat()
+        earlier = by_week.setdefault(week_before, [None] * len(names))
+        for i, key in enumerate(("d7", "d14")):
+            settled = dig(delivery, "github", "followup_previous", key, "rate")
+            if settled is not None:
+                earlier[i] = settled
+    weekly = [(day, vals) for day, vals in sorted(by_week.items()) if any(v is not None for v in vals)]
     if not weekly:
         sec.append(empty("Delivery rates by week", "No weekly reports carry delivery numbers yet."))
     else:
         labels = [d for d, _ in weekly]
-        series = [(n, i + 1) for i, (n, _g) in enumerate(getters)]
-        lines = [(n, i + 1, [v[i] for _d, v in weekly]) for i, (n, _g) in enumerate(getters)]
+        series = [(n, i + 1) for i, n in enumerate(names)]
+        lines = [(n, i + 1, [v[i] for _d, v in weekly]) for i, n in enumerate(names)]
         top = max(v for _n, _c, vs in lines for v in vs if v is not None)
         ymax, step = nice_ceiling(max(top * 1.1, 0.1))
         tips = [f"Week of {d}: " + " · ".join(f"{n} {pct(v) if v is not None else 'n/a'}" for (n, _c, vs) in lines for v in [vs[i]]) for i, (d, _v) in enumerate(weekly)]
-        sec.append(figure("Delivery rates by week", "From the stored weekly reports; a gap means that report did not carry the figure", series,
+        sec.append(figure("Delivery rates by week", "From the stored weekly reports; follow-up rates settle a week later, so the newest week is provisional", series,
                           line_chart(labels, lines, ymax, step, lambda v: f"{v * 100:.0f}%", tips),
                           ["Week of"] + [n for n, _c in series], [[d] + [pct(x) if x is not None else "n/a" for x in v] for d, v in weekly]))
 

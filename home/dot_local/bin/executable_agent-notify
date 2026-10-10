@@ -331,7 +331,8 @@ def find_or_create_issue(repo):
     try:
         found = [i["number"] for i in json.loads(listing) if i.get("title") == ISSUE_TITLE]
     except (ValueError, TypeError, KeyError, AttributeError):
-        am.die(am.EXIT_FAIL, "gh issue list returned something that is not a list of issues")
+        # Raised, not fatal: nothing was posted, so the caller undoes the date it recorded.
+        raise GhError("gh issue list returned something that is not a list of issues", "")
     if found:
         remember_issue(repo, min(found))
         return min(found)
@@ -340,7 +341,7 @@ def find_or_create_issue(repo):
     out = gh("issue", "create", "--repo", repo, "--title", ISSUE_TITLE, "--body", body)
     m = re.search(r"/issues/(\d+)", out)
     if not m:
-        am.die(am.EXIT_FAIL, "gh issue create did not print an issue URL")
+        raise GhError("gh issue create did not print an issue URL", "")
     number = int(m.group(1))
     # Remembered before the comment so a failed comment retries on this issue.
     remember_issue(repo, number)

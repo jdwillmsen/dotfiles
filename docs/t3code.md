@@ -148,6 +148,39 @@ the marker does, which has two consequences:
 `chezmoi apply` reloads and enables the timer; by hand, `systemctl --user
 daemon-reload && systemctl --user enable --now t3-session-expiry.timer`.
 
+## Projects
+
+One T3 project per business stream, rooted at the stream's grouping folder, so
+starting a thread is a choice of stream rather than of repo:
+
+| Project | Root |
+|---|---|
+| `JDW` | `~/projects/jdwillmsen` |
+| `JDWLABS` | `~/projects/jdwlabs` |
+| `DOTA` | `~/projects/dotablaze-tech` |
+| `DOTFILES` | the chezmoi source directory |
+
+A thread's work is rarely one repo's: most pull requests opened from T3 came
+from threads that touched several. Rooting a project at a repo would buy T3's
+own worktree, branch and diff controls for the few threads that stay in one,
+and a second worktree location beside `~/worktrees` for all of them.
+
+`DOTFILES` is rooted at a repository because that stream of work is one repo.
+
+The cost of a stream root is that T3 sees no repository. It links no pull
+request from a branch and its storage cleanup has no worktree to remove, so
+the agent links the pull requests it opens and `wtclean` prunes what `gwta`
+made. `stream key` resolves the Jira project from the grouping folder
+([`streams.md`](streams.md)).
+
+```bash
+t3 project add ~/projects/<owner> --title <KEY>
+t3 project rename <project> <title>
+```
+
+Both go through the running server. `t3 project remove --force` deletes the
+project's threads with it, and a thread cannot be moved to another project.
+
 ## Providers
 
 T3 Code drives each provider as a child process: every CLI below is spawned by
@@ -321,10 +354,19 @@ screenshots, and clipboards. Anyone holding a valid one can open a session
 until it expires or is revoked.
 
 **Threads default to Full access**, meaning the agent runs commands and edits
-files unattended. This is the intended mode here because every thread gets its
-own branch and worktree under `~/.t3/worktrees`, which satisfies the
-throwaway-sandbox condition that mode assumes. The mode is per-thread, chosen
-in the composer; it is not a server-wide setting.
+files unattended. That is the chosen mode on this box, accepted knowing that
+nothing in T3 sandboxes it here: a stream project's root is
+not a git repository, so T3 creates no branch or worktree for its threads and
+`~/.t3/worktrees` stays empty. A thread starts in the grouping folder, beside
+every main checkout in the stream, and can write to any of them. What keeps
+work off `main` is the same rule a terminal session follows — a `gwta` worktree
+before touching code, and a ruleset that only lets `main` move by pull request.
+Neither is a filesystem safeguard: the first is a convention the agent has to
+follow, and the second guards the remote branch, not the local files.
+`DOTFILES` is the exception in kind, not in safety — its root is a repository,
+so a thread there can take a T3 worktree, and one that does not works in the
+chezmoi source checkout itself. The mode is per-thread, chosen in the
+composer; it is not a server-wide setting.
 
 **Provider binaries must be on the server's `PATH`**, which the systemd unit
 does not inherit from any shell. The drop-in described under
@@ -347,6 +389,7 @@ Everything lives under `~/.t3`:
 | `userdata/state.sqlite` | Threads, sessions, settings |
 | `userdata/logs/` | `server.log`, per-terminal logs, provider events. The unit appends its own stdout/stderr here as `boot-service.log`, which nothing rotates — `server.trace.ndjson` does, around 10 MB |
 | `userdata/secrets/` | Provider env values marked sensitive |
-| `worktrees/` | Per-thread git worktrees |
+| `worktrees/` | Per-thread git worktrees, for a project whose root is a git repository — here only `DOTFILES`. Stream projects never put anything in it |
+| `scratch/` | One folder per thread started with no project; kept when the thread is deleted |
 
 Back up or wipe `~/.t3/userdata` to reset; the service reinstalls clean.

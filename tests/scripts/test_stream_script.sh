@@ -108,6 +108,23 @@ cwd="$tmp/repos/orphan" run key
 [ "$rc" -eq 1 ] && grep -q '^error: .*not a known stream' <<<"$out" || fail "an ownerless repo must not guess a project" "$out"
 grep -q '^help\[' <<<"$out" || fail "unknown-stream error should say what to do next" "$out"
 
+# A stream's grouping folder is not a repo, but a session started there is still
+# in that stream. A repo inside it keeps deciding for itself.
+mkdir -p "$fx/projects/jdwillmsen/notes" "$fx/projects/JDWLabs" "$fx/projects/stranger" "$fx/elsewhere/jdwlabs"
+cwd="$fx/projects/jdwillmsen" run key;       expect "JDW" "a stream folder gives the stream's own key, not a repo override"
+cwd="$fx/projects/jdwillmsen/notes" run key; expect "JDW" "a plain directory under a stream folder"
+cwd="$fx/projects/JDWLabs" run key;          expect "JDWLABS" "a stream folder matches in any case"
+run key "$fx/projects/jdwillmsen";           expect "JDW" "a stream folder as a path argument"
+for d in "$fx/projects" "$fx/projects/stranger" "$fx/elsewhere/jdwlabs"; do
+    cwd="$d" run key
+    [ "$rc" -eq 1 ] && grep -q '^error: .*not a git repository' <<<"$out" || fail "key in $d must not guess a project" "$out"
+done
+git init -q "$fx/projects/jdwillmsen/ownerless"
+cwd="$fx/projects/jdwillmsen/ownerless" run key
+[ "$rc" -eq 1 ] && grep -q '^error: .*not a known stream' <<<"$out" || fail "a repo in a stream folder is not given the folder's stream" "$out"
+cwd="$fx/projects/jdwillmsen" run slug
+[ "$rc" -eq 1 ] && grep -q '^error: ' <<<"$out" || fail "a stream folder has no slug" "$out"
+
 # ── no args: live content, not help text ──
 run
 [ "$rc" -eq 0 ] || fail "bare stream should exit 0" "$out"
@@ -118,6 +135,9 @@ grep -q '^help\[' <<<"$out" || fail "bare stream should offer next steps" "$out"
 cwd="$tmp/repos/gameops" run
 grep -q '^here: jdwillmsen/gameops' <<<"$out" && grep -q '^here_jira: JDW' <<<"$out" \
     || fail "bare stream inside a repo should say where it is" "$out"
+cwd="$fx/projects/JDWLabs" run
+grep -q '^here: jdwlabs (stream folder)' <<<"$out" && grep -q '^here_jira: JDWLABS' <<<"$out" \
+    || fail "bare stream in a stream folder should say which stream it is" "$out"
 
 for sub in "" slug key jira-config status; do
     # shellcheck disable=SC2086  # an empty $sub must vanish, not become an empty argument

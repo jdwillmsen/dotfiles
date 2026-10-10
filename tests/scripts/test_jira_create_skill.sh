@@ -7,6 +7,7 @@ skill="$here/home/private_dot_claude/skills/jira-create/SKILL.md"
 fail() { echo "FAIL: $1"; exit 1; }
 
 grep -q 'stream key' "$skill" || fail "skill must resolve the project with 'stream key'"
+grep -q 'stream folder' "$skill" || fail "skill must say what decides the project for work with no repo"
 grep -qF "Default \`JDWLABS\`" "$skill" && fail "skill still defaults every ticket to JDWLABS"
 grep -q 'project = JDWLABS' "$skill" && fail "skill still hardcodes JDWLABS in JQL"
 grep -q 'project = <PROJECT>' "$skill" || fail "JQL should use the resolved <PROJECT>"

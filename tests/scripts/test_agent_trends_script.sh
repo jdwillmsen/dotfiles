@@ -109,8 +109,13 @@ def report(window, label, **kw):
     json.dump(r, open(f"{store}/reports/{label}-{window}.json", "w"))
 report("weekly", "2026-09-21", delivery={"error": "gh unavailable"})
 report("weekly", "2026-09-28", delivery=None)
-report("weekly", "2026-10-05", delivery={"followup_fix_rate_7d": 0.25, "followup_fix_rate_14d": 0.4,
-                                         "failed_check_share": 0.125, "no_mistakes": {"first_pass_rate": 0.8}})
+report("weekly", "2026-10-05", delivery={
+    "github": {"available": True, "failed_check_share": 0.125,
+               "followup": {"d7": {"eligible": 8, "followed_up": 2, "rate": 0.25},
+                            "d14": {"eligible": 0, "followed_up": 0, "rate": None}},
+               "followup_previous": {"d7": {"eligible": 10, "followed_up": 3, "rate": 0.3},
+                                     "d14": {"eligible": 10, "followed_up": 4, "rate": 0.4}}},
+    "no_mistakes": {"available": True, "first_pass_rate": 0.8}})
 report("weekly", "2026-10-02", delivery={"merged_prs": 3})
 report("daily", "2026-10-08", flags=[
     {"id": "spend-spike", "severity": "critical", "metric": "daily_cost", "message": "CANARY_MESSAGE", "value": 91.5, "baseline": 29.4},
@@ -267,7 +272,7 @@ grep -q "sessions/2026-10.jsonl" "$out" && [ ! -e "$tmp/ovf/index.html" ] || fai
 git -C "$store" checkout -q -- sessions
 python3 - "$store/reports/2026-10-05-weekly.json" <<'PY'
 import json, sys
-d = json.load(open(sys.argv[1])); d["delivery"]["failed_check_share"] = 1.7e308
+d = json.load(open(sys.argv[1])); d["delivery"]["github"]["failed_check_share"] = 1.7e308
 json.dump(d, open(sys.argv[1], "w"))
 PY
 run 0 build --out "$tmp/huge"

@@ -617,6 +617,29 @@ with am.Lock():
     assert am.publish("site: nothing more", dirs=("site",)) == {"committed": False, "pushed": "nothing to push"}
 with am.Lock():
     assert am.publish("report: rest")["committed"] is True
+
+def git(*args):
+    return subprocess.run(["git", "-C", str(store), *args], capture_output=True, text=True).stdout
+
+# A file another tool already staged must not ride along in a scoped commit.
+(store / "reports" / "staged.json").write_text("{}\n")
+git("add", "reports/staged.json")
+(store / "site" / "index.html").write_text("<p>page 2</p>\n")
+with am.Lock():
+    assert am.publish("site: scoped", dirs=("site",))["committed"] is True
+assert git("show", "--name-only", "--format=", "HEAD").split() == ["site/index.html"], git("show", "--name-only", "--format=", "HEAD")
+assert "reports/staged.json" in git("status", "--porcelain")
+with am.Lock():
+    am.publish("report: staged")
+
+# Removing a whole owned directory is a change too.
+import shutil
+shutil.rmtree(store / "site")
+with am.Lock():
+    assert am.publish("site: removed", dirs=("site",))["committed"] is True
+assert git("ls-files", "site") == "", git("ls-files", "site")
+with am.Lock():
+    assert am.publish("site: still gone", dirs=("site",))["committed"] is False
 print("DIRS-OK")
 PY
 )" || fail "publish(dirs=...) staged more than it was given" "$dirs_out"

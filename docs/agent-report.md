@@ -200,6 +200,11 @@ All are `Persistent=true`. They sit after the 06:30 collect and the audit
 timers; the quarterly audit starts at 09:00 with a 20-minute limit, hence the
 later slots. The slots are local time: the box is assumed to run in UTC. Like the others they need linger to run without a login session.
 
+A timer that missed several slots fires once when the box is back, and that
+run writes only the latest complete window. Earlier windows are not
+backfilled; run them by hand with `--end` if they matter:
+`agent-report --window daily --end 2026-10-08`.
+
 ```sh
 systemctl --user list-timers 'agent-report-*'
 journalctl --user -u 'agent-report@*' -n 50

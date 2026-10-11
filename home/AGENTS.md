@@ -57,10 +57,12 @@ no stream; never file planned work there. Detail: dotfiles `docs/streams.md`.
 
 ## Ticket-aware Claude launch — `cj`
 
-Start each session in a repo worktree via `cj`, not `claude`: it launches
-with `-n <KEY>` resolved from the branch, so `/resume` and the tab title are
-scannable. Defined in dotfiles `home/dot_config/shell/functions.sh`; never
-rename it to `claude` — shadowing the binary breaks `claude agents --json`.
+Start each terminal session in a repo worktree via `cj`, not `claude`: it
+launches with `-n <KEY>` resolved from the branch, so `/resume` and the tab
+title are scannable. A T3 Code thread starts in its stream's grouping folder
+instead, and takes a `gwta` worktree before it touches code. Defined in
+dotfiles `home/dot_config/shell/functions.sh`; never rename it to `claude` —
+shadowing the binary breaks `claude agents --json`.
 
 ## Credential-minting commands — human's terminal, not an agent's
 

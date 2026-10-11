@@ -60,9 +60,8 @@ stream:
 | jdwlabs | `org:jdwlabs` |
 | dotablaze-tech | `org:dotablaze-tech` |
 
-The `org:` qualifier is documented for organisations. If it matches nothing
-for the personal account, name its active repos instead:
-`repo:jdwillmsen/gameops repo:jdwillmsen/dotfiles …`.
+The `org:` qualifier is documented for organisations but matches a personal
+account's repos as well, so `org:jdwillmsen` needs no per-repo fallback.
 
 ## Jira views
 

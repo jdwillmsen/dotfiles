@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""agent-trends — one static page of the metrics store's trends.
+"""agent-trends — a static site of the metrics store's trends and reports.
 
 Reads sessions, quota readings and stored reports from the store and writes
 `site/index.html` and a `site/reports/<date>-<window>.html` page per stored

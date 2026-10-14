@@ -2,9 +2,10 @@
 """agent-trends — one static page of the metrics store's trends.
 
 Reads sessions, quota readings and stored reports from the store and writes
-`site/index.html` into it: inline CSS and SVG, no external request of any
-kind. Dollar figures are list-price estimates, not a bill. Agent-facing:
-stdout is TOON, diagnostics go to stderr.
+`site/index.html` and a `site/reports/<date>-<window>.html` page per stored
+report into it: inline CSS and SVG, no external request of any kind. Dollar
+figures are list-price estimates, not a bill. Agent-facing: stdout is TOON,
+diagnostics go to stderr.
 """
 import argparse
 import datetime as dt
@@ -32,6 +33,8 @@ DEFAULT_DAYS = 90
 FAMILIES = ("opus", "sonnet", "haiku", "other")
 POPULATIONS = ("interactive", "scripted")
 REPORT_NAME = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2})-(daily|weekly|biweekly|monthly|quarterly|yearly)\.json", re.ASCII)
+REPORT_MD = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2})-(daily|weekly|biweekly|monthly|quarterly|yearly)\.md", re.ASCII)
+WINDOW_ORDER = ("daily", "weekly", "biweekly", "monthly", "quarterly", "yearly")
 MAX_FLAG_ROWS = 30
 TOP_N = 8
 MAX_DAYS = 180
@@ -156,6 +159,21 @@ def load_reports():
             unreadable(path, "not a JSON object")
         reports.append({"date": m.group(1), "window": m.group(2), "data": data})
     return reports
+
+
+def load_report_markdown():
+    """Stored report Markdown as (date, window, text), newest first."""
+    d = am.STORE / "reports"
+    out = []
+    for path in d.glob("*.md") if d.is_dir() else []:
+        m = REPORT_MD.fullmatch(path.name)
+        if not m:
+            continue
+        try:
+            out.append((m.group(1), m.group(2), path.read_text(encoding="utf-8")))
+        except (OSError, UnicodeDecodeError) as e:
+            unreadable(path, getattr(e, "strerror", None) or "not valid UTF-8")
+    return sorted(out, reverse=True)
 
 
 # ── Numbers ──────────────────────────────────────────────────────────────────
@@ -316,6 +334,104 @@ def empty(title, why):
     return f'<section class="chart"><h3>{esc(title)}</h3><p class="empty">No data. {esc(why)}</p></section>'
 
 
+# ── Report pages ─────────────────────────────────────────────────────────────
+
+INLINE = re.compile(r"`([^`]+)`|\*\*(.+?)\*\*")
+TABLE_RULE = re.compile(r"\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?")
+BULLET = re.compile(r"- (.*)")
+HEADING = re.compile(r"(#{1,6}) (.*)")
+
+
+def inline(text):
+    """Code and bold only; every other character, links and HTML included,
+    comes out as escaped text."""
+    out, pos = [], 0
+    for m in INLINE.finditer(text):
+        out.append(esc(text[pos:m.start()]))
+        out.append(f"<code>{esc(m.group(1))}</code>" if m.group(1) is not None else f"<strong>{esc(m.group(2))}</strong>")
+        pos = m.end()
+    out.append(esc(text[pos:]))
+    return "".join(out)
+
+
+def table_cells(line):
+    cells = re.split(r"(?<!\\)\|", line.strip())
+    if cells and cells[0] == "":
+        cells = cells[1:]
+    if cells and cells[-1] == "":
+        cells = cells[:-1]
+    return [c.strip().replace("\\|", "|") for c in cells]
+
+
+def table_html(rows):
+    if len(rows) < 2 or not TABLE_RULE.fullmatch(rows[1].strip()):
+        return "<pre>" + esc("\n".join(rows)) + "</pre>"
+    head = table_cells(rows[0])
+    body = "".join("<tr>" + "".join(f"<td>{inline(c)}</td>" for c in table_cells(r)) + "</tr>" for r in rows[2:])
+    return ('<div class="scroll"><table><thead><tr>' + "".join(f"<th>{inline(c)}</th>" for c in head)
+            + f"</tr></thead><tbody>{body}</tbody></table></div>")
+
+
+def markdown_html(text):
+    """The subset agent-report writes: headings, paragraphs, pipe tables,
+    bullet lists, code and bold. Anything else is an escaped paragraph."""
+    out, para, items, rows = [], [], [], []
+
+    def flush():
+        if para:
+            out.append("<p>" + inline(" ".join(para)) + "</p>")
+        if items:
+            out.append("<ul>" + "".join(f"<li>{inline(i)}</li>" for i in items) + "</ul>")
+        if rows:
+            out.append(table_html(rows))
+        para.clear(), items.clear(), rows.clear()
+
+    for line in text.splitlines():
+        line = line.rstrip()
+        h, b = HEADING.fullmatch(line), BULLET.fullmatch(line)
+        if line.startswith("|"):
+            if para or items:
+                flush()
+            rows.append(line)
+            continue
+        if b and items:
+            items.append(b.group(1))
+            continue
+        flush()
+        if not line.strip():
+            continue
+        if h:
+            level = min(len(h.group(1)), 3)
+            out.append(f"<h{level}>{inline(h.group(2))}</h{level}>")
+        elif b:
+            items.append(b.group(1))
+        else:
+            para.append(line.strip())
+    flush()
+    return "\n".join(out)
+
+
+def report_page(date, window, text):
+    return ("<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            f"<title>Agent report: {esc(window)} {esc(date)}</title><style>" + css() + "</style></head><body><main>"
+            '<p><a href="../">Back to trends</a></p>'
+            + markdown_html(text)
+            + "</main></body></html>\n")
+
+
+def reports_section(report_pages):
+    if not report_pages:
+        return empty("Reports", "No stored reports yet.")
+    cols = []
+    for window in WINDOW_ORDER:
+        names = [d for d, w, _ in report_pages if w == window]
+        if names:
+            links = "".join(f'<li><a href="reports/{esc(d)}-{window}.html">{esc(d)}</a></li>' for d in names)
+            cols.append(f'<div class="chart"><h3>{esc(window.capitalize())}</h3><ul class="links">{links}</ul></div>')
+    return '<div class="cols">' + "".join(cols) + "</div>"
+
+
 # ── Page ─────────────────────────────────────────────────────────────────────
 
 LIGHT = {"surface": "#fcfcfb", "page": "#f9f9f7", "ink": "#0b0b0b", "ink2": "#52514e", "muted": "#898781",
@@ -359,6 +475,8 @@ details{{margin-top:8px;font-size:13px}} summary{{cursor:pointer;color:var(--ink
 table{{border-collapse:collapse;width:100%;font-size:13px}}
 th,td{{text-align:left;padding:4px 10px 4px 0;border-bottom:1px solid var(--grid);font-variant-numeric:tabular-nums;white-space:nowrap}}
 th{{color:var(--ink2);font-weight:600}}
+a{{color:var(--s1)}} p,ul{{margin:8px 0}} ul{{padding-left:20px}} ul.links{{list-style:none;padding:0;margin:6px 0 0;max-height:240px;overflow-y:auto}}
+code,pre{{font:12px ui-monospace,monospace}} pre{{overflow-x:auto}}
 .cols{{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px}}
 #tip{{position:fixed;z-index:9;pointer-events:none;background:var(--surface);color:var(--ink);border:1px solid var(--axis);
 border-radius:6px;padding:6px 8px;font-size:12px;max-width:320px}}
@@ -378,7 +496,7 @@ def tile(label, value, delta):
             f'<div class="delta">{esc(delta)}</div></div>')
 
 
-def render(sessions, quota, reports, days, now):
+def render(sessions, quota, reports, report_pages, days, now):
     now_ts = now.timestamp()
     today = now.date()
     day_list = [today - dt.timedelta(days=i) for i in range(days - 1, -1, -1)]
@@ -570,6 +688,9 @@ def render(sessions, quota, reports, days, now):
         sec.append('<div class="cols">' + top_table("Repos, last 30 days", "repo", "(no repo)") + top_table("Pipelines, last 30 days", "pipeline", "(interactive or other)")
                    + top_table("Models, last 30 days", "model", "") + "</div>")
 
+    sec.append("<h2>Reports</h2>")
+    sec.append(reports_section(report_pages))
+
     generated = am.iso(now_ts)
     return ("<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
@@ -594,21 +715,39 @@ def cmd_home(_args):
     am.emit(out)
 
 
-def write_page(directory, page):
-    directory.mkdir(parents=True, exist_ok=True)
-    target = directory / "index.html"
-    tmp = directory / "index.html.tmp"
-    tmp.write_text(page, encoding="utf-8")
+def write_atomic(target, text):
+    tmp = target.with_name(target.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
     tmp.replace(target)
-    return target
+
+
+def write_site(directory, page, report_pages):
+    """index.html plus one page per stored report. Pages whose report is gone
+    are removed so the site never links or serves a stale report."""
+    directory.mkdir(parents=True, exist_ok=True)
+    write_atomic(directory / "index.html", page)
+    reports = directory / "reports"
+    wanted = {f"{d}-{w}.html": t for d, w, t in report_pages}
+    if wanted:
+        reports.mkdir(exist_ok=True)
+        for name, text in wanted.items():
+            write_atomic(reports / name, report_page(name[:10], name[11:-5], text))
+    if reports.is_dir():
+        for old in reports.glob("*.html"):
+            if REPORT_MD.fullmatch(old.name[:-5] + ".md") and old.name not in wanted:
+                old.unlink()
+        if not any(reports.iterdir()):
+            reports.rmdir()
+    return directory / "index.html"
 
 
 def build_page(days):
     now = am.now()
     start = now.date() - dt.timedelta(days=max(days, 30) + 7)
     lo_month = start.strftime("%Y-%m")
-    page, count = render(load_sessions(lo_month), load_quota(lo_month), load_reports(), days, now)
-    return page, count
+    report_pages = load_report_markdown()
+    page, count = render(load_sessions(lo_month), load_quota(lo_month), load_reports(), report_pages, days, now)
+    return page, count, report_pages
 
 
 def cmd_build(args):
@@ -618,9 +757,9 @@ def cmd_build(args):
         usage_error("--out and --dry-run both pick the destination; use one")
     am.require_store()
     if args.out or args.dry_run:
-        page, count = build_page(args.days)
+        page, count, report_pages = build_page(args.days)
         directory = Path(args.out) if args.out else Path(tempfile.mkdtemp(prefix="agent-trends-"))
-        am.emit({"path": str(write_page(directory, page)), "sessions_charted": count, "published": False})
+        am.emit({"path": str(write_site(directory, page, report_pages)), "sessions_charted": count, "published": False})
         return 0
     with am.Lock():
         if am.has_upstream():
@@ -629,8 +768,8 @@ def cmd_build(args):
                 detail = (pulled.stderr or pulled.stdout).strip().splitlines()
                 am.die(am.EXIT_FAIL, f"git pull failed: {detail[-1] if detail else pulled.returncode}",
                        f"Resolve it in {am.tilde(am.STORE)} and re-run")
-        page, count = build_page(args.days)
-        target = write_page(am.STORE / "site", page)
+        page, count, report_pages = build_page(args.days)
+        target = write_site(am.STORE / "site", page, report_pages)
         result = am.publish(f"site: {am.now().strftime('%Y-%m-%d')}", dirs=("site",))
     am.emit({"path": am.tilde(target), "sessions_charted": count, **result})
     return 1 if "error" in result else 0
@@ -650,7 +789,7 @@ def build_parser():
     b.set_defaults(func=cmd_build)
     b.add_argument("--days", type=int, default=DEFAULT_DAYS, metavar="N", help=f"chart range in days, 1 to {MAX_DAYS} (default 90)")
     b.add_argument("--dry-run", action="store_true", help="write to a temp dir, print the path, publish nothing")
-    b.add_argument("--out", metavar="DIR", help="write DIR/index.html instead of the store; publish nothing")
+    b.add_argument("--out", metavar="DIR", help="write DIR/index.html and DIR/reports/ instead of the store; publish nothing")
     return p
 
 

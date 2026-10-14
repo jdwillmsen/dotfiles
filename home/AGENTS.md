@@ -2,8 +2,9 @@
 
 Personal devbox (`dev-admin`). This file is the ancestor-directory map every
 agent inherits when working anywhere under `$HOME` — it says where things
-live and the conventions specific to *this box*, not workflow philosophy
-(that's `~/.claude/CLAUDE.md`'s job).
+live and the conventions specific to *this box*, not workflow rules
+(those are `~/.config/agents/AGENTS.md`, plus `~/.claude/CLAUDE.md` for
+Claude Code).
 
 ## Dotfiles — chezmoi, not a plain clone
 
@@ -15,7 +16,7 @@ with the `dotfiles` alias (`cd "$(chezmoi source-path)"`).
   target from source on every run, so direct edits there silently vanish.
 - After editing source: `chezmoi apply -v` to deploy and see the diff.
 - Reference docs live in its `docs/` (workflow, shell helpers, provisioning,
-  services, secrets); rules stay in `~/.claude/CLAUDE.md`, not here.
+  services, secrets); rules stay in `~/.config/agents/AGENTS.md`, not here.
 - No standalone `~/dotfiles` clone exists or should be made — it drifts from
   this source and has caused confusion before.
 - **Standing rule:** any devbox config change — shell, tmux, SSH-into-devbox

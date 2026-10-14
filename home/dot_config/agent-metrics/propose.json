@@ -10,7 +10,7 @@
     "~/.claude/RTK.md": "home/private_dot_claude/RTK.md",
     "~/CLAUDE.md": "home/CLAUDE.md",
     "~/AGENTS.md": "home/AGENTS.md",
-    "~/.codex/AGENTS.md": "home/private_dot_codex/AGENTS.md"
+    "~/.config/agents/AGENTS.md": "home/dot_config/agents/AGENTS.md"
   },
   "caps_usd": { "daily": 3.0, "weekly": 5.0, "monthly": 10.0 },
   "per_finding_usd": 0.5,

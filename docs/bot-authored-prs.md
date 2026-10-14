@@ -2,7 +2,7 @@
 
 How an agent session opens a pull request as `jdwlabs-agent-bot` instead of
 under the human's `gh` auth. The rule that says when to do it is in
-`~/.claude/CLAUDE.md` (Shipping).
+`~/.config/agents/AGENTS.md` (Pull Requests).
 
 ## Why
 

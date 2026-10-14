@@ -2,8 +2,9 @@
 
 Working model adopted from Kun Chen's *L8 Principal's Agentic Engineering
 Workflow* (YouTube `iQyg-KypKAA`). The `## Working Principles` section of the
-global `CLAUDE.md` is the enforced summary; this file is the reasoning behind it
-and the inventory of what is installed, what was skipped, and why.
+global `CLAUDE.md` and the shared `~/.config/agents/AGENTS.md` are the
+enforced summary; this file is the reasoning behind it and the inventory of
+what is installed, what was skipped, and why.
 
 ## The thesis
 
@@ -121,13 +122,22 @@ load only when relevant (progressive disclosure); reference tables belong in
 `docs/`. Grow *project* memory by correcting the agent and having it record the
 correction, not by writing speculative rules up front.
 
-Instruction files stack: `~/.claude/CLAUDE.md` (+ `RTK.md`) and `~/AGENTS.md`
-load for every Claude session under `$HOME`, then the repo's own `AGENTS.md`.
+Instruction files stack: `~/.claude/CLAUDE.md` (+ `RTK.md`, and the shared
+`~/.config/agents/AGENTS.md` it imports) and `~/AGENTS.md` load for every
+Claude session under `$HOME`, then the repo's own `AGENTS.md`.
 Cross-repo rules belong in the global file only; repo files state repo facts.
-Codex reads `~/.codex/AGENTS.md` plus `AGENTS.md` files from the git root down
-to the working directory, so inside a repo it never sees `~/AGENTS.md`; its
-global file therefore carries its own copy of the security-relevant devbox
-rules.
+
+Rules every agent shares live once, in `home/dot_config/agents/AGENTS.md`.
+Claude imports it (`@~/.config/agents/AGENTS.md`); the agents with no import
+syntax get a rendered copy from a one-line `include` template —
+`~/.codex/AGENTS.md`, `~/.config/opencode/AGENTS.md`, `~/.grok/rules/agents.md`.
+Copies rather than symlinks because the same source applies on Windows. Codex
+reads its global file plus `AGENTS.md` from the git root down, so inside a repo
+it never sees `~/AGENTS.md` — which is why the security-relevant devbox rules
+sit in the shared file. Grok also loads `~/.claude/CLAUDE.md` through its Claude
+compatibility scan but does not follow its `@` imports, hence its own copy.
+Cursor's CLI and Antigravity have no global rules file wired here; they see
+only repo `AGENTS.md` files.
 
 ## Skill provisioning: three mechanisms, one source of truth
 

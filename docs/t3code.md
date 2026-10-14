@@ -274,6 +274,14 @@ The `gpu-stack` model carries an explicit `limit`. OpenCode otherwise requests
 32000 output tokens, which alone overruns that server's 32768-token window and
 fails every call.
 
+Its model key is `local-chat`, the name the server publishes — not the
+underlying Qwen3-Coder ID; `curl http://192.168.1.50:8000/v1/models` shows it.
+NVIDIA model IDs churn as NIM ships new versions. When one stops answering,
+check it against NIM's live catalog (`curl -s
+https://integrate.api.nvidia.com/v1/models -H "Authorization: Bearer
+$PLATFORMCTL_JDWLABS_NVIDIA_API_KEY"`), not `opencode models`, which lists
+OpenCode's own catalog.
+
 ## Voice input
 
 Voice input exists on the **iOS app only**, and it needs nothing from this box.

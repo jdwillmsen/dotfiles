@@ -1,8 +1,8 @@
 # Shell Helpers Reference
 
-Worktree helpers. Moved out of the global CLAUDE.md so sessions don't pay the
-token cost of reference tables; the hard rules live there, the lookup detail
-lives here.
+Worktree helpers. Moved out of the global agent rules so sessions don't pay
+the token cost of reference tables; the hard rules live in
+`~/.config/agents/AGENTS.md`, the lookup detail lives here.
 
 Bash only. The script uses `mapfile` and 0-indexed arrays, neither of which zsh
 provides, so `.zshrc` deliberately does not source it and the file returns early
@@ -84,7 +84,7 @@ Neither route takes a start point per invocation:
   `origin/<default-branch>`, `head` from local HEAD.
 
 So a base other than those defaults has to be arranged explicitly — the case
-the global `CLAUDE.md` requires when fanning agents out over an open PR:
+the shared agent rules require when fanning agents out over an open PR:
 
 ```bash
 git fetch origin feat/open-pr

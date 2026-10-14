@@ -691,7 +691,10 @@ def instruction_health():
                     for p in glob.glob(str(HOME / pattern))})
 
     files, seen = [], set()
-    for p in claude_chain + home_chain + [codex_global] + memories + repos:
+    # ~/.codex/AGENTS.md is rendered from the shared rules file, which the
+    # Claude chain already lists; listing the copy too would raise every size
+    # finding twice, once against a file with no editable source.
+    for p in claude_chain + home_chain + memories + repos:
         if p in seen:
             continue
         seen.add(p)

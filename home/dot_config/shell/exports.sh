@@ -36,5 +36,15 @@ export KUBECONFIG="$HOME/.kube/config"
 # only: a token comes from `vault login` into ~/.vault-token, never from here.
 export VAULT_ADDR="https://vault.jdwlabs.com"
 
+# Agent CLI API keys, synced from Vault by agent-secrets-sync; kept out of git.
+if [ -r "$HOME/.config/agent-secrets.env" ]; then
+  case $- in *a*) _agent_allexport=1 ;; *) _agent_allexport= ;; esac
+  set -a
+  # shellcheck disable=SC1091  # written at runtime by agent-secrets-sync, absent from the repo
+  . "$HOME/.config/agent-secrets.env"
+  [ -n "$_agent_allexport" ] || set +a
+  unset _agent_allexport
+fi
+
 # Docker BuildKit for better build output
 export DOCKER_BUILDKIT=1

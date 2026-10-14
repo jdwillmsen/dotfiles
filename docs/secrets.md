@@ -85,3 +85,10 @@ decrypts it unconditionally on every `chezmoi apply` regardless of
 included, not just `work` — needs a working age identity for `apply` to
 succeed at all; `machineRole` only changes who ends up consuming the
 decrypted values, not whether decryption happens.
+
+## Agent CLI API keys
+
+Keys that agent CLIs read from the environment (today the NVIDIA NIM key
+OpenCode uses) are not stored in chezmoi at all. `agent-secrets-sync` pulls
+them from Vault into `~/.config/agent-secrets.env`; see
+[`t3code.md`](t3code.md#opencode-models).

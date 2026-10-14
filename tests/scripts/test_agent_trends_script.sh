@@ -196,10 +196,50 @@ path="$(sed -n 's/^path: //p' "$out")"
 [ -f "$path" ] && [ "$path" != "$store/site/index.html" ] || fail "--dry-run should write to a temp dir" "$(cat "$out")"
 [ ! -e "$store/site" ] || fail "--dry-run wrote into the store"
 
-# ── Default build publishes under the store, and only the page ──
+# ── Stored reports become pages, linked from the index ──
+cat >"$store/reports/2026-10-08-daily.md" <<'MD'
+# Agent report: daily 2026-10-08
+
+## Flags
+
+- **warn** `day-spend`: <script>alert(1)</script> [x](javascript:alert(2))
+
+| Metric | Value |
+|---|---|
+| Sessions | <img src=x onerror=alert(3)> |
+
+Plain & <b>text</b>.
+MD
+echo '# Agent report: weekly 2026-10-05' >"$store/reports/2026-10-05-weekly.md"
+run 0 build --out "$tmp/rep"
+python3 - "$tmp/rep" <<'PY' || fail "report pages are wrong"
+import os, sys
+root = sys.argv[1]
+page = open(f"{root}/reports/2026-10-08-daily.html").read()
+assert '<a href="../">' in page
+assert "<table>" in page and "<th>Metric</th>" in page and "<code>day-spend</code>" in page and "<strong>warn</strong>" in page
+for raw in ("<script", "<img", "<b>", "<a href=\"javascript"):
+    assert raw not in page, raw
+assert "&lt;script&gt;" in page and "&lt;img src=x" in page and "&amp;" in page
+for external in ("http://", "https://", "@import", "<link"):
+    assert external not in page, external
+index = open(f"{root}/index.html").read()
+assert 'href="reports/2026-10-08-daily.html"' in index and 'href="reports/2026-10-05-weekly.html"' in index
+assert sorted(os.listdir(f"{root}/reports")) == ["2026-10-05-weekly.html", "2026-10-08-daily.html"]
+PY
+rm "$store/reports/2026-10-05-weekly.md"
+run 0 build --out "$tmp/rep"
+[ ! -e "$tmp/rep/reports/2026-10-05-weekly.html" ] || fail "a page for a removed report was kept"
+grep -q "2026-10-05-weekly.html" "$tmp/rep/index.html" && fail "the index links a removed report"
+echo '# Agent report: weekly 2026-10-05' >"$store/reports/2026-10-05-weekly.md"
+run 0 build --dry-run
+path="$(sed -n 's/^path: //p' "$out")"
+[ -f "$(dirname "$path")/reports/2026-10-08-daily.html" ] || fail "--dry-run did not write report pages" "$(cat "$out")"
+
+# ── Default build publishes under the store, and only the site ──
 echo '{}' >"$store/reports/inflight.json"
 run 0 build
-[ "$(git -C "$store" show --name-only --format= HEAD)" = "site/index.html" ] || fail "build committed more than the page" "$(git -C "$store" show --name-only --format= HEAD)"
+[ "$(git -C "$store" show --name-only --format= HEAD | sort)" = "$(printf '%s\n' site/index.html site/reports/2026-10-05-weekly.html site/reports/2026-10-08-daily.html)" ] || fail "build committed more than the site" "$(git -C "$store" show --name-only --format= HEAD)"
 git -C "$store" status --porcelain | grep -q "reports/inflight.json" || fail "build swept up another tool's in-progress file"
 rm "$store/reports/inflight.json"
 [ -f "$store/site/index.html" ] || fail "build did not write site/index.html"
@@ -208,6 +248,9 @@ rm "$store/reports/inflight.json"
 before="$(git -C "$store" rev-list --count HEAD)"
 run 0 build
 [ "$(git -C "$store" rev-list --count HEAD)" = "$before" ] || fail "an unchanged rebuild committed again"
+rm "$store/reports/2026-10-05-weekly.md"
+run 0 build
+git -C "$store" show --name-status --format= HEAD | grep -qx $'D\tsite/reports/2026-10-05-weekly.html' || fail "a stale report page was not removed from the commit" "$(git -C "$store" show --name-status --format= HEAD)"
 run 0 build --days 30 --out "$tmp/page30"
 grep -q "2026-09-09" "$tmp/page30/index.html" && fail "--days 30 still charts September 9"
 

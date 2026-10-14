@@ -139,6 +139,29 @@ compatibility scan but does not follow its `@` imports, hence its own copy.
 Cursor's CLI and Antigravity have no global rules file wired here; they see
 only repo `AGENTS.md` files.
 
+## Model routing
+
+One Claude Max 5x plan is the scarce resource: its session and weekly limits
+are shared by every model, so switching model only changes how fast it drains.
+Route by what the work needs, and push volume to providers that do not draw on
+it.
+
+| Work | Route |
+|---|---|
+| Main-session planning; architecture, final pre-merge review, security, and a bug Sonnet already failed on — in any session or subagent | Claude Opus 5.5 (Fable 5.1 for the hardest) |
+| Implementation, research, routine review | Claude Sonnet 5.5 — the subagent default |
+| Search, summarizing, log reading | Claude Haiku 5.5, or the LAN model |
+| Bulk or mechanical edits, test scaffolding, overflow implementation | OpenCode on NVIDIA NIM (`z-ai/glm-5.3`, `moonshotai/kimi-k3`) |
+| Private or unlimited grunt work under 32K tokens | OpenCode `gpu-stack/local-chat` |
+| Second-opinion review from another model family | Codex (GPT-6 Luna), Grok 4.7 |
+
+Subagents were the largest single drain: over two weeks, about a third of all
+Claude usage was general-purpose subagents explicitly given `model: "opus"`
+for reports and routine reviews, overriding `CLAUDE_CODE_SUBAGENT_MODEL`. The
+global `CLAUDE.md` now names the few cases that earn Opus. Write shared rules
+as explicit commands and checks — weaker models follow what is stated and do
+not infer the convention behind it.
+
 ## Skill provisioning: three mechanisms, one source of truth
 
 There are three legitimate ways a skill arrives, and mixing them up is how the

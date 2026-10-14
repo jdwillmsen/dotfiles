@@ -12,8 +12,16 @@ specific to Claude Code.
   **end** (verification, quality bar) of a task; agents own the middle.
   Parallelize independent work across agents/worktrees.
 - Bugs: reproduce first with `mattpocock-skills:diagnosing-bugs`.
-- Subagents default to Sonnet; pass `model: "opus"` for review,
-  architecture, security and hard debugging.
+- **Subagent models — Opus only where it changes the outcome.** Leave `model`
+  unset (Sonnet, via `CLAUDE_CODE_SUBAGENT_MODEL`) for implementation,
+  research, reports, data gathering and routine PR review. Pass
+  `model: "haiku"` for search, summarizing and log reading. Pass
+  `model: "opus"` only for a final pre-merge review, security review,
+  architecture decisions, or a bug Sonnet already failed on — an unqualified
+  "review" here once sent a third of all usage to Opus subagents.
+- **Claude usage is the scarce resource.** Near the session limit, hand bulk
+  or mechanical work to another provider (OpenCode on NVIDIA NIM or the LAN
+  model, Codex) — routing table: dotfiles `docs/agentic-workflow.md`.
 - Long-running/overnight loops (`/loop`, ralph-loop, `gnhf`) always get **hard
   caps**: max iterations, token budget, explicit stop condition. Never uncapped.
 - Never install skills casually — they run with full agent permissions, and

@@ -36,10 +36,13 @@ done < <(jq -r '.provider | to_entries[] | [.key, (.value.options.apiKey // "")]
 # OpenCode asks for 32000 output tokens unless a model says otherwise, which on
 # its own overruns the LAN server's 32768-token window and fails every call —
 # the model was unusable until this limit was declared.
-ctx="$(jq -r '.provider["gpu-stack"].models["qwen/qwen3-coder-30b-a3b"].limit.context // "unset"' "$cfg")"
-outc="$(jq -r '.provider["gpu-stack"].models["qwen/qwen3-coder-30b-a3b"].limit.output // "unset"' "$cfg")"
-[ "$ctx" != unset ] || fail "the gpu-stack model declares no context limit"
-[ "$outc" != unset ] || fail "the gpu-stack model declares no output limit"
-[ "$outc" -lt "$ctx" ] || fail "the declared output limit does not fit the context window" "$outc >= $ctx"
+# Every declared model needs both halves of its limit, and room for input.
+[ -n "$(jq -r '.provider["gpu-stack"].models // {} | keys[]' "$cfg")" ] || fail "the gpu-stack provider declares no models"
+while IFS=$'\t' read -r prov m ctx outc; do
+    [ "$ctx" != unset ] || fail "$prov model $m declares no context limit"
+    [ "$outc" != unset ] || fail "$prov model $m declares no output limit"
+    [ "$outc" -lt "$ctx" ] || fail "$prov model $m's output limit does not fit its context window" "$outc >= $ctx"
+done < <(jq -r '.provider | to_entries[] | .key as $p | .value.models // {} | to_entries[]
+    | [$p, .key, (.value.limit.context // "unset"), (.value.limit.output // "unset")] | @tsv' "$cfg")
 
 echo "PASS"

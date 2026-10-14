@@ -270,6 +270,14 @@ needs no credential, and NVIDIA NIM, which reads
 already knows from its own catalog — Anthropic, OpenAI, OpenRouter — is reached
 through `opencode auth login` instead and needs nothing in that file.
 
+That variable comes from `~/.config/agent-secrets.env` (mode 600, never in
+git), which `exports.sh` sources for shells and the `20-agent-secrets.conf`
+drop-in loads into `t3code.service`. `agent-secrets-sync` writes it from Vault
+(`kv/litellm`, field `nvidia_api_key`), falling back to the cluster's synced
+copy (`ai-sre/litellm-secrets`) when there is no Vault token. Run it after a
+rotation, then restart `t3code.service`; `agent-secrets-sync --check` reports
+what the file holds without printing values.
+
 The `gpu-stack` model carries an explicit `limit`. OpenCode otherwise requests
 32000 output tokens, which alone overruns that server's 32768-token window and
 fails every call.

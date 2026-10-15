@@ -229,9 +229,11 @@ assert sorted(os.listdir(f"{root}/reports")) == ["2026-10-05-weekly.html", "2026
 PY
 rm "$store/reports/2026-10-05-weekly.md"
 echo orphan >"$tmp/rep/reports/2026-10-05-weekly.html.tmp"
+echo mine >"$tmp/rep/reports/notes.html.tmp"
 run 0 build --out "$tmp/rep"
 [ ! -e "$tmp/rep/reports/2026-10-05-weekly.html" ] || fail "a page for a removed report was kept"
 [ ! -e "$tmp/rep/reports/2026-10-05-weekly.html.tmp" ] || fail "an abandoned temp file for a removed report was kept"
+[ -f "$tmp/rep/reports/notes.html.tmp" ] || fail "the temp-file sweep deleted a file it did not write"
 grep -q "2026-10-05-weekly.html" "$tmp/rep/index.html" && fail "the index links a removed report"
 echo '# Agent report: weekly 2026-10-05' >"$store/reports/2026-10-05-weekly.md"
 run 0 build --dry-run

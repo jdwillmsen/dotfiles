@@ -717,8 +717,13 @@ def cmd_home(_args):
 
 def write_atomic(target, text):
     tmp = target.with_name(target.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(target)
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        tmp.replace(target)
+    except BaseException:
+        # A leftover .tmp is outside the stale-page sweep and would be committed by a later publish.
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def write_site(directory, page, report_pages):
@@ -733,6 +738,8 @@ def write_site(directory, page, report_pages):
         for name, text in wanted.items():
             write_atomic(reports / name, report_page(name[:10], name[11:-5], text))
     if reports.is_dir():
+        for old in reports.glob("*.html.tmp"):
+            old.unlink()
         for old in reports.glob("*.html"):
             if REPORT_MD.fullmatch(old.name[:-5] + ".md") and old.name not in wanted:
                 old.unlink()

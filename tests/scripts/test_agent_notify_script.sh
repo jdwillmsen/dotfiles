@@ -20,7 +20,7 @@ python3 -c "import ast, sys; ast.parse(open(sys.argv[1]).read())" "$notify" || f
 
 tmp="$(mktemp -d)"
 # shellcheck disable=SC2064  # $tmp must expand now: the trap outlives its scope
-trap "chmod -R u+w '$tmp' 2>/dev/null; rm -rf '$tmp'" EXIT
+trap "chmod -R u+w '$tmp' 2>/dev/null; rm -rf '$tmp'; [ -z \"\${srv:-}\" ] || kill \"\$srv\" 2>/dev/null" EXIT
 mkdir -p "$tmp/home" "$tmp/config" "$tmp/state" "$tmp/store" "$tmp/bin"
 echo '{"store_remote": "git@github.com:acme/metrics.git"}' >"$tmp/config/config.json"
 
@@ -35,6 +35,8 @@ state="$tmp/state"
 cat >"$tmp/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >>"$GH_LOG"
+echo "$1 $2 token=${GH_TOKEN:-none}" >>"$GH_ENVLOG"
+if [ "$1 $2" = "issue comment" ] && [ -n "${GH_TOKEN:-}" ] && [ -e "$GH_APPDENY" ]; then echo "GraphQL: Resource not accessible by integration (addComment)" >&2; exit 1; fi
 if [ -e "$GH_FAIL" ]; then echo "gh: HTTP 502" >&2; exit 1; fi
 if [ "$1 $2" = "issue comment" ] && [ -s "$GH_REPO_FAIL" ] && [[ " $* " == *" --repo $(cat "$GH_REPO_FAIL") "* ]]; then echo "gh: HTTP 500" >&2; exit 1; fi
 case "$1 $2" in
@@ -54,6 +56,7 @@ exit 0
 STUB
 chmod +x "$tmp/bin/gh"
 export GH_LOG="$tmp/gh.log" GH_FAIL="$tmp/gh.fail" GH_LIST="$tmp/gh.list" GH_BODY="$tmp/gh.body" GH_NOPIN="$tmp/gh.nopin"
+export GH_ENVLOG="$tmp/gh.env" GH_APPDENY="$tmp/gh.appdeny"
 export GH_REPO_FAIL="$tmp/gh.repofail"
 export GH_SLOW="$tmp/gh.slow" GH_COMMENT_FAIL="$tmp/gh.commentfail" GH_COMMENTS="$tmp/gh.comments" GH_VIEW="$tmp/gh.view" GH_GONE="$tmp/gh.gone" GH_CREATE_N="$tmp/gh.createn"
 echo '[]' >"$GH_LIST"
@@ -500,5 +503,171 @@ reset_state
 write_flags 2026-10-08
 run 0 send
 [ "$(comments)" = 1 ] && [ -e "$state/notified.json" ] || fail "default config no longer uses the single gh channel and legacy state"
+
+# ── App identity: a minted token reaches gh only through its environment ──
+command -v openssl >/dev/null || fail "openssl is needed for the app identity tests"
+unset GH_TOKEN GITHUB_TOKEN
+mkdir -p "$tmp/app"
+openssl genrsa -out "$tmp/app/key.pem" 2048 2>/dev/null
+openssl rsa -in "$tmp/app/key.pem" -pubout -out "$tmp/app/pub.pem" 2>/dev/null
+cat >"$tmp/bin/kubectl" <<'STUB'
+#!/usr/bin/env bash
+echo "$*" >>"$KUBECTL_LOG"
+if [ -e "$KUBECTL_FAIL" ]; then echo "Unable to connect to the server" >&2; exit 1; fi
+case "$*" in
+    "-n ai-sre get secret ai-sre-relay -o jsonpath={.data.GITHUB_APP_ID}") printf 4242 | base64 -w0 ;;
+    "-n ai-sre get secret ai-sre-relay -o jsonpath={.data.GITHUB_APP_PRIVATE_KEY}") base64 -w0 <"$APP_KEY" ;;
+    *) echo "unexpected kubectl call: $*" >&2; exit 1 ;;
+esac
+STUB
+chmod +x "$tmp/bin/kubectl"
+cat >"$tmp/app/server.py" <<'PY'
+import base64, http.server, json, os, subprocess, sys
+
+d = sys.argv[1]
+TOKEN = "ghs_FAKEINSTALLATIONTOKEN0001"
+
+
+def b64d(s):
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def reply(self, code, obj):
+        raw = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def jwt_ok(self):
+        auth = self.headers.get("Authorization", "")
+        if not auth.startswith("Bearer "):
+            return False
+        try:
+            head, payload, sig = auth[7:].split(".")
+            claims = json.loads(b64d(payload))
+            open(d + "/sig", "wb").write(b64d(sig))
+            r = subprocess.run(["openssl", "dgst", "-sha256", "-verify", d + "/pub.pem", "-signature", d + "/sig"],
+                               input=f"{head}.{payload}".encode(), capture_output=True)
+            return r.returncode == 0 and claims.get("iss") == "4242" and json.loads(b64d(head)).get("alg") == "RS256"
+        except Exception:
+            return False
+
+    def handle_any(self, method):
+        n = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(n).decode() if n else ""
+        ok = self.jwt_ok()
+        open(d + "/requests", "a").write(f"{method} {self.path} jwt={'valid' if ok else 'INVALID'} body={body}\n")
+        if not ok:
+            return self.reply(401, {"message": "Bad credentials"})
+        if method == "GET" and self.path == "/repos/acme/metrics/installation":
+            if os.path.exists(d + "/install404"):
+                return self.reply(404, {"message": "Not Found"})
+            return self.reply(200, {"id": 777})
+        if method == "POST" and self.path == "/app/installations/777/access_tokens":
+            if os.path.exists(d + "/exchange403"):
+                return self.reply(403, {"message": "Resource not accessible by integration"})
+            return self.reply(201, {"token": TOKEN, "expires_at": "2026-10-09T13:00:00Z"})
+        self.reply(404, {"message": "Not Found"})
+
+    def do_GET(self):
+        self.handle_any("GET")
+
+    def do_POST(self):
+        self.handle_any("POST")
+
+
+srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+open(d + "/port", "w").write(str(srv.server_address[1]))
+srv.serve_forever()
+PY
+python3 "$tmp/app/server.py" "$tmp/app" &
+srv=$!
+for _ in $(seq 50); do [ -s "$tmp/app/port" ] && break; sleep 0.1; done
+[ -s "$tmp/app/port" ] || fail "fake GitHub API did not start"
+api_port="$(cat "$tmp/app/port")"
+export AGENT_NOTIFY_API_URL="http://127.0.0.1:$api_port"
+export KUBECTL_LOG="$tmp/kubectl.log" KUBECTL_FAIL="$tmp/kubectl.fail" APP_KEY="$tmp/app/key.pem"
+token=ghs_FAKEINSTALLATIONTOKEN0001
+app_reset() { reset_state; rm -f "$GH_ENVLOG" "$GH_APPDENY" "$KUBECTL_FAIL" "$tmp/app/install404" "$tmp/app/exchange403" "$tmp/app/requests" "$KUBECTL_LOG"; touch "$GH_ENVLOG" "$tmp/app/requests"; write_flags 2026-10-08; }
+no_secrets() {  # nothing the App touched may surface anywhere a human or a log could read it
+    local f
+    for f in "$out" "$err" "$GH_LOG" "$KUBECTL_LOG"; do
+        if grep -q "$token" "$f"; then fail "the installation token appears in $(basename "$f")" "$(cat "$f")"; fi
+        if grep -q "BEGIN" "$f"; then fail "key material appears in $(basename "$f")"; fi
+    done
+    if grep -rq "$token" "$state"; then fail "the installation token reached the state directory"; fi
+    if grep -rqE "BEGIN|eyJ" "$state"; then fail "key or JWT material reached the state directory"; fi
+}
+set_notify '{"channels": [{"type": "github-issue", "identity": "app"}]}'
+
+app_reset
+run 0 send
+grep -q "^sent: true" "$out" || fail "app send did not report sent" "$(cat "$out")"
+grep -q "app" "$out" || fail "the output does not name the app identity" "$(cat "$out")"
+grep -qx "issue comment token=$token" "$GH_ENVLOG" || fail "the comment did not carry the App token in GH_TOKEN" "$(cat "$GH_ENVLOG")"
+grep -q "issue list token=none" "$GH_ENVLOG" || fail "issue lookup should stay with the gh login" "$(cat "$GH_ENVLOG")"
+[ "$(comments)" = 1 ] || fail "app send should post once"
+grep -q "jwt=valid" "$tmp/app/requests" && ! grep -q "INVALID" "$tmp/app/requests" || fail "the App JWT was not a valid RS256 signature for the App id" "$(cat "$tmp/app/requests")"
+grep -q 'access_tokens jwt=valid body={"repositories": \["metrics"\]}' "$tmp/app/requests" || fail "the token was not scoped to the repository alone" "$(cat "$tmp/app/requests")"
+no_secrets
+run 0 send
+grep -qi "already" "$out" || fail "app identity broke at-most-once" "$(cat "$out")"
+[ "$(comments)" = 1 ] || fail "app identity reposted a notified date"
+
+# not installed: 404 falls back to gh, loudly
+app_reset
+touch "$tmp/app/install404"
+run 0 send
+grep -qx "issue comment token=none" "$GH_ENVLOG" || fail "the fallback comment should use the gh login" "$(cat "$GH_ENVLOG")"
+grep -q "fallback" "$out" && grep -q "not installed" "$out" || fail "a 404 fallback does not say why" "$(cat "$out")"
+grep -q "^help" "$out" && grep -q "jdwlabs-agent-bot" "$out" && grep -q "Issues" "$out" || fail "the fallback has no install help" "$(cat "$out")"
+grep -q "gh" "$out" || fail "the fallback output does not name the gh identity"
+[ "$(comments)" = 1 ] || fail "the fallback should still post once"
+no_secrets
+
+# exchange refused with 403
+app_reset
+touch "$tmp/app/exchange403"
+run 0 send
+grep -q "403" "$out" && grep -q "fallback" "$out" || fail "a refused exchange does not fall back with a reason" "$(cat "$out")"
+grep -qx "issue comment token=none" "$GH_ENVLOG" || fail "fallback should post as gh" "$(cat "$GH_ENVLOG")"
+no_secrets
+
+# App lacks the issues permission: gh refuses the comment, gh identity posts it
+app_reset
+touch "$GH_APPDENY"
+run 0 send
+grep -q "Resource not accessible" "$out" && grep -q "fallback" "$out" || fail "a refused comment does not fall back with a reason" "$(cat "$out")"
+grep -qx "issue comment token=$token" "$GH_ENVLOG" && grep -qx "issue comment token=none" "$GH_ENVLOG" || fail "expected one App attempt then one gh post" "$(cat "$GH_ENVLOG")"
+[ "$(comments)" = 1 ] || fail "the refused comment must be posted exactly once"
+grep -q "Install" "$out" || fail "no install help on a permission fallback" "$(cat "$out")"
+no_secrets
+
+# kubectl missing or failing
+app_reset
+touch "$KUBECTL_FAIL"
+run 0 send
+grep -q "fallback" "$out" && grep -qi "kubectl" "$out" || fail "a kubectl failure does not fall back with a reason" "$(cat "$out")"
+[ "$(comments)" = 1 ] || fail "kubectl failure should still post as gh"
+no_secrets
+app_reset
+mkdir -p "$tmp/nokube"
+for t in python3 env bash cat base64 openssl timeout rm mkdir; do ln -sf "$(command -v $t)" "$tmp/nokube/$t"; done
+ln -sf "$tmp/bin/gh" "$tmp/nokube/gh"
+PATH="$tmp/nokube" "$(command -v python3)" "$notify" send >"$out" 2>"$err" || fail "send without kubectl on PATH should still succeed" "$(cat "$out" "$err")"
+grep -q "kubectl is not installed" "$out" || fail "a missing kubectl is not named" "$(cat "$out")"
+
+# dry run mints nothing
+app_reset
+run 0 send --dry-run
+[ ! -s "$tmp/app/requests" ] && [ ! -e "$KUBECTL_LOG" ] || fail "a dry run touched the credentials or the API"
+
+echo "$default_config" >"$tmp/config/config.json"
+unset AGENT_NOTIFY_API_URL
 
 echo "test_agent_notify_script: OK"

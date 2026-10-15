@@ -739,7 +739,8 @@ def write_site(directory, page, report_pages):
             write_atomic(reports / name, report_page(name[:10], name[11:-5], text))
     if reports.is_dir():
         for old in reports.glob("*.html.tmp"):
-            old.unlink()
+            if REPORT_MD.fullmatch(old.name[:-9] + ".md"):
+                old.unlink()
         for old in reports.glob("*.html"):
             if REPORT_MD.fullmatch(old.name[:-5] + ".md") and old.name not in wanted:
                 old.unlink()

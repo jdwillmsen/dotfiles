@@ -106,6 +106,18 @@ t3_expiry_notice() {
     } >&2
 }
 
+# Surface what unattended maintenance could not finish by itself: a reboot the
+# guard keeps deferring, or services that did not come back after one. Both
+# are marker files written by their checks, so a clean box costs two tests.
+maintenance_notice() {
+    local f
+    for f in /var/lib/devbox-maintenance/notice \
+        "${XDG_STATE_HOME:-$HOME/.local/state}/devbox-health.fail"; do
+        [ -s "$f" ] && { printf '⚠ '; cat "$f"; } >&2
+    done
+    return 0
+}
+
 # Nudge about the daily report's unacknowledged flags. Only on a terminal, so
 # `bash -ic` pipelines see nothing extra. Plain tests come first so a shell
 # with nothing pending, or with the flags already acknowledged (acked.json

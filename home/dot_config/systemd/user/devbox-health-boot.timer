@@ -1,0 +1,10 @@
+[Unit]
+Description=Run devbox-health once, a few minutes after boot
+
+[Timer]
+# Relative to the user manager, which linger starts at boot. The delay lets
+# slower services (tailscale, T3 Code) settle so a check does not race them.
+OnStartupSec=5min
+
+[Install]
+WantedBy=timers.target

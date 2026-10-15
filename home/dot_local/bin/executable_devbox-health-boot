@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# devbox-health-boot — run devbox-health once after boot and leave its failures
+# where the next login shell will show them.
+#
+# The box now reboots itself overnight (devbox-reboot-guard), so nobody is at
+# a prompt to ask whether everything came back. A failed unit sits unread in
+# the journal; a marker file is what the shell hook can print cheaply.
+#
+# Exit: devbox-health's own status (0 healthy, non-zero otherwise).
+set -uo pipefail
+
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}"
+marker="$state_dir/devbox-health.fail"
+health="${DEVBOX_HEALTH:-$HOME/.local/bin/devbox-health}"
+
+mkdir -p "$state_dir"
+out="$("$health" 2>&1)"
+rc=$?
+printf '%s\n' "$out"
+
+if [ "$rc" -eq 0 ]; then
+    rm -f "$marker"
+    exit 0
+fi
+
+# Only the failing lines: the marker is printed at every login until cleared.
+{
+    echo "maintenance: devbox-health failed after boot ($(date -u +%Y-%m-%dT%H:%MZ)):"
+    printf '%s\n' "$out" | grep -E '^[[:space:]]*(FAIL|UNKN)' || echo "  (no FAIL line; exit $rc)"
+    echo "  Re-check with: devbox-health && devbox-health-boot"
+} >"$marker"
+exit "$rc"

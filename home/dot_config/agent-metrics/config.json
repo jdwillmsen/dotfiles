@@ -1,3 +1,9 @@
 {
-  "store_remote": "git@github.com:jdwillmsen/agent-metrics.git"
+  "store_remote": "git@github.com:jdwillmsen/agent-metrics.git",
+  "notify": {
+    "dashboard_url": "https://devbox.tail5bbd6f.ts.net/metrics/",
+    "channels": [
+      {"type": "github-issue", "identity": "app"}
+    ]
+  }
 }

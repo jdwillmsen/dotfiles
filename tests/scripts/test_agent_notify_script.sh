@@ -36,6 +36,7 @@ cat >"$tmp/bin/gh" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >>"$GH_LOG"
 if [ -e "$GH_FAIL" ]; then echo "gh: HTTP 502" >&2; exit 1; fi
+if [ "$1 $2" = "issue comment" ] && [ -s "$GH_REPO_FAIL" ] && [[ " $* " == *" --repo $(cat "$GH_REPO_FAIL") "* ]]; then echo "gh: HTTP 500" >&2; exit 1; fi
 case "$1 $2" in
     "issue list") cat "$GH_LIST" ;;
     "issue create") echo "https://github.com/acme/metrics/issues/$(cat "$GH_CREATE_N" 2>/dev/null || echo 41)" ;;
@@ -53,6 +54,7 @@ exit 0
 STUB
 chmod +x "$tmp/bin/gh"
 export GH_LOG="$tmp/gh.log" GH_FAIL="$tmp/gh.fail" GH_LIST="$tmp/gh.list" GH_BODY="$tmp/gh.body" GH_NOPIN="$tmp/gh.nopin"
+export GH_REPO_FAIL="$tmp/gh.repofail"
 export GH_SLOW="$tmp/gh.slow" GH_COMMENT_FAIL="$tmp/gh.commentfail" GH_COMMENTS="$tmp/gh.comments" GH_VIEW="$tmp/gh.view" GH_GONE="$tmp/gh.gone" GH_CREATE_N="$tmp/gh.createn"
 echo '[]' >"$GH_LIST"
 : >"$GH_LOG"
@@ -460,5 +462,43 @@ run 1 send
 if grep -q "2026-10-21" "$state/notified.json"; then fail "a send that could not find a replacement issue kept the date as notified"; fi
 rm -f "$GH_COMMENT_FAIL" "$GH_VIEW"
 echo '[]' >"$GH_LIST"
+
+# ── Channels: config selects them, a bad one is refused, one failing does not block another ──
+set_notify() { python3 - "$tmp/config/config.json" "$1" <<'PY'
+import json, sys
+json.dump({"store_remote": "git@github.com:acme/metrics.git", "notify": json.loads(sys.argv[2])}, open(sys.argv[1], "w"))
+PY
+}
+default_config='{"store_remote": "git@github.com:acme/metrics.git"}'
+reset_state
+write_flags 2026-10-08
+set_notify '{"channels": [{"type": "carrier-pigeon"}]}'
+run 2 send
+grep -q "^error:" "$out" && grep -q "carrier-pigeon" "$out" || fail "an unknown channel type is not a structured error" "$(cat "$out")"
+[ "$(calls)" = 0 ] || fail "a bad channel config must not call gh"
+set_notify '{"channels": [{"type": "github-issue"}, {"type": "github-issue"}]}'
+run 2 send
+grep -q "used twice" "$out" || fail "two unnamed channels of one type must be refused" "$(cat "$out")"
+set_notify '{"channels": []}'
+run 2 send
+set_notify '[1]'
+run 2 send
+
+set_notify '{"channels": [{"type": "github-issue", "name": "main"}, {"type": "github-issue", "name": "mirror", "repo": "acme/mirror"}]}'
+echo acme/metrics >"$GH_REPO_FAIL"
+run 1 send
+grep -q -- "--repo acme/mirror" "$GH_COMMENTS" || fail "a failing channel stopped the other from posting" "$(cat "$out" "$GH_LOG")"
+grep -q "main" "$out" && grep -q "failed" "$out" && grep -q "sent" "$out" || fail "the outcome does not report each channel" "$(cat "$out")"
+if grep -q "2026-10-08" "$state/main.notified.json" 2>/dev/null; then fail "the failed channel kept the date"; fi
+grep -q "2026-10-08" "$state/mirror.notified.json" || fail "the channel that posted did not record the date" "$(ls "$state")"
+rm -f "$GH_REPO_FAIL"
+: >"$GH_COMMENTS"
+run 0 send
+[ "$(comments)" = 1 ] && grep -q -- "--repo acme/metrics" "$GH_COMMENTS" || fail "the retry should post only on the channel that had failed" "$(cat "$GH_COMMENTS")"
+echo "$default_config" >"$tmp/config/config.json"
+reset_state
+write_flags 2026-10-08
+run 0 send
+[ "$(comments)" = 1 ] && [ -e "$state/notified.json" ] || fail "default config no longer uses the single gh channel and legacy state"
 
 echo "test_agent_notify_script: OK"

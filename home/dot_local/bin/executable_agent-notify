@@ -22,6 +22,7 @@ from pathlib import Path
 
 VERSION = "1.0.0"
 ISSUE_TITLE = "Agent metrics: flagged days"
+DIGEST_TITLE = "Agent metrics: weekly digest"
 DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 IDENT_RE = re.compile(r"[A-Za-z0-9:_.@/-]{1,64}")
 # GitHub's own limits, tightened: the name is later part of a command line.
@@ -32,7 +33,7 @@ SEVERITIES = ("info", "warn", "critical")
 MAX_FLAGS_BYTES = 64 << 10
 KEEP_DATES = 90
 MESSAGE_MAX = 300
-USAGE_SHORT = "agent-notify [send [--dry-run] | shell | show] [--help]"
+USAGE_SHORT = "agent-notify [send [--dry-run] [--force] | shell | show] [--help]"
 
 
 def state_dir():
@@ -232,23 +233,29 @@ def remove_date(name, date):
     write_state(name, {"dates": [d for d in read_dates(name) if d != date]})
 
 
-def remembered_issue(repo=None):
-    """(repo, number) last used, or None. With `repo`, a value remembered for
-    any other repository is ignored: numbers mean nothing across repos."""
-    data = read_small_json(STATE / "notify-issue") or {}
+def remembered_target(fname):
+    """(repo, number) last used in `fname`, or None."""
+    data = read_small_json(STATE / fname) or {}
     r, n = data.get("repo"), data.get("number")
-    if not (isinstance(r, str) and REPO_RE.fullmatch(r) and isinstance(n, int) and not isinstance(n, bool) and n > 0):
-        return None
-    return (r, n) if repo is None or r == repo else None
+    if isinstance(r, str) and REPO_RE.fullmatch(r) and isinstance(n, int) and not isinstance(n, bool) and n > 0:
+        return r, n
+    return None
 
 
-def remember_issue(repo, number):
-    write_state("notify-issue", {"repo": repo, "number": number})
+def remembered_issue(repo, fname):
+    """Number last used in `fname` for `repo`. A value remembered for any
+    other repository is ignored: numbers mean nothing across repos."""
+    t = remembered_target(fname)
+    return t[1] if t and t[0] == repo else None
 
 
-def forget_issue():
+def remember_issue(repo, number, fname):
+    write_state(fname, {"repo": repo, "number": number})
+
+
+def forget_issue(fname):
     try:
-        (STATE / "notify-issue").unlink()
+        (STATE / fname).unlink()
     except OSError:
         pass
 
@@ -274,10 +281,46 @@ class SendLock:
         self.fh.close()
 
 
-# ── GitHub ───────────────────────────────────────────────────────────────────
+def code(text, limit=MESSAGE_MAX):
+    """Inline code with nothing in it for markdown to interpret."""
+    return f"`{printable(text, limit) or '(empty)'}`"
+
+
+def report_path(date):
+    return f"reports/{date}-daily.json"
+
+
+def comment_body(date, flags):
+    lines = [f"Flags for {code(date)}", ""]
+    lines += [f"- {code(f['severity'])} {code(f['id'])}: {code(f['message'])}" for f in flags]
+    lines += ["", f"Daily report: {code(report_path(date))}"]
+    return "\n".join(lines)
+
+
+# ── Channels ─────────────────────────────────────────────────────────────────
+# A channel delivers one message for one topic. Config: the `notify` object in
+# config.json. To add a channel type, write a Channel subclass and add it to
+# CHANNEL_TYPES; nothing else changes.
 
 REMOTE_RES = (re.compile(r"^git@github\.com:([^/\s]+)/([^/\s]+?)(?:\.git)?/?$"),
               re.compile(r"^(?:https?|ssh|git)://(?:[^@/]+@)?github\.com/([^/\s]+)/([^/\s]+?)(?:\.git)?/?$"))
+CHANNEL_KEY_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
+# The legacy state file names belong to the channel every box already has.
+LEGACY_KEY = "github-issue"
+TOPICS = {
+    "flags": {"title": ISSUE_TITLE, "notified": "notified.json", "issue": "notify-issue", "pin": True,
+              "intro": "Daily flags from the agent-metrics report, one comment per flagged day. "
+                       "Written by `agent-notify send`."},
+    "digest": {"title": DIGEST_TITLE, "notified": "digest-notified.json", "issue": "digest-issue", "pin": False,
+               "intro": "Weekly summary from the agent-metrics report, one comment per week. "
+                        "Written by `agent-notify digest`."},
+}
+
+
+class ChannelError(Exception):
+    def __init__(self, what, detail, timed_out=False):
+        super().__init__(what)
+        self.what, self.detail, self.timed_out = what, detail, timed_out
 
 
 def store_repo():
@@ -297,14 +340,8 @@ def store_repo():
     return repo
 
 
-class GhError(Exception):
-    def __init__(self, what, detail, timed_out=False):
-        super().__init__(what)
-        self.what, self.detail, self.timed_out = what, detail, timed_out
-
-
 def gh(*args, stdin=None):
-    """Run gh and return stdout; any failure raises GhError."""
+    """Run gh and return stdout; any failure raises ChannelError."""
     env = {**os.environ, "GH_PROMPT_DISABLED": "1", "NO_COLOR": "1"}
     what = f"gh {args[0]} {args[1]}"
     try:
@@ -313,86 +350,209 @@ def gh(*args, stdin=None):
     except FileNotFoundError:
         am.die(am.EXIT_USAGE, "gh is not installed", "Install the GitHub CLI and run `gh auth login`")
     except subprocess.TimeoutExpired:
-        raise GhError(what, "timed out", timed_out=True)
+        raise ChannelError(what, "timed out", timed_out=True)
     if r.returncode != 0:
         detail = (r.stderr or r.stdout).strip().splitlines()
-        raise GhError(what, detail[-1] if detail else str(r.returncode))
+        raise ChannelError(what, detail[-1] if detail else str(r.returncode))
     return r.stdout
 
 
-def gh_failed(e, extra=None):
-    am.die(am.EXIT_FAIL, f"{e.what} failed: {e.detail}",
-           extra or "Check `gh auth status`; the date stays unnotified and the next run retries")
+class Channel:
+    """One destination. `prepare` finds or creates whatever `post` needs and
+    may fail without having notified anyone; `post` delivers and returns a
+    result dict (identity, issue, fallback, help, as the channel sees fit)."""
+    type = None
+
+    def __init__(self, key, cfg):
+        self.key = key
+
+    def state_file(self, topic, kind):
+        base = TOPICS[topic][kind]
+        return base if self.key == LEGACY_KEY else f"{self.key}.{base}"
+
+    def target(self, topic):
+        """Dry-run row: where `post` would go."""
+        raise NotImplementedError
+
+    def prepare(self, topic):
+        pass
+
+    def post(self, topic, body):
+        raise NotImplementedError
 
 
-def find_or_create_issue(repo):
-    listing = gh("issue", "list", "--repo", repo, "--state", "open", "--search", f'in:title "{ISSUE_TITLE}"',
-                 "--json", "number,title", "--limit", "100")
+class GithubIssueChannel(Channel):
+    type = "github-issue"
+
+    def __init__(self, key, cfg):
+        super().__init__(key, cfg)
+        repo = cfg.get("repo")
+        if repo is not None and not (isinstance(repo, str) and REPO_RE.fullmatch(repo)):
+            config_error(f"channel {key}: repo must be owner/name")
+        self.repo = repo or store_repo()
+        self.issue = None
+        self.from_memory = False
+
+    def target(self, topic):
+        n = remembered_issue(self.repo, self.state_file(topic, "issue"))
+        return {"channel": self.key, "repo": self.repo, "issue": n or "found or created on send"}
+
+    def find_or_create_issue(self, topic):
+        t = TOPICS[topic]
+        listing = gh("issue", "list", "--repo", self.repo, "--state", "open", "--search", f'in:title "{t["title"]}"',
+                     "--json", "number,title", "--limit", "100")
+        try:
+            found = [i["number"] for i in json.loads(listing) if i.get("title") == t["title"]]
+        except (ValueError, TypeError, KeyError, AttributeError):
+            # Raised, not fatal: nothing was posted, so the caller undoes the date it recorded.
+            raise ChannelError("gh issue list returned something that is not a list of issues", "")
+        fname = self.state_file(topic, "issue")
+        if found:
+            remember_issue(self.repo, min(found), fname)
+            return min(found)
+        out = gh("issue", "create", "--repo", self.repo, "--title", t["title"], "--body", t["intro"])
+        m = re.search(r"/issues/(\d+)", out)
+        if not m:
+            raise ChannelError("gh issue create did not print an issue URL", "")
+        number = int(m.group(1))
+        # Remembered before the comment so a failed comment retries on this issue.
+        remember_issue(self.repo, number, fname)
+        if t["pin"]:
+            try:
+                gh("issue", "pin", str(number), "--repo", self.repo)
+            except ChannelError:
+                log("could not pin the tracking issue; pin it by hand if you want it on top")
+        return number
+
+    def issue_unusable(self, number):
+        """True when the issue is closed or no longer exists. Any other failure
+        to ask means we cannot tell, which is not a reason to open another."""
+        try:
+            state = json.loads(gh("issue", "view", str(number), "--repo", self.repo, "--json", "state")).get("state")
+        except ChannelError as e:
+            return bool(re.search(r"could not resolve|not found|404|deleted|transferred", e.detail, re.I))
+        except (ValueError, AttributeError):
+            return False
+        return state == "CLOSED"
+
+    def prepare(self, topic):
+        n = remembered_issue(self.repo, self.state_file(topic, "issue"))
+        self.from_memory = bool(n)
+        self.issue = n or self.find_or_create_issue(topic)
+
+    def post(self, topic, body):
+        """Comment, replacing a closed or deleted remembered issue once."""
+        issue = self.issue
+        try:
+            gh("issue", "comment", str(issue), "--repo", self.repo, "--body-file", "-", stdin=body)
+        except ChannelError as e:
+            if e.timed_out or not self.from_memory or not self.issue_unusable(issue):
+                raise
+            forget_issue(self.state_file(topic, "issue"))
+            issue = self.find_or_create_issue(topic)
+            gh("issue", "comment", str(issue), "--repo", self.repo, "--body-file", "-", stdin=body)
+        remember_issue(self.repo, issue, self.state_file(topic, "issue"))
+        return {"issue": issue}
+
+
+CHANNEL_TYPES = {GithubIssueChannel.type: GithubIssueChannel}
+DEFAULT_NOTIFY = {"channels": [{"type": "github-issue"}]}
+
+
+def config_error(msg):
+    am.die(am.EXIT_USAGE, f"{am.tilde(am.CONFIG / 'config.json')}: notify {msg}",
+           f"Channel types: {', '.join(sorted(CHANNEL_TYPES))}; see docs/agent-notify.md")
+
+
+def build_channels():
+    """Channel instances from the `notify` config. Bad config exits 2 before
+    anything is sent. The settings are read only when a command needs them,
+    so `shell` and `show` never depend on the config."""
+    path = am.CONFIG / "config.json"
+    cfg = am.load_config("config.json").get("notify") if os.path.lexists(path) else None
+    if cfg is None:
+        cfg = DEFAULT_NOTIFY
+    if not isinstance(cfg, dict):
+        config_error("must be an object")
+    raw = cfg.get("channels", DEFAULT_NOTIFY["channels"])
+    if not isinstance(raw, list) or not raw or not all(isinstance(c, dict) for c in raw):
+        config_error("channels must be a non-empty list of objects")
+    channels, seen = [], set()
+    for c in raw:
+        ctype = c.get("type")
+        cls = CHANNEL_TYPES.get(ctype) if isinstance(ctype, str) else None
+        if cls is None:
+            config_error(f"channel type {printable(ctype, 40)!r} is unknown")
+        key = c.get("name", ctype)
+        if not (isinstance(key, str) and CHANNEL_KEY_RE.fullmatch(key)):
+            config_error("channel names must match [a-z0-9-], 1 to 32 characters")
+        if key in seen:
+            config_error(f"channel name {key} is used twice; give each channel of one type a distinct name")
+        seen.add(key)
+        channels.append(cls(key, c))
+    return channels
+
+
+def deliver_one(ch, topic, date, body, force):
+    """One channel's turn, as a result row. At most one message per date is
+    the side to err on: the date is recorded before posting, a definite
+    failure rolls it back, and an unknown outcome (a timeout) keeps it."""
+    row = {"channel": ch.key, "status": "failed", "identity": None, "issue": None, "fallback": None, "detail": None}
+    notified = ch.state_file(topic, "notified")
+    if date in read_dates(notified) and not force:
+        return {**row, "status": "skipped", "detail": f"already notified for {date}"}
     try:
-        found = [i["number"] for i in json.loads(listing) if i.get("title") == ISSUE_TITLE]
-    except (ValueError, TypeError, KeyError, AttributeError):
-        # Raised, not fatal: nothing was posted, so the caller undoes the date it recorded.
-        raise GhError("gh issue list returned something that is not a list of issues", "")
-    if found:
-        remember_issue(repo, min(found))
-        return min(found)
-    body = ("Daily flags from the agent-metrics report, one comment per flagged day. "
-            "Written by `agent-notify send`.")
-    out = gh("issue", "create", "--repo", repo, "--title", ISSUE_TITLE, "--body", body)
-    m = re.search(r"/issues/(\d+)", out)
-    if not m:
-        raise GhError("gh issue create did not print an issue URL", "")
-    number = int(m.group(1))
-    # Remembered before the comment so a failed comment retries on this issue.
-    remember_issue(repo, number)
+        ch.prepare(topic)
+    except ChannelError as e:
+        return {**row, "detail": f"{e.what} failed: {e.detail}" if e.detail else e.what}
     try:
-        gh("issue", "pin", str(number), "--repo", repo)
-    except GhError:
-        log("could not pin the tracking issue; pin it by hand if you want it on top")
-    return number
-
-
-def issue_unusable(repo, number):
-    """True when the issue is closed or no longer exists. Any other failure
-    to ask means we cannot tell, which is not a reason to open another."""
+        add_date(notified, date)
+    except OSError as e:
+        return {**row, "detail": f"cannot record {date} in {am.tilde(STATE / notified)}: {e.strerror}; nothing was posted"}
     try:
-        state = json.loads(gh("issue", "view", str(number), "--repo", repo, "--json", "state")).get("state")
-    except GhError as e:
-        return bool(re.search(r"could not resolve|not found|404|deleted|transferred", e.detail, re.I))
-    except (ValueError, AttributeError):
-        return False
-    return state == "CLOSED"
+        result = ch.post(topic, body)
+    except ChannelError as e:
+        if e.timed_out:
+            return {**row, "detail": f"{e.what} timed out: the comment may have been posted, so {date} stays recorded and is not retried"}
+        try:
+            remove_date(notified, date)
+        except OSError:
+            return {**row, "detail": f"{e.what} failed ({e.detail}) and {date} could not be unrecorded, so it will not be retried"}
+        return {**row, "detail": f"{e.what} failed: {e.detail}" if e.detail else e.what}
+    return {**row, **result, "status": "sent"}
 
 
-def post_comment(repo, issue, from_memory, body):
-    """Comment, replacing a closed or deleted remembered issue once. Returns
-    the issue number used."""
-    try:
-        gh("issue", "comment", str(issue), "--repo", repo, "--body-file", "-", stdin=body)
-        return issue
-    except GhError as e:
-        if e.timed_out or not from_memory or not issue_unusable(repo, issue):
-            raise
-    forget_issue()
-    issue = find_or_create_issue(repo)
-    gh("issue", "comment", str(issue), "--repo", repo, "--body-file", "-", stdin=body)
-    return issue
-
-
-def code(text, limit=MESSAGE_MAX):
-    """Inline code with nothing in it for markdown to interpret."""
-    return f"`{printable(text, limit) or '(empty)'}`"
-
-
-def report_path(date):
-    return f"reports/{date}-daily.json"
-
-
-def comment_body(date, flags):
-    lines = [f"Flags for {code(date)}", ""]
-    lines += [f"- {code(f['severity'])} {code(f['id'])}: {code(f['message'])}" for f in flags]
-    lines += ["", f"Daily report: {code(report_path(date))}"]
-    return "\n".join(lines)
+def deliver(topic, date, body, args, summary):
+    """Send `body` to every configured channel and print the outcome; exit 1
+    if any channel failed, after all have had their turn."""
+    channels = build_channels()
+    if args.dry_run:
+        am.emit({"dry_run": True, **summary, "channels": [ch.target(topic) for ch in channels], "comment": body.split("\n")})
+        return
+    with SendLock():
+        rows = [deliver_one(ch, topic, date, body, args.force) for ch in channels]
+    helps = []
+    for r in rows:
+        h = r.pop("help", None)
+        if h and h not in helps:
+            helps.append(h)
+        if r["status"] == "failed":
+            log(f"{r['channel']}: {r['detail']}")
+    failed = [r for r in rows if r["status"] == "failed"]
+    sent = any(r["status"] == "sent" for r in rows)
+    out = {"sent": sent, **summary}
+    if not sent and not failed:
+        out["reason"] = f"already notified for {date}"
+    if failed:
+        out["error"] = f"{len(failed)} of {len(rows)} channels failed"
+        helps.append("The date stays unnotified on a definite failure and the next run retries; "
+                     "`gh auth status` shows the gh login")
+    out["channels"] = rows
+    if helps:
+        out["help"] = helps
+    am.emit(out)
+    if failed:
+        sys.exit(am.EXIT_FAIL)
 
 
 # ── Commands ─────────────────────────────────────────────────────────────────
@@ -403,7 +563,7 @@ def cmd_home(_args):
     if loaded and loaded[1] and loaded[0] not in read_dates("acked.json"):
         pending = pending_line(loaded[1], loaded[0]).removeprefix("agent-metrics: ")
     notified = read_dates("notified.json")
-    issue = remembered_issue()
+    issue = remembered_target(TOPICS["flags"]["issue"])
     am.emit({"pending": pending,
              "last_notified": notified[-1] if notified else "none",
              "issue": f"{issue[0]}#{issue[1]}" if issue else "not created yet",
@@ -417,44 +577,7 @@ def cmd_send(args):
         am.emit({"sent": False, "reason": "nothing to send: no flags file" if loaded is None else "nothing to send: no flags"})
         return
     date, flags = loaded
-    repo = store_repo()
-    body = comment_body(date, flags)
-    if args.dry_run:
-        remembered = remembered_issue(repo)
-        am.emit({"dry_run": True, "repo": repo, "issue": remembered[1] if remembered else "found or created on send",
-                 "comment": body.split("\n")})
-        return
-    with SendLock():
-        if date in read_dates("notified.json") and not args.force:
-            am.emit({"sent": False, "reason": f"already notified for {date}"})
-            return
-        # At most one comment per date is the side to err on: the date is
-        # recorded before posting, a definite failure rolls it back, and an
-        # unknown outcome (a timeout) keeps it and says so.
-        try:
-            remembered = remembered_issue(repo)
-            issue = remembered[1] if remembered else find_or_create_issue(repo)
-        except GhError as e:
-            gh_failed(e)
-        try:
-            add_date("notified.json", date)
-        except OSError as e:
-            am.die(am.EXIT_FAIL, f"cannot record {date} in {am.tilde(STATE / 'notified.json')}: {e.strerror}; nothing was posted",
-                   "Fix the state directory and re-run")
-        try:
-            issue = post_comment(repo, issue, bool(remembered), body)
-        except GhError as e:
-            if e.timed_out:
-                am.die(am.EXIT_FAIL, f"{e.what} timed out: the comment may have been posted, so {date} stays recorded and is not retried",
-                       "Check the tracking issue; `agent-notify send --force` posts again")
-            try:
-                remove_date("notified.json", date)
-            except OSError:
-                am.die(am.EXIT_FAIL, f"{e.what} failed ({e.detail}) and {date} could not be unrecorded, so it will not be retried",
-                       "Remove it from notified.json, or run `agent-notify send --force`")
-            gh_failed(e)
-        remember_issue(repo, issue)
-    am.emit({"sent": True, "date": date, "flags": len(flags), "repo": repo, "issue": issue})
+    deliver("flags", date, comment_body(date, flags), args, {"date": date, "flags": len(flags)})
 
 
 def cmd_show(_args):

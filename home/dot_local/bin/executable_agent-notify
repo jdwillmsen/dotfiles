@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """agent-notify — tells the box's owner about the daily report's flags.
 
-`send` posts one comment per flagged day to a tracking issue in the metrics
-store's GitHub repo, `shell` prints a one-line nudge at shell start, and
-`show` prints the flags in full and acknowledges them. Agent-facing: stdout
-is TOON, diagnostics go to stderr.
+`send` posts one comment per flagged day and `digest` the newest weekly
+report's summary to every configured channel (by default a tracking issue in
+the metrics store's GitHub repo), `shell` prints a one-line nudge at shell
+start, and `show` prints the flags in full and acknowledges them.
+Agent-facing: stdout is TOON, diagnostics go to stderr.
 """
 import argparse
 import base64
@@ -37,7 +38,7 @@ SEVERITIES = ("info", "warn", "critical")
 MAX_FLAGS_BYTES = 64 << 10
 KEEP_DATES = 90
 MESSAGE_MAX = 300
-USAGE_SHORT = "agent-notify [send [--dry-run] [--force] | shell | show] [--help]"
+USAGE_SHORT = "agent-notify [send | digest [--dry-run] [--force] | shell | show] [--help]"
 
 
 def state_dir():
@@ -50,7 +51,7 @@ def state_dir():
     return Path(xdg) / "agent-metrics"
 
 
-def read_regular(path):
+def read_regular(path, limit=MAX_FLAGS_BYTES):
     """Bytes of a small regular file, or None for anything else. The open is
     non-blocking and the size is checked on the descriptor, so a FIFO, a
     device or a huge file can neither hang nor flood a shell start."""
@@ -60,10 +61,10 @@ def read_regular(path):
         return None
     try:
         st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_FLAGS_BYTES:
+        if not stat.S_ISREG(st.st_mode) or st.st_size > limit:
             return None
-        data = os.read(fd, MAX_FLAGS_BYTES + 1)
-        return data if len(data) <= MAX_FLAGS_BYTES else None
+        data = os.read(fd, limit + 1)
+        return data if len(data) <= limit else None
     except OSError:
         return None
     finally:
@@ -634,17 +635,27 @@ def config_error(msg):
            f"Channel types: {', '.join(sorted(CHANNEL_TYPES))}; see docs/agent-notify.md")
 
 
-def build_channels():
-    """Channel instances from the `notify` config. Bad config exits 2 before
-    anything is sent. The settings are read only when a command needs them,
-    so `shell` and `show` never depend on the config."""
+def notify_cfg():
+    """The validated `notify` object; absent means the default channel. Read
+    only when a command needs it, so `shell` and `show` never depend on the
+    config."""
     path = am.CONFIG / "config.json"
     cfg = am.load_config("config.json").get("notify") if os.path.lexists(path) else None
     if cfg is None:
-        cfg = DEFAULT_NOTIFY
+        cfg = {}
     if not isinstance(cfg, dict):
         config_error("must be an object")
-    raw = cfg.get("channels", DEFAULT_NOTIFY["channels"])
+    url = cfg.get("dashboard_url")
+    if url is not None and not (isinstance(url, str) and re.fullmatch(r"https?://[^\s<>()\[\]`\\]+", url)):
+        config_error("dashboard_url must be an http(s) URL")
+    return {"dashboard_url": url.rstrip("/") + "/" if url else None,
+            "channels": cfg.get("channels", DEFAULT_NOTIFY["channels"])}
+
+
+def build_channels():
+    """Channel instances from the `notify` config; bad config exits 2 before
+    anything is sent."""
+    raw = notify_cfg()["channels"]
     if not isinstance(raw, list) or not raw or not all(isinstance(c, dict) for c in raw):
         config_error("channels must be a non-empty list of objects")
     channels, seen = [], set()
@@ -736,9 +747,11 @@ def cmd_home(_args):
     issue = remembered_target(TOPICS["flags"]["issue"])
     am.emit({"pending": pending,
              "last_notified": notified[-1] if notified else "none",
+             "last_digest": (read_dates(TOPICS["digest"]["notified"]) or ["none"])[-1],
              "issue": f"{issue[0]}#{issue[1]}" if issue else "not created yet",
              "help": ["agent-notify show: print the flags and acknowledge them",
-                      "agent-notify send --dry-run: preview the issue comment"]})
+                      "agent-notify send --dry-run: preview the issue comment",
+                      "agent-notify digest --dry-run: preview the weekly digest"]})
 
 
 def cmd_send(args):
@@ -748,6 +761,108 @@ def cmd_send(args):
         return
     date, flags = loaded
     deliver("flags", date, comment_body(date, flags), args, {"date": date, "flags": len(flags)})
+
+
+# ── Weekly digest ────────────────────────────────────────────────────────────
+
+MAX_REPORT_BYTES = 16 << 20
+MAX_DIGEST_FLAGS = 15
+WEEKLY_RE = re.compile(r"([0-9]{4}-[0-9]{2}-[0-9]{2})-weekly\.json")
+
+
+def read_report(name):
+    raw = read_regular(am.STORE / "reports" / name, MAX_REPORT_BYTES)
+    try:
+        data = json.loads(raw) if raw is not None else None
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def latest_weekly(date=None):
+    """(label date, parsed report) of the newest weekly report in the store,
+    or of `date` when given; None when there is none that reads."""
+    found = sorted((m.group(1) for m in (WEEKLY_RE.fullmatch(p.name) for p in (am.STORE / "reports").glob("*-weekly.json"))
+                    if m and valid_date(m.group(1))), reverse=True)
+    for d in ([date] if date else found):
+        data = read_report(f"{d}-weekly.json") if d in found else None
+        if data is not None:
+            return d, data
+    return None
+
+
+def number(d, *path):
+    for k in path:
+        d = d.get(k) if isinstance(d, dict) else None
+    return d if am.is_amount(d) else None
+
+
+def change(cur, prev):
+    if cur is None or prev is None or prev == 0:
+        return "n/a"
+    return f"{(cur - prev) / prev * 100:+.0f}%"
+
+
+def window_days(report):
+    """The dates from start up to, not including, end; empty when either is
+    not a date or the span is not a plausible window."""
+    start, end = report.get("start"), report.get("end")
+    if not (valid_date(start) and valid_date(end)):
+        return []
+    a, b = dt.date.fromisoformat(start), dt.date.fromisoformat(end)
+    return [(a + dt.timedelta(days=i)).isoformat() for i in range((b - a).days)] if 0 < (b - a).days <= 31 else []
+
+
+def week_flags(report):
+    """(date, flag) for every flag the daily reports of the window raised."""
+    out = []
+    for d in window_days(report):
+        flags = valid_flags({"date": d, "flags": (read_report(f"{d}-daily.json") or {}).get("flags", [])})
+        out += [(d, f) for f in flags or []]
+    return out
+
+
+def digest_body(label, report, dashboard_url):
+    cur, prev = report.get("current"), report.get("previous")
+    days = window_days(report)
+    fmt_usd = lambda v: "n/a" if v is None else f"${v:,.2f}"
+    fmt_int = lambda v: "n/a" if v is None else f"{v:,.0f}"
+    fmt_pct = lambda v: "n/a" if v is None else f"{v:g}%"
+    metrics = (("Estimated spend", fmt_usd, ("populations", "interactive", "cost_usd")),
+               ("Sessions", fmt_int, ("populations", "interactive", "sessions")),
+               ("Linked PRs", fmt_int, ("populations", "interactive", "output", "linked_prs")),
+               ("Cost per linked PR", fmt_usd, ("populations", "interactive", "linked_pr_cost", "cost_per_linked_pr_usd")),
+               ("Peak weekly quota", fmt_pct, ("quota", "peak_seven_day_pct")))
+    lines = [f"Weekly digest for {code(days[0] + ' to ' + days[-1] if days else label)}", "",
+             "Interactive sessions, this week against the one before:", "",
+             "| Metric | This week | Previous | Change |", "|---|---|---|---|"]
+    for name, fmt, path in metrics:
+        a, b = number(cur, *path), number(prev, *path)
+        lines.append(f"| {name} | {fmt(a)} | {fmt(b)} | {change(a, b)} |")
+    flags = week_flags(report)
+    lines += ["", f"Flags raised ({len(flags)}):", ""]
+    lines += [f"- {code(d)} {code(f['severity'])} {code(f['id'])}: {code(f['message'])}" for d, f in flags[:MAX_DIGEST_FLAGS]]
+    if len(flags) > MAX_DIGEST_FLAGS:
+        lines.append(f"- and {len(flags) - MAX_DIGEST_FLAGS} more in the daily reports")
+    if not flags:
+        lines.append("- none")
+    if dashboard_url:
+        lines += ["", f"Dashboard: {dashboard_url}", f"This report: {dashboard_url}reports/{label}-weekly.html"]
+    return "\n".join(lines)
+
+
+def cmd_digest(args):
+    if args.date and not valid_date(args.date):
+        usage_error("--date must be YYYY-MM-DD", "agent-notify digest [--dry-run] [--force] [--date YYYY-MM-DD]")
+    found = latest_weekly(args.date)
+    if found is None:
+        what = f"for {args.date}" if args.date else "yet"
+        am.emit({"sent": False, "reason": f"nothing to send: no weekly report {what} in {am.tilde(am.STORE / 'reports')}",
+                 "help": "agent-report --window weekly writes one; the Monday 08:40 timer does it too"})
+        return
+    label, report = found
+    body = digest_body(label, report, notify_cfg()["dashboard_url"])
+    deliver("digest", label, body, args, {"report": label})
 
 
 def cmd_show(_args):
@@ -774,6 +889,10 @@ def build_parser():
     s = sub.add_parser("send", help="comment today's flags on the tracking issue, once per date")
     s.add_argument("--dry-run", action="store_true", help="show the comment; call nothing, remember nothing")
     s.add_argument("--force", action="store_true", help="post even if this date is already recorded as notified")
+    d = sub.add_parser("digest", help="comment the newest weekly report's summary on the digest issue, once per report")
+    d.add_argument("--dry-run", action="store_true", help="show the comment; call nothing, remember nothing")
+    d.add_argument("--force", action="store_true", help="post even if this report is already recorded as notified")
+    d.add_argument("--date", help="the weekly report's date (YYYY-MM-DD) instead of the newest")
     sub.add_parser("shell", help="print a one-line nudge when flags are unacknowledged")
     sub.add_parser("show", help="print the flags in full and acknowledge them")
     return p
@@ -781,7 +900,7 @@ def build_parser():
 
 def main(argv):
     args = build_parser().parse_args(argv)
-    {None: cmd_home, "send": cmd_send, "show": cmd_show, "shell": lambda _a: shell_main()}[args.cmd](args)
+    {None: cmd_home, "send": cmd_send, "digest": cmd_digest, "show": cmd_show, "shell": lambda _a: shell_main()}[args.cmd](args)
 
 
 if __name__ == "__main__":

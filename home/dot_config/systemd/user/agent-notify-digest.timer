@@ -1,0 +1,13 @@
+[Unit]
+Description=Weekly agent metrics digest
+
+[Timer]
+# After the Monday 08:40 weekly report has written the report the digest reads.
+OnCalendar=Mon *-*-* 09:10:00 UTC
+Unit=agent-notify-digest.service
+# A box that was off on Monday sends at next boot; the digest reads the newest
+# weekly report, so one missed week is still announced.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

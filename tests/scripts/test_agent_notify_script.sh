@@ -448,8 +448,9 @@ run_trigger /elsewhere
 [ ! -s "$trig/calls" ] || fail "trigger must skip a scratch-dest apply" "$trig_out"
 run_trigger "$trig/home"
 grep -qx -- "--user daemon-reload" "$trig/calls" || fail "trigger never reloads systemd"
-grep -qx -- "--user enable --now agent-notify.timer agent-trends.timer" "$trig/calls" || fail "trigger does not enable both timers" "$(cat "$trig/calls")"
+grep -qx -- "--user enable --now agent-notify.timer agent-notify-digest.timer agent-trends.timer" "$trig/calls" || fail "trigger does not enable all three timers" "$(cat "$trig/calls")"
 grep -q "start " "$trig/calls" && fail "trigger must not start a run"
+grep -q "agent-notify-digest.service" "$trigger" && grep -q "agent-notify-digest.timer" "$trigger" || fail "trigger must hash the digest units too"
 grep -q "agent-trends.service" "$trigger" && grep -q "agent-trends.timer" "$trigger" || fail "trigger must hash the trends units too"
 
 # ── A replacement issue that cannot be found or created posts nothing, so the date is not kept ──
@@ -669,5 +670,90 @@ run 0 send --dry-run
 
 echo "$default_config" >"$tmp/config/config.json"
 unset AGENT_NOTIFY_API_URL
+
+# ── Digest units ──
+dsvc="$units/agent-notify-digest.service"
+dtimer="$units/agent-notify-digest.timer"
+grep -qx 'ExecStart=%h/.local/bin/agent-notify digest' "$dsvc" || fail "digest service ExecStart"
+grep -qx 'NoNewPrivileges=yes' "$dsvc" && grep -qx 'PrivateTmp=yes' "$dsvc" || fail "digest service hardening missing"
+grep -q '^TimeoutStartSec=' "$dsvc" && grep -q '^Environment=PATH=.*/usr/bin' "$dsvc" || fail "digest service needs a timeout and a PATH that reaches kubectl"
+grep -qxF "OnCalendar=Mon *-*-* 09:10:00 UTC" "$dtimer" || fail "digest timer calendar"
+grep -qx "Unit=agent-notify-digest.service" "$dtimer" && grep -qx "Persistent=true" "$dtimer" && grep -qx "WantedBy=timers.target" "$dtimer" || fail "digest timer wiring"
+if command -v systemd-analyze >/dev/null 2>&1; then
+    systemd-analyze calendar "Mon *-*-* 09:10:00 UTC" >/dev/null || fail "digest calendar rejected by systemd"
+    mkdir -p "$tmp/verify"
+    cp "$dsvc" "$dtimer" "$tmp/verify/"
+    mkdir -p "$tmp/verify/bin" && printf '#!/bin/sh\n' >"$tmp/verify/bin/agent-notify" && chmod +x "$tmp/verify/bin/agent-notify"
+    sed -i "s#%h/.local/bin/agent-notify#$tmp/verify/bin/agent-notify#" "$tmp/verify/agent-notify-digest.service"
+    verify_out="$(systemd-analyze --user verify "$tmp/verify/agent-notify-digest.service" "$tmp/verify/agent-notify-digest.timer" 2>&1)" || fail "systemd-analyze verify rejects the digest units" "$verify_out"
+fi
+
+# ── Digest ──
+set_notify '{"dashboard_url": "https://dash.example/metrics", "channels": [{"type": "github-issue"}]}'
+reset_state
+rm -rf "$tmp/store/reports"
+run 0 digest
+grep -q "^sent: false" "$out" && grep -qi "no weekly report" "$out" || fail "no weekly report should be a definitive empty state" "$(cat "$out")"
+[ "$(calls)" = 0 ] || fail "the empty state called gh"
+store="$tmp/store"
+mkdir -p "$store/reports"
+python3 - "$store/reports" <<'PY'
+import json, sys
+d = sys.argv[1]
+def pop(cost, sessions, linked, per_pr, peak):
+    return {"populations": {"interactive": {"sessions": sessions, "cost_usd": cost, "output": {"linked_prs": linked},
+                                            "linked_pr_cost": {"cost_per_linked_pr_usd": per_pr}}},
+            "quota": {"peak_seven_day_pct": peak}}
+def weekly(label, start, end):
+    return {"schema": 1, "window": "weekly", "start": start, "end": end, "label_date": label,
+            "current": pop(200.0, 10, 8, 25.0, 40), "previous": pop(100.0, 10, 0, None, None), "flags": []}
+json.dump(weekly("2026-10-04", "2026-09-28", "2026-10-05"), open(d + "/2026-10-04-weekly.json", "w"))
+json.dump(weekly("2026-10-11", "2026-10-05", "2026-10-12"), open(d + "/2026-10-11-weekly.json", "w"))
+for day, flags in (("2026-10-06", [{"id": "day-spend", "severity": "warn", "message": "spend @octocat fixes #12 https://evil.example <b>x</b>"}]),
+                   ("2026-10-08", [{"id": "weekly-quota", "severity": "critical", "message": "quota high"}]),
+                   ("2026-10-09", []), ("2026-10-13", [{"id": "outside-window", "severity": "warn", "message": "next week"}])):
+    json.dump({"window": "daily", "label_date": day, "flags": flags}, open(f"{d}/{day}-daily.json", "w"))
+PY
+run 0 digest --dry-run
+[ "$(calls)" = 0 ] && [ ! -e "$state/digest-notified.json" ] || fail "digest dry run called gh or wrote state"
+grep -q "2026-10-05 to 2026-10-11" "$out" || fail "digest does not state the window" "$(cat "$out")"
+grep -q "Estimated spend | \$200.00 | \$100.00 | +100%" "$out" || fail "spend row wrong" "$(cat "$out")"
+grep -q "Linked PRs | 8 | 0 | n/a" "$out" || fail "a change against zero should be n/a" "$(cat "$out")"
+grep -q "Peak weekly quota | 40% | n/a | n/a" "$out" || fail "a missing previous value should be n/a" "$(cat "$out")"
+grep -q "day-spend" "$out" && grep -q "weekly-quota" "$out" || fail "the week's flags are missing" "$(cat "$out")"
+if grep -q "outside-window" "$out"; then fail "a flag from outside the window was listed"; fi
+grep -q "Dashboard: https://dash.example/metrics/" "$out" && grep -q "This report: https://dash.example/metrics/reports/2026-10-11-weekly.html" "$out" || fail "dashboard links missing" "$(cat "$out")"
+set_notify '{"channels": [{"type": "github-issue"}]}'
+run 0 digest --dry-run
+if grep -qE "Dashboard:|This report:" "$out"; then fail "links appeared without dashboard_url" "$(cat "$out")"; fi
+set_notify '{"dashboard_url": "javascript:alert(1)", "channels": [{"type": "github-issue"}]}'
+run 2 digest --dry-run
+set_notify '{"dashboard_url": "https://dash.example/metrics", "channels": [{"type": "github-issue"}]}'
+
+run 0 digest
+grep -q '^issue create --repo acme/metrics --title Agent metrics: weekly digest' "$GH_LOG" || fail "digest did not use its own issue" "$(cat "$GH_LOG")"
+grep -q "Weekly digest" "$GH_BODY" || fail "digest body not posted" "$(cat "$GH_BODY")"
+grep -q "2026-10-11" "$state/digest-notified.json" || fail "digest date not recorded"
+[ ! -e "$state/notified.json" ] || fail "the digest must not touch the daily flags record"
+python3 - "$GH_BODY" <<'PY' || fail "data rendered as a mention, reference or link in the digest" "$(cat "$GH_BODY")"
+import re, sys
+for line in open(sys.argv[1]):
+    if line.startswith("- `"):
+        outside = re.sub(r"`[^`]*`", "", line)
+        assert not re.search(r"[@#<>]|https?:", outside), line
+assert "`spend @octocat fixes #12 https://evil.example <b>x</b>`" in open(sys.argv[1]).read()
+PY
+run 0 digest
+grep -qi "already" "$out" || fail "a repeat digest should say it already notified" "$(cat "$out")"
+[ "$(comments)" = 1 ] || fail "a repeat digest posted again"
+run 0 digest --force
+[ "$(comments)" = 2 ] || fail "--force should post the digest again"
+run 0 digest --date 2026-10-04 --dry-run
+grep -q "2026-09-28 to 2026-10-04" "$out" || fail "--date did not pick the older report" "$(cat "$out")"
+run 0 digest --date 2026-01-01
+grep -qi "no weekly report" "$out" || fail "an absent --date should be an empty state" "$(cat "$out")"
+run 2 digest --date soon
+rm -rf "$tmp/store/reports"
+echo "$default_config" >"$tmp/config/config.json"
 
 echo "test_agent_notify_script: OK"

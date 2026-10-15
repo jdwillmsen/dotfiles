@@ -4,6 +4,8 @@ set -euo pipefail
 # inert until daemon-reload runs. Re-run whenever a unit changes.
 # {{ include "dot_config/systemd/user/agent-notify.service" | sha256sum }}
 # {{ include "dot_config/systemd/user/agent-notify.timer" | sha256sum }}
+# {{ include "dot_config/systemd/user/agent-notify-digest.service" | sha256sum }}
+# {{ include "dot_config/systemd/user/agent-notify-digest.timer" | sha256sum }}
 # {{ include "dot_config/systemd/user/agent-trends.service" | sha256sum }}
 # {{ include "dot_config/systemd/user/agent-trends.timer" | sha256sum }}
 
@@ -12,7 +14,7 @@ if [ "$(uname -s)" != "Linux" ]; then
     exit 0
 fi
 if ! command -v systemctl >/dev/null 2>&1 || ! systemctl --user show-environment >/dev/null 2>&1; then
-    echo "agent-notify: no systemd user manager — run agent-notify send and agent-trends build by hand"
+    echo "agent-notify: no systemd user manager — run agent-notify send, agent-notify digest and agent-trends build by hand"
     exit 0
 fi
 
@@ -34,9 +36,9 @@ fi
 systemctl --user daemon-reload
 # No immediate start: both read the store and the daily report, which may not
 # exist yet on a fresh box.
-systemctl --user enable --now agent-notify.timer agent-trends.timer
+systemctl --user enable --now agent-notify.timer agent-notify-digest.timer agent-trends.timer
 
 if [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" != "yes" ]; then
     echo "agent-notify: linger is off — the timers stop at logout; run: sudo scripts/provision-persistence.sh"
 fi
-echo "agent-notify: notify and trends timers enabled"
+echo "agent-notify: notify, digest and trends timers enabled"

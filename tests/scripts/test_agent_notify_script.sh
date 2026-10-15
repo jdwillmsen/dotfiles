@@ -685,16 +685,32 @@ unset AGENT_NOTIFY_API_URL
 # ── Digest units ──
 dsvc="$units/agent-notify-digest.service"
 dtimer="$units/agent-notify-digest.timer"
-# systemd reads units as INI where the last duplicate key wins; parse them the
-# same way and assert what systemd would run. Prints the timer's calendar.
+# systemd appends every assignment of a list key (ExecStartPre=, After=,
+# Environment=) and an empty one resets it, while a single-value key keeps its
+# last assignment; parse the units that way and assert what systemd would run.
+# Prints the timer's calendar.
 dcal="$(python3 - "$dsvc" "$dtimer" "$units/agent-trends.service" <<'PY'
-import configparser, re, sys
+import re, sys
 
 def load(path):
-    p = configparser.RawConfigParser(strict=False, interpolation=None)
-    p.optionxform = str
-    p.read(path)
-    return p
+    unit, sec = {}, None
+    for line in open(path):
+        line = line.strip()
+        if not line or line[0] in "#;":
+            continue
+        if line.startswith("["):
+            sec = unit.setdefault(line.strip("[]"), {})
+            continue
+        k, _, v = line.partition("=")
+        vals = sec.setdefault(k.strip(), [])
+        if v.strip():
+            vals.append(v.strip())
+        else:
+            vals.clear()
+    return unit
+
+def one(sec, k):
+    return sec[k][-1]
 
 def minutes(v):
     m = re.fullmatch(r"(\d+)min", v)
@@ -703,22 +719,24 @@ def minutes(v):
 
 svc, timer, trends = load(sys.argv[1]), load(sys.argv[2]), load(sys.argv[3])
 s = svc["Service"]
-assert s["Type"] == "oneshot", s["Type"]
-assert s["ExecStart"] == "%h/.local/bin/agent-notify digest", s["ExecStart"]
-assert s["ExecStartPre"] == "-%h/.local/bin/agent-trends build", "the site must be rebuilt first, and a failed build must not block the digest"
-assert "agent-report@weekly.service" in svc["Unit"]["After"].split(), "the digest must run after a weekly report queued with it"
-assert minutes(s["TimeoutStartSec"]) > minutes(trends["Service"]["TimeoutStartSec"]), "the timeout must cover the site build and the post"
-assert "/usr/bin" in s["Environment"].removeprefix("PATH=").split(":"), "PATH must reach gh, kubectl and openssl"
-assert s["NoNewPrivileges"] == "yes" and s["PrivateTmp"] == "yes", "hardening missing"
+assert one(s, "Type") == "oneshot", s["Type"]
+assert s["ExecStart"] == ["%h/.local/bin/agent-notify digest"], s["ExecStart"]
+assert s["ExecStartPre"] == ["-%h/.local/bin/agent-trends build"], "the site must be rebuilt first, and a failed build must not block the digest"
+assert [u for v in svc["Unit"]["After"] for u in v.split()] == ["agent-report@weekly.service"], "the digest must run after a weekly report queued with it"
+assert minutes(one(s, "TimeoutStartSec")) > minutes(one(trends["Service"], "TimeoutStartSec")), "the timeout must cover the site build and the post"
+assert s["Environment"] == ["PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin"], "PATH must reach gh, kubectl and openssl"
+assert one(s, "NoNewPrivileges") == "yes" and one(s, "PrivateTmp") == "yes", "hardening missing"
 t = timer["Timer"]
-assert t["Unit"] == "agent-notify-digest.service" and t["Persistent"] == "true", "timer wiring"
-assert timer["Install"]["WantedBy"] == "timers.target", "timer install target"
-print(t["OnCalendar"])
+assert one(t, "Unit") == "agent-notify-digest.service" and one(t, "Persistent") == "true", "timer wiring"
+assert timer["Install"]["WantedBy"] == ["timers.target"], "timer install target"
+assert len(t["OnCalendar"]) == 1, t["OnCalendar"]
+print(one(t, "OnCalendar"))
 PY
 )" || fail "digest units do not wire the digest as intended"
 if command -v systemd-analyze >/dev/null 2>&1; then
-    elapses="$(TZ=UTC systemd-analyze calendar --iterations=2 "$dcal" 2>&1)" || fail "digest calendar rejected by systemd" "$elapses"
-    [ "$(echo "$elapses" | grep -cE '(Next elapse|Iteration #2): Mon [0-9-]+ 09:10:00 UTC$')" = 2 ] || fail "digest timer does not fire Mondays 09:10 UTC" "$elapses"
+    # A zone far from UTC so a calendar that drops UTC fires at a visibly wrong hour.
+    elapses="$(TZ=Asia/Tokyo systemd-analyze calendar --iterations=2 "$dcal" 2>&1)" || fail "digest calendar rejected by systemd" "$elapses"
+    [ "$(echo "$elapses" | grep -cE '\(in UTC\): Mon [0-9-]+ 09:10:00 UTC$')" = 2 ] || fail "digest timer does not fire Mondays 09:10 UTC" "$elapses"
     mkdir -p "$tmp/verify/bin"
     cp "$dsvc" "$dtimer" "$tmp/verify/"
     for b in agent-notify agent-trends; do

@@ -50,11 +50,6 @@ run
 [ ! -e "$marker" ] || fail "marker survived a healthy run"
 
 # ── units, through systemd's own parser where available ──
-grep -qx 'ExecStart=%h/.local/bin/devbox-health-boot' "$svc" || fail "service runs the wrong path"
-grep -qx 'Type=oneshot' "$svc" || fail "service is not oneshot"
-grep -q '^OnStartupSec=' "$timer" || fail "timer is not relative to manager start"
-grep -q '^OnCalendar=\|^Persistent=' "$timer" && fail "boot check must not also run on a calendar"
-grep -qx 'WantedBy=timers.target' "$timer" || fail "timer not wanted by timers.target"
 if command -v systemd-analyze >/dev/null 2>&1; then
     mkdir -p "$tmp/units"
     sed 's|%h/.local/bin/devbox-health-boot|/bin/true|' "$svc" >"$tmp/units/devbox-health-boot.service"
@@ -68,10 +63,25 @@ if command -v chezmoi >/dev/null 2>&1; then
     rendered="$(chezmoi execute-template --source="$here/home" <"$trigger")"
     printf '%s\n' "$rendered" >"$tmp/trigger.sh"
     shellcheck -s bash "$tmp/trigger.sh"
-    echo "$rendered" | grep -qx 'systemctl --user enable devbox-health-boot.timer' \
-        || fail "trigger does not enable the timer" "$rendered"
-    echo "$rendered" | grep -q 'start devbox-health-boot.service' \
-        && fail "trigger must not run the boot check at apply time"
+    # Run it against stubs: it must enable the timer for the next boot and
+    # never run the check now (start, restart or enable --now).
+    th="$tmp/trigger-home"
+    mkdir -p "$th/.config/systemd/user" "$tmp/tbin"
+    cp "$timer" "$th/.config/systemd/user/"
+    cat >"$tmp/tbin/systemctl" <<EOF
+#!/usr/bin/env bash
+echo "\$*" >>"$tmp/systemctl.calls"
+[ "\$*" = "--user show-environment" ] && echo "HOME=$th"
+exit 0
+EOF
+    printf '#!/usr/bin/env bash\necho yes\n' >"$tmp/tbin/loginctl"
+    chmod +x "$tmp/tbin/"*
+    : >"$tmp/systemctl.calls"
+    tout="$(HOME="$th" XDG_CONFIG_HOME="$th/.config" PATH="$tmp/tbin:$PATH" bash "$tmp/trigger.sh" 2>&1)" \
+        || fail "trigger failed" "$tout"
+    calls="$(cat "$tmp/systemctl.calls")"
+    echo "$calls" | grep -qx -- '--user enable devbox-health-boot.timer' || fail "trigger does not enable the timer" "$calls"
+    echo "$calls" | grep -qwE -- 'start|restart|--now' && fail "trigger runs the boot check at apply time" "$calls"
     for rel in dot_config/systemd/user/devbox-health-boot.service dot_config/systemd/user/devbox-health-boot.timer \
         dot_local/bin/executable_devbox-health-boot; do
         src="$tmp/src"
@@ -85,14 +95,32 @@ fi
 
 # ── maintenance_notice: silent when clean, prints each marker ──
 mkdir -p "$tmp/home"
-notice() { HOME="$tmp/home" XDG_STATE_HOME="$tmp/state" bash -c 'source "$1"; maintenance_notice' _ "$functions" 2>&1; }
+notice() { HOME="$tmp/home" XDG_STATE_HOME="$tmp/state" DEVBOX_MAINT_ROOT="${DEVBOX_MAINT_ROOT:-$tmp/maint}" bash -c 'source "$1"; maintenance_notice' _ "$functions" 2>&1; }
 [ -z "$(notice)" ] || fail "notice not silent on a clean box" "$(notice)"
 fake 1 "  FAIL  t3code active"
 run || true
-notice | grep -q "devbox-health failed after boot" || fail "notice does not show the health marker" "$(notice)"
-for rc_file in "$here/home/dot_bashrc" "$here/home/dot_zshrc"; do
-    grep -qx 'command -v maintenance_notice >/dev/null 2>&1 && maintenance_notice' "$rc_file" \
-        || fail "$(basename "$rc_file") never calls maintenance_notice"
-done
+notice | grep "devbox-health failed after boot" >/dev/null || fail "notice does not show the health marker" "$(notice)"
+
+# The guard's reboot notice shows only while the reboot is still pending.
+mroot="$tmp/maint"  # notice() reads this root
+mkdir -p "$mroot/var/lib/devbox-maintenance" "$mroot/var/run"
+echo "maintenance: reboot pending 8d" >"$mroot/var/lib/devbox-maintenance/notice"
+notice | grep "reboot pending" >/dev/null \
+    && fail "reboot notice shown after the reboot already happened"
+: >"$mroot/var/run/reboot-required"
+notice | grep "reboot pending 8d" >/dev/null \
+    || fail "reboot notice hidden while the reboot is pending" "$(notice)"
+
+# A new interactive shell shows the notice, from the deployed functions file.
+mkdir -p "$tmp/home/.config/shell"
+cp "$functions" "$tmp/home/.config/shell/functions.sh"
+rc_err="$(HOME="$tmp/home" XDG_STATE_HOME="$tmp/state" bash --rcfile "$here/home/dot_bashrc" -i -c : 2>&1 >/dev/null </dev/null)"
+echo "$rc_err" | grep -q "devbox-health failed after boot" || fail "bashrc does not show the maintenance notice" "$rc_err"
+if command -v zsh >/dev/null 2>&1; then
+    mkdir -p "$tmp/zdot"
+    cp "$here/home/dot_zshrc" "$tmp/zdot/.zshrc"
+    rc_err="$(HOME="$tmp/home" ZDOTDIR="$tmp/zdot" XDG_STATE_HOME="$tmp/state" zsh -i -c : 2>&1 >/dev/null </dev/null)"
+    echo "$rc_err" | grep -q "devbox-health failed after boot" || fail "zshrc does not show the maintenance notice" "$rc_err"
+fi
 
 echo "devbox-health-boot: all tests passed"

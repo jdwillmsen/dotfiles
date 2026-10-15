@@ -183,6 +183,26 @@ run
 notice_text | grep -q "reboot pending 8d" || fail "no notice after 8 days deferred" "$(notice_text)"
 notice_text | grep -q "sudo reboot" || fail "notice does not say how to fix it" "$(notice_text)"
 
+# A later reboot-requiring install rewrites the flag; a prior deferral keeps
+# the original start so the escalation still fires.
+prior() {  # prior STATUS DAYS_AGO — the state a previous guard run left
+    prior_since=$(($(date +%s) - $2 * 86400 - 60))
+    mkdir -p "$root/var/lib/devbox-maintenance"
+    printf '{"status": "%s", "reason": "x", "pending_since": %s, "checked_at": %s}\n' \
+        "$1" "$prior_since" "$(date +%s)" >"$root/var/lib/devbox-maintenance/state.json"
+}
+reset; pending 1; prior deferred 8
+proc dpkg dpkg
+run
+notice_text | grep -q "reboot pending 8d" || fail "a rewritten flag restarted the deferral count" "$(notice_text)"
+state | grep -q "\"pending_since\": $prior_since," || fail "the original pending_since was not kept" "$(state)"
+
+# After a reboot attempt the wait starts over from the flag.
+reset; pending 1; prior rebooting 8
+proc dpkg dpkg
+run
+[ -z "$(notice_text)" ] || fail "a pre-reboot start carried over" "$(notice_text)"
+
 reset; pending 8
 proc dpkg dpkg
 ESCALATE_DAYS=10 run

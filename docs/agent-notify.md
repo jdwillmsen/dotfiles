@@ -108,7 +108,10 @@ the window, and, when `dashboard_url` is set, links to the dashboard and to
 comments. Once per report date (`digest-notified.json`); `--force` re-sends.
 With no weekly report it says so and exits 0.
 
-`agent-notify-digest.service` needs `kubectl`, `openssl` and `gh` on its PATH
+`agent-notify-digest.service` first runs `agent-trends build` so the report
+page it links exists (a failed build still posts), and runs after
+`agent-report@weekly.service` when a catch-up boot queues both. It needs
+`kubectl`, `openssl` and `gh` on its PATH
 (`/usr/bin`) and reads `~/.kube/config`; `NoNewPrivileges` and `PrivateTmp`
 leave both alone.
 

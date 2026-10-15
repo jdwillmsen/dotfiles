@@ -1,17 +1,24 @@
 [Unit]
 Description=Agent metrics weekly digest
 Documentation=file://%h/.local/share/chezmoi/docs/agent-notify.md
+# A catch-up boot queues the weekly report and the digest together; the digest
+# must read the report that run writes, not last week's.
+After=agent-report@weekly.service
 
 [Service]
 Type=oneshot
+# The report link 404s until the site is rebuilt with the new weekly page; a
+# failed build must not block the digest.
+ExecStartPre=-%h/.local/bin/agent-trends build
 ExecStart=%h/.local/bin/agent-notify digest
-# A user manager starts with a bare PATH; gh, kubectl and openssl live in
+# A user manager starts with a bare PATH; git, gh, kubectl and openssl live in
 # /usr/bin. kubectl reads ~/.kube/config through the manager's HOME, which
 # neither sandbox option below hides.
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-# Reading the App secret, minting a token and one issue lookup and comment; a
-# hung network call must not pile up behind next week's run.
-TimeoutStartSec=5min
+# The site build (up to ten minutes waiting on a collect's lock, and one push),
+# then reading the App secret, minting a token and one issue lookup and
+# comment; a hung network call must not pile up behind next week's run.
+TimeoutStartSec=25min
 NoNewPrivileges=yes
 PrivateTmp=yes
 Nice=10

@@ -734,9 +734,26 @@ print(one(t, "OnCalendar"))
 PY
 )" || fail "digest units do not wire the digest as intended"
 if command -v systemd-analyze >/dev/null 2>&1; then
-    # A zone far from UTC so a calendar that drops UTC fires at a visibly wrong hour.
-    elapses="$(TZ=Asia/Tokyo systemd-analyze calendar --iterations=2 "$dcal" 2>&1)" || fail "digest calendar rejected by systemd" "$elapses"
-    [ "$(echo "$elapses" | grep -cE '\(in UTC\): Mon [0-9-]+ 09:10:00 UTC$')" = 2 ] || fail "digest timer does not fire Mondays 09:10 UTC" "$elapses"
+    # The digest must follow the weekly report in every zone, so compare the
+    # two timers' next elapses in zones on both sides of UTC.
+    wcal="$(python3 - "$units/agent-report-weekly.timer" <<'PY'
+import configparser, sys
+c = configparser.ConfigParser(strict=False, interpolation=None)
+c.optionxform = str
+c.read(sys.argv[1])
+print(c["Timer"]["OnCalendar"])
+PY
+)"
+    for zone in America/Los_Angeles Asia/Tokyo UTC; do
+        d="$(TZ=$zone systemd-analyze calendar "$dcal" 2>&1)" || fail "digest calendar rejected by systemd" "$d"
+        w="$(TZ=$zone systemd-analyze calendar "$wcal" 2>&1)" || fail "weekly report calendar rejected by systemd" "$w"
+        # systemd omits the "(in UTC)" line when the zone already is UTC.
+        dn="$(echo "$d" | sed -n 's/^ *(in UTC): //p;s/^ *Next elapse: \(.* UTC\)$/\1/p' | head -1)"
+        wn="$(echo "$w" | sed -n 's/^ *(in UTC): //p;s/^ *Next elapse: \(.* UTC\)$/\1/p' | head -1)"
+        gap=$(( $(date -ud "$dn" +%s) - $(date -ud "$wn" +%s) ))
+        [ "$gap" = 1800 ] || fail "in $zone the digest ($dn) does not run 30 minutes after the weekly report ($wn)"
+        echo "$d" | grep -q 'Next elapse: Mon ' || fail "digest timer does not fire on Mondays in $zone" "$d"
+    done
     mkdir -p "$tmp/verify/bin"
     cp "$dsvc" "$dtimer" "$tmp/verify/"
     for b in agent-notify agent-trends; do

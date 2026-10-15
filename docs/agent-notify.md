@@ -9,7 +9,7 @@ report writes only on a day with flags. Design: `docs/superpowers/specs/2026-10-
 | Where | How | Cost |
 |---|---|---|
 | Tracking issue | `agent-notify send`, daily 07:20 from `agent-notify.timer`: one comment per flagged date | one `gh` call set, once per date |
-| Weekly digest | `agent-notify digest`, Mondays 09:10 UTC from `agent-notify-digest.timer`: one comment per weekly report | one `gh` call set, once per report |
+| Weekly digest | `agent-notify digest`, Mondays 09:10 box-local time, 30 minutes after the weekly report, from `agent-notify-digest.timer`: one comment per weekly report | one `gh` call set, once per report |
 | New shell | `agent-notify shell` prints one line such as `agent-metrics: 2 flags for 2026-10-08 (1 critical): run agent-notify show`, only when stdout is a terminal | plain tests only when nothing is pending or the flags are acknowledged; otherwise one Python start (about 20 ms); never network or git |
 | Status line | `⚑ 2 critical`, on an existing line | one stat and a small read |
 

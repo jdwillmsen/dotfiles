@@ -51,7 +51,7 @@ Everything else in `systemctl list-units` is stock Ubuntu (journald, resolved,
 logind, udev, cron, rsyslog, oomd, qemu-guest-agent, unattended-upgrades).
 `t3-session-expiry.timer`, the four `agent-audit-*.timer`s,
 `agent-metrics-collect.timer`, the six `agent-report-*.timer`s, `agent-notify.timer`,
-`agent-trends.timer`, `agent-label.timer` and the three `agent-propose-*.timer`s are the
+`agent-notify-digest.timer`, `agent-trends.timer`, `agent-label.timer` and the three `agent-propose-*.timer`s are the
 only timers this repo owns. Baseline for the
 user manager is `launchpadlib-cache-clean.timer` and for the system manager is
 apt/fwupd/logrotate housekeeping; a timer outside those and the repo-owned ones

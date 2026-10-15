@@ -7,6 +7,7 @@ store's GitHub repo, `shell` prints a one-line nudge at shell start, and
 is TOON, diagnostics go to stderr.
 """
 import argparse
+import base64
 import datetime as dt
 import fcntl
 import json
@@ -18,6 +19,9 @@ import sys
 import tempfile
 import time
 import unicodedata
+import urllib.error
+import urllib.request
+from urllib.parse import urlsplit
 from pathlib import Path
 
 VERSION = "1.0.0"
@@ -340,9 +344,12 @@ def store_repo():
     return repo
 
 
-def gh(*args, stdin=None):
-    """Run gh and return stdout; any failure raises ChannelError."""
+def gh(*args, stdin=None, token=None):
+    """Run gh and return stdout; any failure raises ChannelError. A `token`
+    reaches gh only through its environment, never its arguments."""
     env = {**os.environ, "GH_PROMPT_DISABLED": "1", "NO_COLOR": "1"}
+    if token:
+        env["GH_TOKEN"] = token
     what = f"gh {args[0]} {args[1]}"
     try:
         timeout = float(os.environ.get("AGENT_NOTIFY_GH_TIMEOUT", "60"))
@@ -353,8 +360,138 @@ def gh(*args, stdin=None):
         raise ChannelError(what, "timed out", timed_out=True)
     if r.returncode != 0:
         detail = (r.stderr or r.stdout).strip().splitlines()
-        raise ChannelError(what, detail[-1] if detail else str(r.returncode))
+        detail = detail[-1] if detail else str(r.returncode)
+        raise ChannelError(what, detail.replace(token, "***") if token else detail)
     return r.stdout
+
+
+# ── GitHub App identity ──────────────────────────────────────────────────────
+# GitHub never notifies a user about their own comments, so comments are
+# posted as the jdwlabs-agent-bot App. Its credentials are read into memory
+# from the cluster, signed into a short-lived JWT, and exchanged for an
+# installation token that lives only in this process and one gh environment.
+# Nothing derived from the key is printed, stored or put in an argument list,
+# so error text below is built from fixed strings and GitHub's own message.
+
+APP_SECRET = ("ai-sre", "ai-sre-relay")
+API_URL = "https://api.github.com"
+API_TIMEOUT_S = 20
+# gh failures that mean "this identity may not do that", not "try again later".
+DENIED_RE = re.compile(r"resource not accessible|\b40[134]\b|not found|could not resolve to|forbidden|bad credentials", re.I)
+
+
+class AppTokenError(Exception):
+    pass
+
+
+def kube_secret(key):
+    """Decoded bytes of one key of the App's secret. The name of the key is
+    the only thing on the command line; the value arrives on stdout."""
+    ns, name = APP_SECRET
+    try:
+        r = subprocess.run(["kubectl", "-n", ns, "get", "secret", name, "-o", f"jsonpath={{.data.{key}}}"],
+                           capture_output=True, text=True, timeout=API_TIMEOUT_S)
+    except FileNotFoundError:
+        raise AppTokenError("kubectl is not installed") from None
+    except subprocess.TimeoutExpired:
+        raise AppTokenError("kubectl timed out reading the App credentials") from None
+    if r.returncode != 0:
+        why = printable((r.stderr.strip().splitlines() or [""])[-1], 120)
+        raise AppTokenError(f"kubectl cannot read secret {name} in {ns} (exit {r.returncode}{': ' + why if why else ''})")
+    try:
+        value = base64.b64decode(r.stdout.strip(), validate=True)
+    except ValueError:
+        value = b""
+    if not value:
+        raise AppTokenError(f"secret {name} has no usable {key}")
+    return value
+
+
+def b64url(raw):
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def sign_jwt(app_id, pem):
+    """RS256 JWT for the App. openssl reads the key from a pipe handed to it
+    as a file descriptor, so the key never reaches a disk or an argument."""
+    now = int(time.time())
+    signing_input = ".".join(b64url(json.dumps(part, separators=(",", ":")).encode())
+                             for part in ({"alg": "RS256", "typ": "JWT"}, {"iat": now - 60, "exp": now + 540, "iss": app_id}))
+    rfd, wfd = os.pipe()
+    try:
+        # A key is ~2 KB, well inside the pipe buffer, so this cannot block.
+        os.write(wfd, pem)
+        os.close(wfd)
+        wfd = None
+        r = subprocess.run(["openssl", "dgst", "-sha256", "-sign", f"/dev/fd/{rfd}"], input=signing_input.encode(),
+                           capture_output=True, pass_fds=(rfd,), timeout=API_TIMEOUT_S)
+    except FileNotFoundError:
+        raise AppTokenError("openssl is not installed") from None
+    except (OSError, subprocess.TimeoutExpired):
+        raise AppTokenError("openssl could not sign the App token request") from None
+    finally:
+        os.close(rfd)
+        if wfd is not None:
+            os.close(wfd)
+    if r.returncode != 0 or not r.stdout:
+        raise AppTokenError("openssl rejected the App private key")
+    return f"{signing_input}.{b64url(r.stdout)}"
+
+
+def api_base():
+    base = os.environ.get("AGENT_NOTIFY_API_URL", API_URL).rstrip("/")  # tests point this at a local server
+    u = urlsplit(base)
+    if u.scheme != "https" and not (u.scheme == "http" and u.hostname in ("127.0.0.1", "localhost")):
+        raise AppTokenError("AGENT_NOTIFY_API_URL must be https")
+    return base
+
+
+def api(method, path, jwt, body=None):
+    req = urllib.request.Request(api_base() + path, method=method, data=None if body is None else json.dumps(body).encode(),
+                                 headers={"Authorization": f"Bearer {jwt}", "Accept": "application/vnd.github+json",
+                                          "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "agent-notify",
+                                          "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=API_TIMEOUT_S) as resp:
+            data = json.load(resp)
+    except urllib.error.HTTPError as e:
+        try:
+            msg = printable(json.load(e).get("message", ""), 120)
+        except (ValueError, AttributeError, OSError):
+            msg = ""
+        raise AppTokenError(f"GitHub answered {e.code}{': ' + msg if msg else ''} to {method} {path.split('?')[0]}") from None
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise AppTokenError(f"cannot reach the GitHub API ({printable(getattr(e, 'reason', type(e).__name__), 80)})") from None
+    if not isinstance(data, dict):
+        raise AppTokenError(f"GitHub answered {method} {path.split('?')[0]} with something that is not an object")
+    return data
+
+
+def mint_app_token(repo):
+    """A short-lived installation token for `repo`, scoped to that one
+    repository and carrying whatever permissions the installation was
+    granted. Raises AppTokenError with a reason that is safe to print."""
+    app_id = kube_secret("GITHUB_APP_ID").decode(errors="replace").strip()
+    if not app_id.isdigit():
+        raise AppTokenError("secret ai-sre-relay has no numeric GITHUB_APP_ID")
+    pem = kube_secret("GITHUB_APP_PRIVATE_KEY")
+    jwt = sign_jwt(app_id, pem)
+    try:
+        inst = api("GET", f"/repos/{repo}/installation", jwt)
+    except AppTokenError as e:
+        if " 404" in str(e):
+            raise AppTokenError(f"the jdwlabs-agent-bot App is not installed on {repo} (404)") from None
+        raise
+    inst_id = inst.get("id")
+    if not isinstance(inst_id, int) or isinstance(inst_id, bool):
+        raise AppTokenError("GitHub returned an installation without an id")
+    # Repository scope only: asking for permissions the App was never granted
+    # would fail the exchange, while a missing one shows when gh comments.
+    tok = api("POST", f"/app/installations/{inst_id}/access_tokens", jwt, {"repositories": [repo.split("/", 1)[1]]})
+    token = tok.get("token")
+    if not (isinstance(token, str) and re.fullmatch(r"[A-Za-z0-9_]{8,255}", token)):
+        raise AppTokenError("GitHub returned no usable installation token")
+    return token
 
 
 class Channel:
@@ -389,13 +526,18 @@ class GithubIssueChannel(Channel):
         repo = cfg.get("repo")
         if repo is not None and not (isinstance(repo, str) and REPO_RE.fullmatch(repo)):
             config_error(f"channel {key}: repo must be owner/name")
+        self.identity = cfg.get("identity", "gh")
+        if self.identity not in ("gh", "app"):
+            config_error(f"channel {key}: identity must be gh or app")
         self.repo = repo or store_repo()
         self.issue = None
         self.from_memory = False
+        self.token = self.fallback = None
+        self.minted = False
 
     def target(self, topic):
         n = remembered_issue(self.repo, self.state_file(topic, "issue"))
-        return {"channel": self.key, "repo": self.repo, "issue": n or "found or created on send"}
+        return {"channel": self.key, "identity": self.identity, "repo": self.repo, "issue": n or "found or created on send"}
 
     def find_or_create_issue(self, topic):
         t = TOPICS[topic]
@@ -440,19 +582,47 @@ class GithubIssueChannel(Channel):
         self.from_memory = bool(n)
         self.issue = n or self.find_or_create_issue(topic)
 
-    def post(self, topic, body):
+    def comment(self, topic, body, token):
         """Comment, replacing a closed or deleted remembered issue once."""
-        issue = self.issue
         try:
-            gh("issue", "comment", str(issue), "--repo", self.repo, "--body-file", "-", stdin=body)
+            gh("issue", "comment", str(self.issue), "--repo", self.repo, "--body-file", "-", stdin=body, token=token)
         except ChannelError as e:
-            if e.timed_out or not self.from_memory or not self.issue_unusable(issue):
+            if e.timed_out or not self.from_memory or not self.issue_unusable(self.issue):
                 raise
             forget_issue(self.state_file(topic, "issue"))
-            issue = self.find_or_create_issue(topic)
-            gh("issue", "comment", str(issue), "--repo", self.repo, "--body-file", "-", stdin=body)
-        remember_issue(self.repo, issue, self.state_file(topic, "issue"))
-        return {"issue": issue}
+            self.issue, self.from_memory = self.find_or_create_issue(topic), False
+            gh("issue", "comment", str(self.issue), "--repo", self.repo, "--body-file", "-", stdin=body, token=token)
+
+    def comment_token(self):
+        """The App token for this run, minted on first use; None means post
+        as gh, with `fallback` saying why when the App was asked for."""
+        if self.identity == "app" and not self.minted:
+            self.minted = True
+            try:
+                self.token = mint_app_token(self.repo)
+            except AppTokenError as e:
+                self.fallback = str(e)
+            except Exception as e:  # never let a surprise carry key material into a traceback
+                self.fallback = f"unexpected {type(e).__name__} while minting the App token"
+        return self.token
+
+    def post(self, topic, body):
+        # Only the comment is made as the App: the issue itself stays the
+        # human's, so GitHub notifies its author of the App's comments.
+        token = self.comment_token()
+        try:
+            self.comment(topic, body, token)
+        except ChannelError as e:
+            if not token or e.timed_out or not DENIED_RE.search(e.detail):
+                raise
+            self.token, self.fallback = None, f"the App was refused: {e.detail}"
+            self.comment(topic, body, None)
+        remember_issue(self.repo, self.issue, self.state_file(topic, "issue"))
+        out = {"identity": "app" if self.token else "gh", "issue": self.issue, "fallback": self.fallback}
+        if self.fallback:
+            out["help"] = (f"Install the jdwlabs-agent-bot GitHub App on the account that owns {self.repo}, with access to that "
+                           "repository and the Issues: read & write permission; until then comments post as your gh login")
+        return out
 
 
 CHANNEL_TYPES = {GithubIssueChannel.type: GithubIssueChannel}

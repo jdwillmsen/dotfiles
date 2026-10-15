@@ -44,12 +44,16 @@ proc() {  # proc COMM CMDLINE — add a process to the fake table
 
 reset() {
     rm -rf "$root"
-    mkdir -p "$home" "$root/var/run" "$root/dev/pts"
+    mkdir -p "$home" "$root/var/run" "$root/dev/pts" "$root/proc"
+    booted $((30 * 86400))
     : >"$tmp/calls"
     # Always running on Ubuntu, and shares the truncated name of a real upgrade.
     printf 'sshd\nunattended-upgr\n' >"$tmp/comms"
     printf 'sshd: %s\n/usr/bin/python3 /usr/share/unattended-upgrades/unattended-upgrade-shutdown --wait-for-signal\n' \
         "$user" >"$tmp/cmdlines"
+}
+booted() {  # booted SECONDS_AGO — the boot time /proc/stat reports
+    printf 'cpu  1 2 3 4\nbtime %s\nprocesses 1\n' "$(($(date +%s) - $1))" >"$root/proc/stat"
 }
 tty_input() {  # tty_input N SECONDS_AGO — a user-owned pty last read that long ago
     : >"$root/dev/pts/$1"
@@ -185,17 +189,24 @@ notice_text | grep -q "sudo reboot" || fail "notice does not say how to fix it" 
 
 # A later reboot-requiring install rewrites the flag; a prior deferral keeps
 # the original start so the escalation still fires.
-prior() {  # prior STATUS DAYS_AGO — the state a previous guard run left
+prior() {  # prior STATUS DAYS_AGO [CHECKED_SECONDS_AGO] — the state a previous guard run left
     prior_since=$(($(date +%s) - $2 * 86400 - 60))
     mkdir -p "$root/var/lib/devbox-maintenance"
     printf '{"status": "%s", "reason": "x", "pending_since": %s, "checked_at": %s}\n' \
-        "$1" "$prior_since" "$(date +%s)" >"$root/var/lib/devbox-maintenance/state.json"
+        "$1" "$prior_since" "$(($(date +%s) - ${3:-3600}))" >"$root/var/lib/devbox-maintenance/state.json"
 }
 reset; pending 1; prior deferred 8
 proc dpkg dpkg
 run
 notice_text | grep -q "reboot pending 8d" || fail "a rewritten flag restarted the deferral count" "$(notice_text)"
 state | grep -q "\"pending_since\": $prior_since," || fail "the original pending_since was not kept" "$(state)"
+
+# A deferral from before a manual reboot does not date a flag set since.
+reset; pending 0; prior deferred 8 $((2 * 3600)); booted 3600
+proc dpkg dpkg
+run
+[ -z "$(notice_text)" ] || fail "a deferral from before the last boot carried over" "$(notice_text)"
+state | grep -q "\"pending_since\": $prior_since," && fail "pre-boot pending_since kept" "$(state)"
 
 # After a reboot attempt the wait starts over from the flag.
 reset; pending 1; prior rebooting 8

@@ -450,8 +450,19 @@ run_trigger "$trig/home"
 grep -qx -- "--user daemon-reload" "$trig/calls" || fail "trigger never reloads systemd"
 grep -qx -- "--user enable --now agent-notify.timer agent-notify-digest.timer agent-trends.timer" "$trig/calls" || fail "trigger does not enable all three timers" "$(cat "$trig/calls")"
 grep -q "start " "$trig/calls" && fail "trigger must not start a run"
-grep -q "agent-notify-digest.service" "$trigger" && grep -q "agent-notify-digest.timer" "$trigger" || fail "trigger must hash the digest units too"
-grep -q "agent-trends.service" "$trigger" && grep -q "agent-trends.timer" "$trigger" || fail "trigger must hash the trends units too"
+# chezmoi re-runs a run_onchange script only when its rendered text changes, so
+# an edit to any unit the trigger enables must change the rendering.
+render_src="$tmp/render-src"
+cp -a "$here/home" "$render_src"
+render_trigger() { HOME="$trig/home" chezmoi execute-template --source "$render_src" --destination "$trig/home" <"$trigger"; }
+base_render="$(render_trigger)" || fail "the trigger template does not render"
+for unit in agent-notify.service agent-notify.timer agent-notify-digest.service agent-notify-digest.timer agent-trends.service agent-trends.timer; do
+    f="$render_src/dot_config/systemd/user/$unit"
+    cp "$f" "$tmp/unit.bak"
+    echo "# edited" >>"$f"
+    [ "$(render_trigger)" != "$base_render" ] || fail "editing $unit does not re-run the trigger"
+    cp "$tmp/unit.bak" "$f"
+done
 
 # ── A replacement issue that cannot be found or created posts nothing, so the date is not kept ──
 rm -f "$state/notify-issue" "$state/notified.json" "$GH_FAIL" "$GH_GONE" "$GH_SLOW" "$GH_COMMENT_FAIL" "$GH_NOPIN"
@@ -674,17 +685,46 @@ unset AGENT_NOTIFY_API_URL
 # ── Digest units ──
 dsvc="$units/agent-notify-digest.service"
 dtimer="$units/agent-notify-digest.timer"
-grep -qx 'ExecStart=%h/.local/bin/agent-notify digest' "$dsvc" || fail "digest service ExecStart"
-grep -qx 'NoNewPrivileges=yes' "$dsvc" && grep -qx 'PrivateTmp=yes' "$dsvc" || fail "digest service hardening missing"
-grep -q '^TimeoutStartSec=' "$dsvc" && grep -q '^Environment=PATH=.*/usr/bin' "$dsvc" || fail "digest service needs a timeout and a PATH that reaches kubectl"
-grep -qxF "OnCalendar=Mon *-*-* 09:10:00 UTC" "$dtimer" || fail "digest timer calendar"
-grep -qx "Unit=agent-notify-digest.service" "$dtimer" && grep -qx "Persistent=true" "$dtimer" && grep -qx "WantedBy=timers.target" "$dtimer" || fail "digest timer wiring"
+# systemd reads units as INI where the last duplicate key wins; parse them the
+# same way and assert what systemd would run. Prints the timer's calendar.
+dcal="$(python3 - "$dsvc" "$dtimer" "$units/agent-trends.service" <<'PY'
+import configparser, re, sys
+
+def load(path):
+    p = configparser.RawConfigParser(strict=False, interpolation=None)
+    p.optionxform = str
+    p.read(path)
+    return p
+
+def minutes(v):
+    m = re.fullmatch(r"(\d+)min", v)
+    assert m, f"timeout {v!r} is not in minutes"
+    return int(m.group(1))
+
+svc, timer, trends = load(sys.argv[1]), load(sys.argv[2]), load(sys.argv[3])
+s = svc["Service"]
+assert s["Type"] == "oneshot", s["Type"]
+assert s["ExecStart"] == "%h/.local/bin/agent-notify digest", s["ExecStart"]
+assert s["ExecStartPre"] == "-%h/.local/bin/agent-trends build", "the site must be rebuilt first, and a failed build must not block the digest"
+assert "agent-report@weekly.service" in svc["Unit"]["After"].split(), "the digest must run after a weekly report queued with it"
+assert minutes(s["TimeoutStartSec"]) > minutes(trends["Service"]["TimeoutStartSec"]), "the timeout must cover the site build and the post"
+assert "/usr/bin" in s["Environment"].removeprefix("PATH=").split(":"), "PATH must reach gh, kubectl and openssl"
+assert s["NoNewPrivileges"] == "yes" and s["PrivateTmp"] == "yes", "hardening missing"
+t = timer["Timer"]
+assert t["Unit"] == "agent-notify-digest.service" and t["Persistent"] == "true", "timer wiring"
+assert timer["Install"]["WantedBy"] == "timers.target", "timer install target"
+print(t["OnCalendar"])
+PY
+)" || fail "digest units do not wire the digest as intended"
 if command -v systemd-analyze >/dev/null 2>&1; then
-    systemd-analyze calendar "Mon *-*-* 09:10:00 UTC" >/dev/null || fail "digest calendar rejected by systemd"
-    mkdir -p "$tmp/verify"
+    elapses="$(TZ=UTC systemd-analyze calendar --iterations=2 "$dcal" 2>&1)" || fail "digest calendar rejected by systemd" "$elapses"
+    [ "$(echo "$elapses" | grep -cE '(Next elapse|Iteration #2): Mon [0-9-]+ 09:10:00 UTC$')" = 2 ] || fail "digest timer does not fire Mondays 09:10 UTC" "$elapses"
+    mkdir -p "$tmp/verify/bin"
     cp "$dsvc" "$dtimer" "$tmp/verify/"
-    mkdir -p "$tmp/verify/bin" && printf '#!/bin/sh\n' >"$tmp/verify/bin/agent-notify" && chmod +x "$tmp/verify/bin/agent-notify"
-    sed -i "s#%h/.local/bin/agent-notify#$tmp/verify/bin/agent-notify#" "$tmp/verify/agent-notify-digest.service"
+    for b in agent-notify agent-trends; do
+        printf '#!/bin/sh\n' >"$tmp/verify/bin/$b" && chmod +x "$tmp/verify/bin/$b"
+    done
+    sed -i "s#%h/.local/bin/#$tmp/verify/bin/#g" "$tmp/verify/agent-notify-digest.service"
     verify_out="$(systemd-analyze --user verify "$tmp/verify/agent-notify-digest.service" "$tmp/verify/agent-notify-digest.timer" 2>&1)" || fail "systemd-analyze verify rejects the digest units" "$verify_out"
 fi
 

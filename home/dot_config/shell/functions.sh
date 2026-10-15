@@ -108,13 +108,15 @@ t3_expiry_notice() {
 
 # Surface what unattended maintenance could not finish by itself: a reboot the
 # guard keeps deferring, or services that did not come back after one. Both
-# are marker files written by their checks, so a clean box costs two tests.
+# are marker files written by their checks, so a clean box costs a few tests.
+# The guard's notice says to reboot, and survives a manual one until its next
+# run, so it only shows while the reboot is still pending.
 maintenance_notice() {
-    local f
-    for f in /var/lib/devbox-maintenance/notice \
-        "${XDG_STATE_HOME:-$HOME/.local/state}/devbox-health.fail"; do
-        [ -s "$f" ] && { printf '⚠ '; cat "$f"; } >&2
-    done
+    local root="${DEVBOX_MAINT_ROOT:-}" f
+    f="$root/var/lib/devbox-maintenance/notice"
+    [ -e "$root/var/run/reboot-required" ] && [ -s "$f" ] && { printf '⚠ '; cat "$f"; } >&2
+    f="${XDG_STATE_HOME:-$HOME/.local/state}/devbox-health.fail"
+    [ -s "$f" ] && { printf '⚠ '; cat "$f"; } >&2
     return 0
 }
 

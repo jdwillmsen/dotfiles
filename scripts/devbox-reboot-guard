@@ -80,6 +80,18 @@ if [ ! -e "$reboot_flag" ]; then
 fi
 
 pending_since="$(stat -c %Y "$reboot_flag")"
+# Every further reboot-requiring install rewrites the flag, so its mtime alone
+# would restart the count on each one and the escalation might never fire.
+# Only a deferral carries the older start: after a reboot the wait is over.
+prev="$(cat "$state_dir/state.json" 2>/dev/null || true)"
+case "$prev" in
+    *'"status": "deferred"'*)
+        prev_since="$(printf '%s\n' "$prev" | sed -n 's/.*"pending_since": \([0-9][0-9]*\),.*/\1/p')"
+        if [ -n "$prev_since" ] && [ "$prev_since" -lt "$pending_since" ]; then
+            pending_since="$prev_since"
+        fi
+        ;;
+esac
 pending_days=$(((now - pending_since) / 86400))
 
 # An install interrupted by a reboot can leave dpkg half-configured, and the

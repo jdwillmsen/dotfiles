@@ -118,7 +118,7 @@ over a week, the first time it was checked. This script closes both gaps.
 | `devbox-reboot-guard.timer` (system) | Hourly at :30 from 08:00 to 12:00 UTC, the owner's quiet stretch. No `Persistent=`, so a run missed while the box was off never fires at boot, mid-day. |
 | `/usr/local/sbin/devbox-reboot-guard` | Reboots only when `/var/run/reboot-required` exists **and** no apt/dpkg is running, no agent transcript (`~/.claude/projects`, `~/.codex/sessions`, `~/.local/share/opencode`) changed in the last `IDLE_MINUTES`, and no terminal the user owns (SSH login or tmux pane) took keyboard input in that time — tty atime, the same signal `w` shows as IDLE. A tmux client left attached overnight does not block; that is how the box is usually left. |
 | `devbox-health-boot.timer` (user, via `chezmoi apply`) | Five minutes after the user manager starts — at boot, with linger — runs `devbox-health` and keeps any failing lines in `~/.local/state/devbox-health.fail`. |
-| `maintenance_notice` (login shell) | Prints the guard's notice once a reboot has been deferred for `ESCALATE_DAYS`, and the health marker until a healthy run clears it. Silent otherwise. |
+| `maintenance_notice` (login shell) | Prints the guard's notice once a reboot has been deferred for `ESCALATE_DAYS` within one boot — only while `/var/run/reboot-required` still exists, so a manual reboot silences it — and the health marker until a healthy run clears it. Silent otherwise. |
 
 Transcript mtimes are the activity signal because they cover every way an
 agent runs here, including T3 Code sessions driven from a phone with no

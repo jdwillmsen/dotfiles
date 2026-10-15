@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# devbox-reboot-guard — reboot for a pending kernel or library update, but only
+# when nobody and no agent is mid-work.
+#
+# unattended-upgrades installs updates daily but never reboots, so a patched
+# kernel waits until someone remembers. Its own Automatic-Reboot is a fixed
+# clock time with no idea that an overnight agent run is live on this box;
+# rebooting under one loses the run. This decides per check instead.
+#
+# Installed to /usr/local/sbin by scripts/provision-auto-maintenance.sh and run
+# by a root timer inside a quiet window. Root because it reboots; it reads the
+# watched user's activity only through file and terminal timestamps.
+#
+# Usage: devbox-reboot-guard [--dry-run]
+#   --dry-run  decide and print, but neither reboot nor write state.
+# Environment:
+#   MAINT_USER      the user whose activity defers a reboot (required)
+#   IDLE_MINUTES    quiet time required before a reboot (default 60)
+#   ESCALATE_DAYS   pending days before the login notice appears (default 7)
+#   GUARD_ROOT      prefix for every system path; tests only
+# Exit: 0 decided (rebooting, deferred or nothing to do), 2 could not decide.
+set -euo pipefail
+
+EXIT_UNKNOWN=2
+root="${GUARD_ROOT:-}"
+reboot_flag="$root/var/run/reboot-required"
+state_dir="$root/var/lib/devbox-maintenance"
+
+dry_run=no
+case "${1:-}" in
+    '') ;;
+    --dry-run) dry_run=yes ;;
+    *) echo "devbox-reboot-guard: unknown argument '$1' — usage: devbox-reboot-guard [--dry-run]" >&2; exit "$EXIT_UNKNOWN" ;;
+esac
+
+die() { echo "devbox-reboot-guard: $*" >&2; exit "$EXIT_UNKNOWN"; }
+
+user="${MAINT_USER:-}"
+[ -n "$user" ] || die "MAINT_USER is not set — the guard cannot tell whose work a reboot would interrupt"
+for v in IDLE_MINUTES ESCALATE_DAYS; do
+    case "${!v:-}" in
+        '') ;;
+        *[!0-9]* | ?????*) die "$v must be a whole number below 10000, got '${!v}'" ;;
+    esac
+done
+idle_minutes="${IDLE_MINUTES:-60}"
+escalate_days="${ESCALATE_DAYS:-7}"
+
+home="$(getent passwd "$user" | cut -d: -f6)" || true
+if [ -z "$home" ] || [ ! -d "$root$home" ]; then
+    die "no home directory for user '$user'"
+fi
+home="$root$home"
+
+now="$(date +%s)"
+
+write_state() {  # write_state STATUS REASON PENDING_SINCE — reason is a fixed string, never user data
+    [ "$dry_run" = yes ] && return 0
+    mkdir -p "$state_dir"
+    printf '{"status": "%s", "reason": "%s", "pending_since": %s, "checked_at": %s}\n' \
+        "$1" "$2" "${3:-null}" "$now" >"$state_dir/state.json.tmp"
+    mv "$state_dir/state.json.tmp" "$state_dir/state.json"
+}
+
+notice() {  # notice TEXT|'' — the line a login shell prints; empty removes it
+    [ "$dry_run" = yes ] && return 0
+    mkdir -p "$state_dir"
+    if [ -n "$1" ]; then
+        printf '%s\n' "$1" >"$state_dir/notice"
+    else
+        rm -f "$state_dir/notice"
+    fi
+}
+
+if [ ! -e "$reboot_flag" ]; then
+    write_state clean "no reboot required" ""
+    notice ""
+    echo "nothing to do: no reboot required"
+    exit 0
+fi
+
+pending_since="$(stat -c %Y "$reboot_flag")"
+pending_days=$(((now - pending_since) / 86400))
+
+# An install interrupted by a reboot can leave dpkg half-configured, and the
+# usual one is unattended-upgrades itself, which runs on its own timer. That
+# is matched by its script path: the kernel truncates every process name to
+# 15 characters, so its always-running shutdown helper shares the name
+# "unattended-upgr" and would otherwise defer every reboot.
+blocker=""
+if pgrep -x 'apt|apt-get|aptitude|dpkg' >/dev/null 2>&1 \
+    || pgrep -f '/usr/bin/unattended-upgrade( |$)' >/dev/null 2>&1; then
+    blocker="package manager running"
+fi
+
+# Agent sessions write their transcript on every turn, so a file touched within
+# the window is the cheapest reliable sign that a run is live — including ones
+# driven from a phone through T3 Code, which has no terminal attached at all.
+if [ -z "$blocker" ]; then
+    for d in .claude/projects .codex/sessions .local/share/opencode; do
+        [ -d "$home/$d" ] || continue
+        if [ -n "$(find "$home/$d" -type f -mmin "-$idle_minutes" -print -quit 2>/dev/null)" ]; then
+            blocker="agent session active in the last ${idle_minutes}m"
+            break
+        fi
+    done
+fi
+
+# Keyboard input, the signal `w` reports as IDLE: a terminal's atime moves
+# when its reader takes a keystroke, and program output moves only mtime. Every
+# pty the user owns counts — SSH logins and tmux panes alike — so a client left
+# attached overnight does not defer a reboot, but someone typing does. tmux's
+# own client_activity cannot stand in: it stays at the attach time.
+if [ -z "$blocker" ]; then
+    for tty in "$root"/dev/pts/[0-9]*; do
+        [ "$(stat -c %U "$tty" 2>/dev/null)" = "$user" ] || continue
+        if [ $((now - $(stat -c %X "$tty"))) -lt $((idle_minutes * 60)) ]; then
+            blocker="terminal input in the last ${idle_minutes}m"
+            break
+        fi
+    done
+fi
+
+if [ -n "$blocker" ]; then
+    write_state deferred "$blocker" "$pending_since"
+    if [ "$pending_days" -ge "$escalate_days" ]; then
+        notice "maintenance: reboot pending ${pending_days}d, auto-reboot keeps deferring ($blocker) — run: sudo reboot"
+    else
+        notice ""
+    fi
+    echo "deferred: $blocker (reboot pending ${pending_days}d)"
+    exit 0
+fi
+
+if [ "$dry_run" = yes ]; then
+    echo "would reboot: reboot pending ${pending_days}d, idle for ${idle_minutes}m"
+    exit 0
+fi
+
+write_state rebooting "idle" "$pending_since"
+notice ""
+echo "rebooting: reboot pending ${pending_days}d, idle for ${idle_minutes}m"
+systemctl reboot

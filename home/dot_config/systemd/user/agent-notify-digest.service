@@ -1,0 +1,18 @@
+[Unit]
+Description=Agent metrics weekly digest
+Documentation=file://%h/.local/share/chezmoi/docs/agent-notify.md
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/agent-notify digest
+# A user manager starts with a bare PATH; gh, kubectl and openssl live in
+# /usr/bin. kubectl reads ~/.kube/config through the manager's HOME, which
+# neither sandbox option below hides.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Reading the App secret, minting a token and one issue lookup and comment; a
+# hung network call must not pile up behind next week's run.
+TimeoutStartSec=5min
+NoNewPrivileges=yes
+PrivateTmp=yes
+Nice=10
+IOSchedulingClass=idle

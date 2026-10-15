@@ -102,6 +102,41 @@ atop -r /var/log/atop/atop_20261003 -b 01:50 -d   # disk view: which process wro
 bottleneck: a `full` average in the tens of percent means tasks are stalled
 waiting on I/O for that share of the time.
 
+## Automatic updates and reboots
+
+```bash
+sudo scripts/provision-auto-maintenance.sh
+```
+
+unattended-upgrades ships enabled but installs only `-security`, and never
+reboots, so a patched kernel waited until someone noticed the login banner —
+over a week, the first time it was checked. This script closes both gaps.
+
+| Piece | What it does |
+|---|---|
+| `/etc/apt/apt.conf.d/52devbox-unattended` | Appends `${distro_codename}-updates` to the allowed origins, so every stable update installs daily. Sets `Automatic-Reboot "false"`: the reboot is the guard's call. A drop-in, because editing the shipped conffile turns each package upgrade into a conffile prompt. |
+| `devbox-reboot-guard.timer` (system) | Hourly at :30 from 08:00 to 12:00 UTC, the owner's quiet stretch. No `Persistent=`, so a run missed while the box was off never fires at boot, mid-day. |
+| `/usr/local/sbin/devbox-reboot-guard` | Reboots only when `/var/run/reboot-required` exists **and** no apt/dpkg is running, no agent transcript (`~/.claude/projects`, `~/.codex/sessions`, `~/.local/share/opencode`) changed in the last `IDLE_MINUTES`, and no terminal the user owns (SSH login or tmux pane) took keyboard input in that time — tty atime, the same signal `w` shows as IDLE. A tmux client left attached overnight does not block; that is how the box is usually left. |
+| `devbox-health-boot.timer` (user, via `chezmoi apply`) | Five minutes after the user manager starts — at boot, with linger — runs `devbox-health` and keeps any failing lines in `~/.local/state/devbox-health.fail`. |
+| `maintenance_notice` (login shell) | Prints the guard's notice once a reboot has been deferred for `ESCALATE_DAYS`, and the health marker until a healthy run clears it. Silent otherwise. |
+
+Transcript mtimes are the activity signal because they cover every way an
+agent runs here, including T3 Code sessions driven from a phone with no
+terminal attached. tmux-resurrect restores panes after the reboot, but not the
+processes in them, which is why idleness gates the reboot rather than a clock.
+
+Overrides, all baked into the units at provision time: `MAINT_USER` (defaults
+to `SUDO_USER`; root is refused), `IDLE_MINUTES` (60), `ESCALATE_DAYS` (7),
+`REBOOT_WINDOW` (`08..12`, UTC hours). Re-run the script after editing
+`scripts/devbox-reboot-guard`; the installed copy does not track the repo.
+
+```bash
+sudo MAINT_USER=$USER /usr/local/sbin/devbox-reboot-guard --dry-run   # what it would do now
+cat /var/lib/devbox-maintenance/state.json                         # last decision and why
+systemctl list-timers devbox-reboot-guard.timer
+journalctl -u devbox-reboot-guard.service -n 20
+```
+
 ## Tailnet access
 
 A first run on an unauthenticated node prints a one-time login URL — an

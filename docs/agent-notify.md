@@ -4,7 +4,7 @@
 flags. It reads `~/.local/state/agent-metrics/flags.json`, which the daily
 report writes only on a day with flags. Design: `docs/superpowers/specs/2026-10-09-agent-notify-trends-design.md`.
 
-## Three places a flag shows
+## Where a flag shows
 
 | Where | How | Cost |
 |---|---|---|

@@ -396,6 +396,55 @@ want quota_hours_added 0 "re-run"
 run 0
 grep -q "seven_day_pct: 55" "$out" || fail "the home view does not show the latest weekly quota" "$(cat "$out")"
 
+# ── Provider limits ──
+# T3 Code's provider caches are the input; the fixture carries an account
+# address that must never reach the log or the store.
+caches="$tmp/t3caches"
+mkdir -p "$caches"
+export AGENT_METRICS_T3_CACHES="$caches"
+cat >"$caches/claudeAgent.json" <<'JSON'
+{"displayName":"Claude","instanceId":"claudeAgent","enabled":true,"models":[{},{},{}],
+ "auth":{"status":"authenticated","email":"secret.person@example.invalid","label":"Claude Max Subscription"},
+ "usageLimits":{"windows":[{"id":"five_hour","kind":"session","label":"Session","windowDurationMins":300,"usedPercent":57.99999999999999,"resetsAt":"2026-10-09T15:00:00.000Z"},
+ {"id":"seven_day_fable","kind":"weekly","label":"Weekly \u00b7 Fable","usedPercent":0},{"id":"bad","usedPercent":"lots"}]}}
+JSON
+cat >"$caches/opencode.json" <<'JSON'
+{"displayName":"OpenCode","instanceId":"opencode","models":[{}],"auth":{"status":"authenticated","type":"opencode"},
+ "usageLimits":{"windows":[],"unavailable":{"reason":"unsupported"}}}
+JSON
+echo '{"not":"a provider cache"}' >"$caches/junk.json"
+echo 'not json' >"$caches/broken.json"
+plog="$AGENT_METRICS_STATE/providers.jsonl"
+run 0 providers snapshot
+want providers 2 "two provider caches, not the junk or the broken file"
+[ "$(wc -l <"$plog")" = 2 ] || fail "snapshot should log one line per provider" "$(cat "$plog")"
+grep -q "secret.person" "$plog" && fail "an account address reached the provider log"
+grep -q '"used_pct":58' "$plog" || fail "a percent was not rounded to one decimal" "$(cat "$plog")"
+grep -q '"unavailable":"unsupported"' "$plog" || fail "an unavailable limit was not recorded" "$(cat "$plog")"
+grep -q '"id":"bad"' "$plog" && fail "a window without a numeric percent was logged"
+run 0 providers
+grep -q "claudeAgent,Claude Max Subscription,3,five_hour=58% seven_day_fable=0%" "$out" || fail "providers view" "$(cat "$out")"
+# Three readings in one finished hour keep the highest per window; the one in
+# progress waits.
+{
+    printf '{"at":%s,"models":3,"plan":"Claude Max Subscription","provider":"claudeAgent","windows":[{"id":"five_hour","used_pct":10}]}\n' "$(date -u -d "2026-10-09T09:05:00Z" +%s)"
+    printf '{"at":%s,"models":3,"plan":"Claude Max Subscription","provider":"claudeAgent","windows":[{"id":"five_hour","used_pct":40}]}\n' "$(date -u -d "2026-10-09T09:35:00Z" +%s)"
+    printf '{"at":%s,"models":3,"plan":"Claude Max Subscription","provider":"claudeAgent","windows":[{"id":"five_hour","used_pct":20}]}\n' "$(date -u -d "2026-10-09T09:55:00Z" +%s)"
+    printf '{"at":%s,"models":3,"plan":"Claude Max Subscription","provider":"claudeAgent","windows":[{"id":"five_hour","used_pct":12}]}\n' "$(date -u -d "2026-08-30T08:10:00Z" +%s)"
+} >>"$plog"
+run 0 collect --since 1
+want provider_hours_added 2 "one finished hour this month and one old one"
+[ "$(wc -l <"$store/providers/2026-10.jsonl")" = 1 ] || fail "the hour in progress was rolled up, or the finished one was not" "$(cat "$store/providers/2026-10.jsonl")"
+grep -q '"hour":"2026-10-09T09:00:00Z".*"readings":3' "$store/providers/2026-10.jsonl" || fail "an hour lost readings" "$(cat "$store/providers/2026-10.jsonl")"
+grep -q '"id":"five_hour","used_pct":40' "$store/providers/2026-10.jsonl" || fail "an hour does not keep its highest reading per window" "$(cat "$store/providers/2026-10.jsonl")"
+[ -f "$store/providers/2026-08.jsonl" ] || fail "an old provider reading was dropped without being rolled up"
+if grep -q "$(date -u -d "2026-08-30T08:10:00Z" +%s)" "$plog"; then fail "a provider reading older than 35 days stayed in the local log"; fi
+[ "$(sg rev-parse HEAD)" = "$(git -C "$remote" rev-parse main)" ] || fail "the provider roll-up was not pushed"
+run 0 collect --since 1
+want provider_hours_added 0 "re-run"
+rm -f "$plog"
+unset AGENT_METRICS_T3_CACHES
+
 # ── Budget ──
 # $1,000 of sessions in the trailing 30 days: the plan is $10 and the hard stop $50.
 bstore="$tmp/bstore"
@@ -660,11 +709,24 @@ if command -v systemd-analyze >/dev/null 2>&1; then
     systemd-analyze calendar "*-*-* 06:30:00" >/dev/null || fail "calendar rejected by systemd"
 fi
 
+psvc="$units/agent-metrics-providers.service"
+ptimer="$units/agent-metrics-providers.timer"
+grep -qx 'ExecStart=%h/.local/bin/agent-metrics providers snapshot' "$psvc" || fail "providers service ExecStart"
+grep -qx 'NoNewPrivileges=yes' "$psvc" && grep -qx 'PrivateTmp=yes' "$psvc" || fail "providers service hardening missing"
+grep -q '^TimeoutStartSec=' "$psvc" || fail "providers service needs a hard timeout"
+grep -q '^Environment=PATH=' "$psvc" || fail "providers service needs a PATH"
+grep -qxF "OnCalendar=*-*-* *:00,30:00" "$ptimer" || fail "providers timer calendar"
+grep -qx "Unit=agent-metrics-providers.service" "$ptimer" || fail "providers timer target"
+grep -qx "WantedBy=timers.target" "$ptimer" || fail "providers timer install target"
+if command -v systemd-analyze >/dev/null 2>&1; then
+    systemd-analyze calendar "*-*-* *:00,30:00" >/dev/null || fail "providers calendar rejected by systemd"
+fi
+
 # ── Trigger: stubbed systemctl/loginctl ──
 shellcheck -s bash "$trigger"
 trig="$tmp/trig"
 mkdir -p "$trig/bin" "$trig/home/.config/systemd/user"
-cp "$svc" "$trig/home/.config/systemd/user/"
+cp "$svc" "$psvc" "$trig/home/.config/systemd/user/"
 cat >"$trig/bin/systemctl" <<'STUB'
 #!/bin/sh
 if [ "$2" = "show-environment" ]; then echo "HOME=$STUB_MANAGER_HOME"; exit 0; fi
@@ -686,6 +748,7 @@ grep -q "skipping enable" <<<"$trig_out" && [ ! -s "$trig/calls" ] || fail "trig
 run_trigger "$trig/home" no
 grep -qx -- "--user daemon-reload" "$trig/calls" || fail "trigger never reloads systemd"
 grep -qx -- "--user enable --now agent-metrics-collect.timer" "$trig/calls" || fail "trigger does not enable the timer" "$(cat "$trig/calls")"
+grep -qx -- "--user enable --now agent-metrics-providers.timer" "$trig/calls" || fail "trigger does not enable the providers timer" "$(cat "$trig/calls")"
 grep -q "start" "$trig/calls" && fail "trigger must not start a collect"
 grep -q "linger is off" <<<"$trig_out" || fail "trigger should warn when linger is off"
 grep -q "agent-metrics init" <<<"$trig_out" || fail "trigger should say the store still needs cloning" "$trig_out"

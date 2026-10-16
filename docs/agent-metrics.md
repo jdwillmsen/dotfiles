@@ -76,6 +76,34 @@ percentages on every refresh, and it appends them to
 `~/.local/state/agent-metrics/quota.jsonl` at most once every five minutes.
 Readings exist only while an interactive session is open.
 
+## Provider limits
+
+T3 Code keeps each provider's plan and quota windows fresh in
+`~/.t3/caches/*.json`. `agent-metrics providers snapshot` appends one reading
+per provider to `~/.local/state/agent-metrics/providers.jsonl`, and
+`agent-metrics-providers.timer` runs it every 30 minutes. It calls no provider
+itself, so a reading is only as fresh as T3's own check, and none are logged
+while T3 Code is not running. `collect` folds finished hours into
+`providers/YYYY-MM.jsonl` in the store, keeping the highest percent per window
+in each hour; the local log keeps 35 days.
+
+A row holds the provider id, display name, plan label, model count, whether it
+is signed in, and per window an id, label, kind, length in minutes, reset time
+and `used_pct`. The account address T3 also caches is never read into a row,
+and labels that are not plain words are dropped.
+
+What a provider reports varies, and a missing window is not a clean bill:
+
+- **Claude** reports a five-hour, a weekly and a per-model weekly window.
+- **Codex** reports one monthly window for the free plan.
+- **Cursor** reports a monthly total split into Cursor models and other models.
+- **Grok, Antigravity, OpenCode** report no windows. Grok does enforce a limit
+  (a session here failed with "usage limit reached"); T3 just cannot see it.
+
+Providers give a percent, never tokens or dollars, so cost stays Claude-only.
+`agent-metrics providers` prints the newest local reading of each; the trends
+page charts them.
+
 ## Budget
 
 The audit's own model spend is capped by `~/.config/agent-metrics/budget.json`:
@@ -113,6 +141,8 @@ Anything that spends on a model runs `budget check` first and
 agent-metrics                               # store, last commit, latest quota
 agent-metrics collect --dry-run             # counts only; writes nothing
 agent-metrics collect --since 90            # one-time backfill
+agent-metrics providers                     # newest local reading per provider
+agent-metrics providers snapshot            # log a reading now
 agent-metrics budget                        # state and the numbers behind it
 agent-metrics budget check --need 5         # exit 0 when $5 may be spent
 agent-metrics budget record --usd 3.2 --run weekly
@@ -136,7 +166,9 @@ with a message naming it.
 
 ## Scheduling
 
-`agent-metrics-collect.service` and `.timer` live in
+`agent-metrics-providers.service` and `.timer` take the provider snapshot
+every 30 minutes. They have no backfill to read first, so the enable script
+starts them at once. `agent-metrics-collect.service` and `.timer` live in
 `home/dot_config/systemd/user/`, and
 `run_onchange_53-enable-agent-metrics.sh.tmpl` enables the timer on a home
 apply without starting a run. Like the audit timers, it needs linger to run

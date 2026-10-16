@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """agent-trends — a static site of the metrics store's trends and reports.
 
-Reads sessions, quota readings and stored reports from the store and writes
+Reads sessions, quota and provider-limit readings and stored reports from the store and writes
 `site/index.html` and a `site/reports/<date>-<window>.html` page per stored
 report into it: inline CSS and SVG, no external request of any kind. Dollar
 figures are list-price estimates, not a bill. Agent-facing: stdout is TOON,
@@ -38,6 +38,10 @@ WINDOW_ORDER = ("daily", "weekly", "biweekly", "monthly", "quarterly", "yearly")
 MAX_FLAG_ROWS = 30
 TOP_N = 8
 MAX_DAYS = 180
+# Past this age a provider reading no longer says where the limit stands now.
+STALE_S = 36 * 3600
+HEADLINE_IDS = ("totalPercentUsed", "seven_day", "primary")
+MAX_PROVIDER_LINES = 4
 # Nothing in the store is anywhere near this; a larger value is corruption, and
 # summing two of them would overflow a float.
 PLAUSIBLE_MAX = 1e15
@@ -141,6 +145,28 @@ def load_quota(lo_month):
             if ts is None:
                 unreadable(path, f"reading has hour {r.get('hour')!r}")
             readings.append({"ts": ts, "five": amount(r, "five_hour_pct", path, None), "seven": amount(r, "seven_day_pct", path, None)})
+    return readings
+
+
+def load_providers(lo_month):
+    """Provider-limit readings: the store's hourly rows, then the newer ones
+    still in the local log. A stored row that is malformed fails the build."""
+    readings = []
+    for path in month_files("providers", lo_month):
+        for r in load_json_lines(path):
+            ts = am.parse_ts(r.get("hour"))
+            if ts is None or not isinstance(r.get("provider"), str) or not isinstance(r.get("windows"), list):
+                unreadable(path, "a provider reading lacks a valid hour, provider or windows")
+            windows = []
+            for w in r["windows"]:
+                if not isinstance(w, dict):
+                    unreadable(path, "a provider window is not an object")
+                windows.append({**w, "used_pct": amount(w, "used_pct", path)})
+            readings.append({**r, "ts": ts, "windows": windows})
+    stored_to = max((x["ts"] for x in readings), default=0)
+    for r in am.local_providers():
+        if r["at"] > stored_to + 3600 and isinstance(r.get("windows"), list):
+            readings.append({**r, "ts": r["at"], "windows": [w for w in r["windows"] if isinstance(w, dict) and am.is_amount(w.get("used_pct"))]})
     return readings
 
 
@@ -432,6 +458,92 @@ def reports_section(report_pages):
     return '<div class="cols">' + "".join(cols) + "</div>"
 
 
+# ── Provider limits ──────────────────────────────────────────────────────────
+
+def headline(windows):
+    """The window that best says how close a provider is to being cut off: the
+    plan-wide figure when one is named, else the longest window."""
+    for wanted in HEADLINE_IDS:
+        for w in windows:
+            if w.get("id") == wanted:
+                return w
+    return max(windows, key=lambda w: (w.get("minutes") or 0, w["used_pct"])) if windows else None
+
+
+def window_name(w):
+    return str(w.get("label") or w.get("id") or "window")[:ID_SHOW]
+
+
+def bar(v):
+    level = "hot" if v >= 90 else "warm" if v >= 70 else "ok"
+    return f'<span class="bar {level}"><i style="width:{min(v, 100):.0f}%"></i></span>'
+
+
+def providers_section(readings, day_list, today, now_ts, days):
+    if not readings:
+        return empty("Provider limits", "No readings yet; run `agent-metrics providers snapshot` while T3 Code is running.")
+    latest = {}
+    for r in readings:
+        if r["ts"] >= latest.get(r["provider"], {"ts": -1})["ts"]:
+            latest[r["provider"]] = r
+    rows = []
+    for name in sorted(latest):
+        r = latest[name]
+        age = now_ts - r["ts"]
+        shown = esc(str(r.get("name") or name)[:ID_SHOW])
+        plan = esc(str(r.get("plan") or "unknown")[:ID_SHOW])
+        note = "" if age <= STALE_S else f' <span class="muted">(reading is {age / 86400:.0f} days old)</span>'
+        if not r.get("signed_in", True):
+            rows.append(f'<tr><td>{shown}</td><td>{plan}</td><td colspan="3">not signed in{note}</td></tr>')
+        elif not r["windows"]:
+            why = "limits not reported by the provider" if r.get("unavailable") else "no quota window reported"
+            rows.append(f'<tr><td>{shown}</td><td>{plan}</td><td colspan="3">{esc(why)}{note}</td></tr>')
+        for w in sorted(r["windows"], key=lambda w: (-(w.get("minutes") or 0), w.get("id", ""))):
+            reset = am.parse_ts(w.get("resets_at"))
+            if reset is None:
+                when = "no reset time"
+            elif reset <= now_ts:
+                when = "has reset since"
+            else:
+                left = reset - now_ts
+                when = f"in {left / 86400:.1f} days" if left >= 2 * 86400 else f"in {left / 3600:.1f} hours"
+            used = f"{w['used_pct']:g}%"
+            rows.append(f'<tr><td>{shown}</td><td>{plan}</td><td>{esc(window_name(w))}</td>'
+                        f'<td>{bar(w["used_pct"])} {esc(used)}</td><td>{esc(when)}{note}</td></tr>')
+            shown = plan = ""
+    asof = am.iso(max(r["ts"] for r in latest.values()))
+    out = ['<section class="chart"><h3>Where each plan stands</h3>'
+           f'<p class="sub">Newest reading per provider, as of {esc(asof)}. Providers report a percent of the plan limit, '
+           'not tokens or dollars; only Claude has a dollar estimate (below).</p>'
+           '<div class="scroll"><table><thead><tr><th>Provider</th><th>Plan</th><th>Window</th><th>Used</th><th>Resets</th></tr></thead>'
+           f'<tbody>{"".join(rows)}</tbody></table></div></section>']
+
+    per_day = {}
+    for r in readings:
+        d = dt.datetime.fromtimestamp(r["ts"], dt.timezone.utc).date()
+        w = headline(r["windows"])
+        if w and day_list[0] <= d <= today:
+            slot = per_day.setdefault(r["provider"], {})
+            slot[d] = max(w["used_pct"], slot.get(d, 0.0))
+    names = sorted(per_day)[:MAX_PROVIDER_LINES]
+    if not names:
+        out.append(empty("Plan limit used per day", f"No provider readings with a quota window in the last {days} days."))
+        return "".join(out)
+    labels = [d.strftime("%b %d") for d in day_list]
+    lines = [(latest[n].get("name") or n, i + 1, [per_day[n].get(d) for d in day_list]) for i, n in enumerate(names)]
+    top = max(v for _n, _c, vs in lines for v in vs if v is not None)
+    ymax, step = nice_ceiling(max(top, 10))
+    ymax = min(ymax, 100.0) if top <= 100 else ymax
+    step = min(step, ymax / 2) if ymax < 100 else step
+    show = lambda v: "no reading" if v is None else f"{v:g}%"
+    tips = [f"{d.isoformat()}: " + " · ".join(f"{n} {show(vs[i])}" for n, _c, vs in lines) for i, d in enumerate(day_list)]
+    series = [(str(n)[:ID_SHOW], c) for n, c, _v in lines]
+    out.append(figure("Plan limit used per day", "Highest reading each day (UTC) of each provider's headline window, percent of the plan limit",
+                      series, line_chart(labels, [(str(n)[:ID_SHOW], c, v) for n, c, v in lines], ymax, step, lambda v: f"{v:g}%", tips),
+                      ["Date"] + [n for n, _c in series], [[d.isoformat()] + [show(vs[i]) for _n, _c, vs in lines] for i, d in enumerate(day_list)]))
+    return "".join(out)
+
+
 # ── Page ─────────────────────────────────────────────────────────────────────
 
 LIGHT = {"surface": "#fcfcfb", "page": "#f9f9f7", "ink": "#0b0b0b", "ink2": "#52514e", "muted": "#898781",
@@ -469,7 +581,9 @@ svg{{width:100%;height:auto;display:block}}
 .hit{{fill:transparent}} .hit:hover{{fill:var(--grid);fill-opacity:.5}}
 .legend{{list-style:none;display:flex;flex-wrap:wrap;gap:4px 16px;padding:0;margin:4px 0;font-size:13px;color:var(--ink2)}}
 .k{{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px}}
-.empty{{color:var(--ink2);margin:6px 0 0}}
+.empty{{color:var(--ink2);margin:6px 0 0}} .muted{{color:var(--muted)}}
+.bar{{display:inline-block;width:96px;height:8px;border-radius:4px;background:var(--grid);vertical-align:middle;margin-right:6px;overflow:hidden}}
+.bar i{{display:block;height:100%;background:var(--s3)}} .bar.warm i{{background:var(--s4)}} .bar.hot i{{background:var(--s2)}}
 details{{margin-top:8px;font-size:13px}} summary{{cursor:pointer;color:var(--ink2)}}
 .scroll{{overflow-x:auto;max-height:320px;overflow-y:auto}}
 table{{border-collapse:collapse;width:100%;font-size:13px}}
@@ -496,7 +610,7 @@ def tile(label, value, delta):
             f'<div class="delta">{esc(delta)}</div></div>')
 
 
-def render(sessions, quota, reports, report_pages, days, now):
+def render(sessions, quota, providers, reports, report_pages, days, now):
     now_ts = now.timestamp()
     today = now.date()
     day_list = [today - dt.timedelta(days=i) for i in range(days - 1, -1, -1)]
@@ -517,6 +631,11 @@ def render(sessions, quota, reports, report_pages, days, now):
                + tile("Weekly quota peak", f"{qc:g}%" if qc is not None else "n/a",
                       f"before: {qp:g}%" if qp is not None else "no readings in either week")
                + "</div>")
+
+
+    # Provider limits
+    sec.append("<h2>Provider limits</h2>")
+    sec.append(providers_section(providers, day_list, today, now_ts, days))
 
     # Daily spend by population
     sec.append("<h2>Spend</h2>")
@@ -754,7 +873,7 @@ def build_page(days):
     start = now.date() - dt.timedelta(days=max(days, 30) + 7)
     lo_month = start.strftime("%Y-%m")
     report_pages = load_report_markdown()
-    page, count = render(load_sessions(lo_month), load_quota(lo_month), load_reports(), report_pages, days, now)
+    page, count = render(load_sessions(lo_month), load_quota(lo_month), load_providers(lo_month), load_reports(), report_pages, days, now)
     return page, count, report_pages
 
 

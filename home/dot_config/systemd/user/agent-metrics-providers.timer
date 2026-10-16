@@ -1,0 +1,13 @@
+[Unit]
+Description=Half-hourly agent metrics provider-limit snapshot
+
+[Timer]
+OnCalendar=*-*-* *:00,30:00
+Unit=agent-metrics-providers.service
+# A missed run is not caught up: the readings are a time series of "now",
+# so a late one would only repeat the next.
+Persistent=false
+RandomizedDelaySec=2min
+
+[Install]
+WantedBy=timers.target

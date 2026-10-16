@@ -66,9 +66,14 @@ BASELINE_DAYS = 30
 WEEKLY_WINDOW_S = 7 * 86400
 # The only paths in the store this tool and its siblings write (reports,
 # labels, the trends page, findings); anything else is someone else's.
-OWN_DIRS = ("sessions", "quota", "ledger", "reports", "labels", "site", "findings")
+OWN_DIRS = ("sessions", "quota", "providers", "ledger", "reports", "labels", "site", "findings")
 QUOTA_LOCAL_KEEP_S = 35 * 86400
 QUOTA_WINDOWS = ("five_hour", "seven_day")
+# T3 Code keeps each provider's plan and quota windows fresh in these files;
+# the snapshot reads them rather than asking any provider itself.
+T3_CACHES = Path(os.environ.get("AGENT_METRICS_T3_CACHES", HOME / ".t3/caches"))
+LABEL_UNSAFE = re.compile(r"[^A-Za-z0-9 .:()·+-]")
+LABEL_MAX = 40
 LOCK_WAIT_S = int(os.environ.get("AGENT_METRICS_LOCK_WAIT", "600"))
 
 README = """# agent-metrics store
@@ -78,6 +83,8 @@ Machine-written by `agent-metrics collect`; do not edit by hand.
 - `sessions/YYYY-MM.jsonl`: one row per Claude Code session, filed by the UTC
   month it started in, sorted by start time. Numbers and identifiers only.
 - `quota/YYYY-MM.jsonl`: plan-quota readings, at most one per hour.
+- `providers/YYYY-MM.jsonl`: each coding-agent provider's plan and quota
+  windows, the highest reading per window and hour.
 - `ledger/YYYY-MM.jsonl`: the audit's own model spend.
 
 Costs are estimates at API list prices, an index of relative use and not a
@@ -86,7 +93,7 @@ across months stays in the month it started. Field reference: the dotfiles
 repo, `docs/agent-metrics.md`.
 """
 
-USAGE_SHORT = "agent-metrics [init | collect | budget [check|record]] [--help]"
+USAGE_SHORT = "agent-metrics [init | collect | providers [snapshot] | budget [check|record]] [--help]"
 
 
 def log(msg):
@@ -700,6 +707,119 @@ def quota_view():
             "age_hours": round(age_h, 1)}
 
 
+# ── Provider limits ──────────────────────────────────────────────────────────
+
+def clean_label(s):
+    """A display label is stored only when it is plain words; anything else is
+    left out, so an account name or address never reaches the store."""
+    s = str(s).strip()
+    if not s or len(s) > LABEL_MAX or LABEL_UNSAFE.search(s) or ID_CREDENTIAL.search(s):
+        return None
+    return s
+
+
+def provider_windows(limits):
+    """Quota windows of one provider cache, reduced to numbers and plain labels."""
+    out = []
+    for w in (limits or {}).get("windows") or []:
+        if not isinstance(w, dict) or not is_amount(w.get("usedPercent")):
+            continue
+        row = {"id": clean_id(w.get("id")), "used_pct": round(w["usedPercent"], 1)}
+        for key, field in (("kind", "kind"), ("label", "label")):
+            value = clean_label(w.get(field)) if w.get(field) is not None else None
+            if value:
+                row[key] = value
+        if is_amount(w.get("windowDurationMins")):
+            row["minutes"] = w["windowDurationMins"]
+        if parse_ts(w.get("resetsAt")) is not None:
+            row["resets_at"] = w["resetsAt"]
+        out.append(row)
+    return out
+
+
+def provider_reading(cache, at):
+    """One provider's plan, model count and quota windows as a log line, or None
+    for a file that is not a provider cache."""
+    if not isinstance(cache, dict) or not isinstance(cache.get("models"), list):
+        return None
+    auth = cache.get("auth") if isinstance(cache.get("auth"), dict) else {}
+    limits = cache.get("usageLimits") if isinstance(cache.get("usageLimits"), dict) else {}
+    unavailable = limits.get("unavailable")
+    row = {"at": at, "provider": clean_id(cache.get("instanceId") or cache.get("driver") or ""),
+           "name": clean_label(cache.get("displayName") or ""),
+           "plan": clean_label(auth.get("label") or auth.get("type") or ""),
+           "signed_in": auth.get("status") == "authenticated", "enabled": cache.get("enabled") is not False,
+           "models": len(cache["models"]), "windows": provider_windows(limits)}
+    if isinstance(unavailable, dict) and unavailable.get("reason"):
+        row["unavailable"] = clean_id(unavailable["reason"])
+    return {k: v for k, v in row.items() if v is not None}
+
+
+def local_providers():
+    return [r for r in read_jsonl(STATE / "providers.jsonl") if is_amount(r.get("at")) and isinstance(r.get("provider"), str)]
+
+
+def snapshot_providers():
+    """Append one reading per provider cache T3 Code keeps. Returns the readings."""
+    at = int(now().timestamp())
+    readings = []
+    for path in sorted(T3_CACHES.glob("*.json")) if T3_CACHES.is_dir() else []:
+        try:
+            cache = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        reading = provider_reading(cache, at)
+        if reading and reading["provider"] not in ("_invalid", "_redacted", ""):
+            readings.append(reading)
+    if readings:
+        STATE.mkdir(parents=True, exist_ok=True)
+        with open(STATE / "providers.jsonl", "a") as fh:
+            fh.write("".join(json.dumps(r, sort_keys=True, separators=(",", ":")) + "\n" for r in readings))
+    return readings
+
+
+def rollup_providers(write=True):
+    """Fold finished hours of the provider log into the store, keeping the
+    highest reading per window in each hour, and return how many provider-hours
+    were added. The hour in progress waits, so a stored hour never changes."""
+    readings = local_providers()
+    current_hour = int(now().timestamp()) // 3600
+    hours = {}
+    for r in readings:
+        h = int(r["at"]) // 3600
+        if h >= current_hour:
+            continue
+        agg = hours.setdefault((h, r["provider"]), {"hour": iso(h * 3600), "provider": r["provider"], "readings": 0, "windows": {}})
+        agg["readings"] += 1
+        for key in ("name", "plan", "signed_in", "enabled", "models", "unavailable"):
+            if key in r:
+                agg[key] = r[key]
+        for w in r.get("windows") or []:
+            if not isinstance(w, dict) or not is_amount(w.get("used_pct")):
+                continue
+            have = agg["windows"].get(w.get("id"))
+            if have is None or w["used_pct"] >= have["used_pct"]:
+                agg["windows"][w.get("id")] = w
+    added = 0
+    by_file = {}
+    for agg in hours.values():
+        agg["windows"] = sorted(agg["windows"].values(), key=lambda w: w.get("id", ""))
+        by_file.setdefault(month_file("providers", agg["hour"]), []).append(agg)
+    for path, new in by_file.items():
+        have = {(r.get("hour"), r.get("provider")): r for r in read_jsonl(path)}
+        fresh = [a for a in new if (a["hour"], a["provider"]) not in have]
+        added += len(fresh)
+        if fresh and write:
+            have.update(((a["hour"], a["provider"]), a) for a in fresh)
+            write_lines(path, [have[k] for k in sorted(have)])
+    cutoff = now().timestamp() - QUOTA_LOCAL_KEEP_S
+    if write and any(r["at"] < cutoff for r in readings):
+        tmp = STATE / "providers.jsonl.tmp"
+        tmp.write_text("".join(json.dumps(r, sort_keys=True, separators=(",", ":")) + "\n" for r in readings if r["at"] >= cutoff))
+        os.replace(tmp, STATE / "providers.jsonl")
+    return added
+
+
 # ── Commands ─────────────────────────────────────────────────────────────────
 
 def cmd_home(_args):
@@ -794,6 +914,7 @@ def collect(args):
     written, unchanged = upsert(rows, write=not args.dry_run)
     out = {"files_scanned": len(sessions), "sessions_written": written, "sessions_unchanged": unchanged,
            "files_skipped": skipped, "quota_hours_added": rollup_quota(write=not args.dry_run),
+           "provider_hours_added": rollup_providers(write=not args.dry_run),
            "dry_run": bool(args.dry_run)}
     if args.dry_run:
         emit(out)
@@ -806,6 +927,23 @@ def collect(args):
 
 def cmd_row(args):
     print(json.dumps(build_row(args.path, subagent_files(args.path)), sort_keys=True))
+    return 0
+
+
+def cmd_providers(args):
+    if getattr(args, "action", None) == "snapshot":
+        readings = snapshot_providers()
+        emit({"providers": len(readings), "log": tilde(STATE / "providers.jsonl"),
+              "help": ["Run `agent-metrics collect` to fold finished hours into the store"]})
+        return 0
+    latest = {}
+    for r in local_providers():
+        if r["at"] >= latest.get(r["provider"], {"at": -1})["at"]:
+            latest[r["provider"]] = r
+    rows = [{"provider": p, "plan": r.get("plan"), "models": r.get("models"),
+             "windows": " ".join(f"{w.get('id')}={w['used_pct']:g}%" for w in r.get("windows") or []) or "none",
+             "age_hours": round(max(0, now().timestamp() - r["at"]) / 3600, 1)} for p, r in sorted(latest.items())]
+    emit({"providers": rows or "no readings yet (run `agent-metrics providers snapshot`)"})
     return 0
 
 
@@ -966,6 +1104,10 @@ def build_parser():
     c.add_argument("--since", type=int, default=3, metavar="DAYS")
     c.add_argument("--dry-run", action="store_true")
     c.add_argument("--no-push", action="store_true")
+    pv = sub.add_parser("providers", help="show, or snapshot, each T3 Code provider's plan and quota windows")
+    pv.set_defaults(func=cmd_providers)
+    pvsub = pv.add_subparsers(metavar="action", dest="action", parser_class=Parser)
+    pvsub.add_parser("snapshot", help="append a reading per provider to the local log")
     r = sub.add_parser("row", help="print the row one transcript would produce, as JSON")
     r.add_argument("path")
     r.set_defaults(func=cmd_row)

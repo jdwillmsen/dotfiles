@@ -4,6 +4,8 @@ set -euo pipefail
 # inert until daemon-reload runs. Re-run whenever a unit changes.
 # {{ include "dot_config/systemd/user/agent-metrics-collect.service" | sha256sum }}
 # {{ include "dot_config/systemd/user/agent-metrics-collect.timer" | sha256sum }}
+# {{ include "dot_config/systemd/user/agent-metrics-providers.service" | sha256sum }}
+# {{ include "dot_config/systemd/user/agent-metrics-providers.timer" | sha256sum }}
 
 if [ "$(uname -s)" != "Linux" ]; then
     echo "agent-metrics: not Linux — skipping"
@@ -33,6 +35,9 @@ systemctl --user daemon-reload
 # Deliberately no immediate start: the first run should be the manual
 # backfill, whose counts are worth reading before the timer takes over.
 systemctl --user enable --now agent-metrics-collect.timer
+# Unlike collect this has no backfill to read first: it only logs the current
+# limits, so it starts right away.
+systemctl --user enable --now agent-metrics-providers.timer
 
 if [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" != "yes" ]; then
     echo "agent-metrics: linger is off — the timer stops at logout; run: sudo scripts/provision-persistence.sh"

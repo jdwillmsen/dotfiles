@@ -1,0 +1,15 @@
+[Unit]
+Description=Agent metrics provider-limit snapshot
+Documentation=file://%h/.local/share/chezmoi/docs/agent-metrics.md
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/agent-metrics providers snapshot
+# A user manager starts with a bare PATH.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Reads local files and appends one line each; nothing here needs more.
+TimeoutStartSec=2min
+NoNewPrivileges=yes
+PrivateTmp=yes
+Nice=10
+IOSchedulingClass=idle

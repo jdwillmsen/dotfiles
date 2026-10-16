@@ -1,0 +1,9 @@
+[Unit]
+Description=Check the devbox's services came back after boot
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/devbox-health-boot
+# devbox-health resolves some checks through the network; bound it so a hung
+# probe cannot hold the unit activating indefinitely.
+TimeoutStartSec=300

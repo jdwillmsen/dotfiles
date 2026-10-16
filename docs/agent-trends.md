@@ -13,7 +13,11 @@ system light or dark setting. Every chart has a data table under it.
 ## Content
 
 Tiles for the last 7 days against the 7 before (estimated spend, sessions,
-cost per linked PR, weekly quota peak); estimated spend per day by
+cost per linked PR, weekly quota peak); a Provider limits section with each
+provider's plan, quota windows (a bar, percent used, time to reset) and a
+per-day chart of each one's headline window, from the provider readings
+(`docs/agent-metrics.md`, Provider limits; a reading over 36 hours old is
+marked, and a provider that reports no windows says so); estimated spend per day by
 population; per week by model family; cache read share per week; plan quota
 peaks per day; follow-up fix rates, failed-check share and no-mistakes
 first-pass rate from stored weekly reports; flagged days from stored daily

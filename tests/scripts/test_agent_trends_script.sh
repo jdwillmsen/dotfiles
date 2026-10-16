@@ -64,7 +64,7 @@ PY
 
 # ── Fixture store ──
 # Last 7 days = (10-02 12:00, 10-09 12:00]; the 7 before = (09-25 12:00, 10-02 12:00].
-mkdir -p "$store/sessions" "$store/quota" "$store/reports"
+mkdir -p "$store/sessions" "$store/quota" "$store/providers" "$store/reports"
 python3 - "$store" <<'PY'
 import json, sys
 store = sys.argv[1]
@@ -103,6 +103,18 @@ with open(f"{store}/quota/2026-10.jsonl", "w") as f:
         f.write(json.dumps(r) + "\n")
 with open(f"{store}/quota/2026-09.jsonl", "w") as f:
     f.write(json.dumps({"hour": "2026-09-30T10:00:00Z", "readings": 1, "five_hour_pct": 5, "seven_day_pct": 48}) + "\n")
+with open(f"{store}/providers/2026-10.jsonl", "w") as f:
+    def prov(hour, provider, name, plan, windows, **kw):
+        f.write(json.dumps({"hour": hour, "provider": provider, "name": name, "plan": plan, "readings": 1, "models": 3,
+                            "signed_in": True, "windows": windows, **kw}) + "\n")
+    week = {"minutes": 10080, "resets_at": "2026-10-14T00:00:00Z"}
+    prov("2026-10-08T10:00:00Z", "claudeAgent", "Claude", "Claude Max Subscription",
+         [{"id": "five_hour", "label": "Session", "used_pct": 34, "minutes": 300}, {"id": "seven_day", "label": "Weekly", "used_pct": 61, **week}])
+    prov("2026-10-09T09:00:00Z", "claudeAgent", "Claude", "Claude Max Subscription",
+         [{"id": "five_hour", "label": "Session", "used_pct": 12, "minutes": 300, "resets_at": "2026-10-09T14:00:00Z"}, {"id": "seven_day", "label": "Weekly", "used_pct": 66, **week}])
+    prov("2026-10-09T09:00:00Z", "cursor", "Cursor", "Cursor Free Subscription",
+         [{"id": "totalPercentUsed", "label": "Overall", "used_pct": 100, "resets_at": "2026-10-01T00:00:00Z"}])
+    prov("2026-10-09T09:00:00Z", "opencode", "<script>alert(1)</script>", "opencode", [], unavailable="unsupported")
 def report(window, label, **kw):
     r = {"schema": 1, "window": window, "label_date": label, "current": {}, "previous": {}, "flags": [], "delivery": None}
     r.update(kw)
@@ -175,6 +187,11 @@ assert "CANARY_MESSAGE" not in page, "free-text flag message reached the page"
 has("acme/app", "no-mistakes", "agent-audit", "claude-opus-5")
 assert "400.00" not in page, "a session outside the window was counted"
 has("list-price estimates", "not a bill", "2026-10-09T12:00:00Z")
+# Provider limits: newest reading per provider, with its reset and a bar.
+has("Where each plan stands", "Claude Max Subscription", "66%", "in 4.5 days", "has reset since",
+    "limits not reported by the provider", 'class="bar hot"', "Plan limit used per day")
+assert "61%" in page, "an older reading is missing from the per-day table"
+assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page.split("Where each plan stands", 1)[1], "provider name not escaped"
 PY
 python3 "$tmp/check.py" "$tmp/page/index.html" || fail "page assertions failed"
 [ "$(git -C "$store" rev-parse HEAD)" = "$(git -C "$remote" rev-parse main)" ] || fail "--out must not publish"
@@ -280,6 +297,11 @@ echo '{nope' >"$store/reports/2026-10-08-daily.json"
 run 2 build --out "$tmp/bad"
 grep -q "reports/2026-10-08-daily.json" "$out" || fail "a bad report is not named" "$(cat "$out")"
 git -C "$store" checkout -q -- reports
+
+echo '{"hour":"2026-10-08T10:00:00Z","provider":"x","windows":[{"id":"a","used_pct":"lots"}]}' >"$store/providers/2026-10.jsonl"
+run 2 build --out "$tmp/bad"
+grep -q "providers/2026-10.jsonl" "$out" || fail "a bad provider window is not named" "$(cat "$out")"
+git -C "$store" checkout -q -- providers
 
 # ── Chart range ──
 run 0 build --days 180 --out "$tmp/page180"

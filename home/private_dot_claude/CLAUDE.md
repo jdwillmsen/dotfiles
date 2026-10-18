@@ -32,7 +32,9 @@ specific to Claude Code.
 
 - Preferred ship path: `/no-mistakes` pipeline (intent → rebase → review →
   test+evidence → docs → lint → push → PR → CI babysit). Rewrite the long body
-  it generates to the PR-body rule (`gh pr edit --body-file`).
+  it generates to the PR-body rule (`gh pr edit --body-file`). It stops at a
+  green PR; carry on through merge and production rollout per the shared
+  ship-to-production rule.
 - Worktrees: native `EnterWorktree` in agent sessions (branches fresh from
   origin); `superpowers:using-git-worktrees` when one is needed mid-task.
   Concurrent subagents touching git each get `isolation: "worktree"`. Neither

@@ -13,9 +13,16 @@ here must hold for any model; tool-specific rules live in that tool's own file. 
   a fix before calling it done. Report failures with their output.
 - Optimize for correctness and review cost, not development time: models
   inherit human time estimates and pick cheap, low-quality paths.
-- Ask before anything hard to reverse: force-pushing, deleting branches or
-  data, deploying, sending messages, or closing/deleting issues, PRs or
-  releases. The normal push → PR → CI flow needs no extra confirmation.
+- **Ship to production by default.** A requested change is done when it is
+  running in production, not when its PR is open: push → PR → green CI →
+  review → merge → release → the repo's normal rollout (e.g. a GitOps
+  image-bump PR) → confirm the new version is live. None of these steps needs
+  extra confirmation. Follow the repo's own rollout rules, and stop and ask
+  only when a rollout would cut off people mid-use (e.g. restarting a game
+  server with players on), migrate or delete data, or cannot be rolled back.
+- Ask before anything else hard to reverse: force-pushing, deleting
+  branches or data, sending messages, or closing/deleting issues, PRs or
+  releases.
 
 ## Code Comments
 

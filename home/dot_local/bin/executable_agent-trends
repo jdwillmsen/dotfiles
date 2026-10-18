@@ -163,9 +163,10 @@ def load_providers(lo_month):
                     unreadable(path, "a provider window is not an object")
                 windows.append({**w, "used_pct": amount(w, "used_pct", path)})
             readings.append({**r, "ts": ts, "windows": windows})
-    stored_to = max((x["ts"] for x in readings), default=0)
+    stored = {(x["provider"], int(x["ts"]) // 3600) for x in readings}
     for r in am.local_providers():
-        if r["at"] > stored_to + 3600 and isinstance(r.get("windows"), list):
+        # An hour already folded into the store is represented there, per provider.
+        if (r["provider"], int(r["at"]) // 3600) not in stored and isinstance(r.get("windows"), list):
             readings.append({**r, "ts": r["at"], "windows": [w for w in r["windows"] if isinstance(w, dict) and am.is_amount(w.get("used_pct"))]})
     return readings
 

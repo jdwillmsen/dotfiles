@@ -197,6 +197,22 @@ python3 "$tmp/check.py" "$tmp/page/index.html" || fail "page assertions failed"
 [ "$(git -C "$store" rev-parse HEAD)" = "$(git -C "$remote" rev-parse main)" ] || fail "--out must not publish"
 [ ! -e "$store/site" ] || fail "--out wrote into the store"
 
+# ── Local readings fill the hours the store does not hold, per provider ──
+mkdir -p "$AGENT_METRICS_STATE"
+at() { date -u -d "$1" +%s; }
+{
+    printf '{"at":%s,"provider":"grok","name":"Grok","plan":"Grok account","windows":[{"id":"w","label":"Odd window","used_pct":77}]}\n' "$(at 2026-10-09T09:30:00Z)"
+    printf '{"at":%s,"provider":"claudeAgent","name":"Claude","plan":"Claude Max Subscription","windows":[{"id":"seven_day","label":"Weekly","used_pct":99,"minutes":10080}]}\n' "$(at 2026-10-09T09:40:00Z)"
+} >"$AGENT_METRICS_STATE/providers.jsonl"
+run 0 build --out "$tmp/pagelocal"
+python3 - "$tmp/pagelocal/index.html" <<'PY' || fail "local provider readings were merged wrongly"
+import sys
+page = open(sys.argv[1]).read()
+assert "Odd window" in page and "77%" in page, "another provider's stored hour hid a local reading"
+assert "99%" not in page, "a local reading repeated an hour the store already holds for that provider"
+PY
+rm -f "$AGENT_METRICS_STATE/providers.jsonl"
+
 # ── Sections without data say so ──
 rm -f "$store/reports/"*weekly.json
 run 0 build --out "$tmp/page2"

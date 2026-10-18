@@ -722,9 +722,9 @@ def provider_windows(limits):
     """Quota windows of one provider cache, reduced to numbers and plain labels."""
     out = []
     for w in (limits or {}).get("windows") or []:
-        if not isinstance(w, dict) or not is_amount(w.get("usedPercent")):
+        if not isinstance(w, dict) or not is_amount(w.get("usedPercent")) or not isinstance(w.get("id"), str):
             continue
-        row = {"id": clean_id(w.get("id")), "used_pct": round(w["usedPercent"], 1)}
+        row = {"id": clean_id(w["id"]), "used_pct": round(w["usedPercent"], 1)}
         for key, field in (("kind", "kind"), ("label", "label")):
             value = clean_label(w.get(field)) if w.get(field) is not None else None
             if value:
@@ -755,6 +755,21 @@ def provider_reading(cache, at):
     return {k: v for k, v in row.items() if v is not None}
 
 
+class ProviderLogLock:
+    """The snapshot appends to the provider log while a collect prunes it by
+    replacing the file, so an append landing in between would be lost. A
+    separate lock file, because replacing the log changes its inode."""
+
+    def __enter__(self):
+        STATE.mkdir(parents=True, exist_ok=True)
+        self.fh = open(STATE / "providers.lock", "w")
+        fcntl.flock(self.fh, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *_exc):
+        self.fh.close()
+
+
 def local_providers():
     return [r for r in read_jsonl(STATE / "providers.jsonl") if is_amount(r.get("at")) and isinstance(r.get("provider"), str)]
 
@@ -772,8 +787,7 @@ def snapshot_providers():
         if reading and reading["provider"] not in ("_invalid", "_redacted", ""):
             readings.append(reading)
     if readings:
-        STATE.mkdir(parents=True, exist_ok=True)
-        with open(STATE / "providers.jsonl", "a") as fh:
+        with ProviderLogLock(), open(STATE / "providers.jsonl", "a") as fh:
             fh.write("".join(json.dumps(r, sort_keys=True, separators=(",", ":")) + "\n" for r in readings))
     return readings
 
@@ -814,9 +828,12 @@ def rollup_providers(write=True):
             write_lines(path, [have[k] for k in sorted(have)])
     cutoff = now().timestamp() - QUOTA_LOCAL_KEEP_S
     if write and any(r["at"] < cutoff for r in readings):
-        tmp = STATE / "providers.jsonl.tmp"
-        tmp.write_text("".join(json.dumps(r, sort_keys=True, separators=(",", ":")) + "\n" for r in readings if r["at"] >= cutoff))
-        os.replace(tmp, STATE / "providers.jsonl")
+        with ProviderLogLock():
+            # Read again under the lock: a snapshot may have appended since the first read.
+            keep = [r for r in local_providers() if r["at"] >= cutoff]
+            tmp = STATE / "providers.jsonl.tmp"
+            tmp.write_text("".join(json.dumps(r, sort_keys=True, separators=(",", ":")) + "\n" for r in keep))
+            os.replace(tmp, STATE / "providers.jsonl")
     return added
 
 

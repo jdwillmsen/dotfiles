@@ -406,7 +406,7 @@ cat >"$caches/claudeAgent.json" <<'JSON'
 {"displayName":"Claude","instanceId":"claudeAgent","enabled":true,"models":[{},{},{}],
  "auth":{"status":"authenticated","email":"secret.person@example.invalid","label":"Claude Max Subscription"},
  "usageLimits":{"windows":[{"id":"five_hour","kind":"session","label":"Session","windowDurationMins":300,"usedPercent":57.99999999999999,"resetsAt":"2026-10-09T15:00:00.000Z"},
- {"id":"seven_day_fable","kind":"weekly","label":"Weekly \u00b7 Fable","usedPercent":0},{"id":"bad","usedPercent":"lots"}]}}
+ {"id":"seven_day_fable","kind":"weekly","label":"Weekly \u00b7 Fable","usedPercent":0},{"id":"bad","usedPercent":"lots"},{"usedPercent":5},{"id":7,"usedPercent":6}]}}
 JSON
 cat >"$caches/opencode.json" <<'JSON'
 {"displayName":"OpenCode","instanceId":"opencode","models":[{}],"auth":{"status":"authenticated","type":"opencode"},
@@ -422,6 +422,16 @@ grep -q "secret.person" "$plog" && fail "an account address reached the provider
 grep -q '"used_pct":58' "$plog" || fail "a percent was not rounded to one decimal" "$(cat "$plog")"
 grep -q '"unavailable":"unsupported"' "$plog" || fail "an unavailable limit was not recorded" "$(cat "$plog")"
 grep -q '"id":"bad"' "$plog" && fail "a window without a numeric percent was logged"
+grep -q '"used_pct":5[,}]\|"used_pct":6[,}]\|"id":"None"\|"id":"7"' "$plog" && fail "a window without a string id was logged" "$(cat "$plog")"
+# The snapshot waits for the lock a prune holds, so it cannot be lost to the rewrite.
+flock "$AGENT_METRICS_STATE/providers.lock" sleep 2 &
+sleep 0.5
+began="$(date +%s.%N)"
+run 0 providers snapshot
+python3 -c "import sys; sys.exit(0 if float(sys.argv[2]) - float(sys.argv[1]) >= 1 else 1)" "$began" "$(date +%s.%N)" || fail "a snapshot did not wait for the provider log lock"
+wait
+[ "$(wc -l <"$plog")" = 4 ] || fail "the waiting snapshot did not append" "$(cat "$plog")"
+sed -i '3,4d' "$plog"
 run 0 providers
 grep -q "claudeAgent,Claude Max Subscription,3,five_hour=58% seven_day_fable=0%" "$out" || fail "providers view" "$(cat "$out")"
 # Three readings in one finished hour keep the highest per window; the one in

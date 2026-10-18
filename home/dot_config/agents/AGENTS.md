@@ -19,7 +19,8 @@ here must hold for any model; tool-specific rules live in that tool's own file. 
   image-bump PR) → confirm the new version is live. None of these steps needs
   extra confirmation. Follow the repo's own rollout rules, and stop and ask
   only when a rollout would cut off people mid-use (e.g. restarting a game
-  server with players on), migrate or delete data, or cannot be rolled back.
+  server with players on), rewrite or delete existing data (migrations,
+  backfills, cleanups), or cannot be rolled back.
 - Ask before anything else hard to reverse: force-pushing, deleting
   branches or data, sending messages, or closing/deleting issues, PRs or
   releases.

@@ -14,14 +14,18 @@ write_line=$(grep -n '^\s*printf .* >"\$DROPIN"' "$script" | head -1 | cut -d: -
 # A bare DNS= with no Domains= replaces the machine's default nameservers, which
 # takes all resolution down with the HAProxy VM instead of just jdwlabs.com.
 grep -q '^Domains=~\$DOMAIN$' "$script" || { echo "FAIL: drop-in must scope DNS to a routing domain"; exit 1; }
-grep -q '^DNS=\$RESOLVER \$FALLBACK$' "$script" || { echo "FAIL: drop-in must list the gateway as a fallback resolver"; exit 1; }
+# systemd-resolved stays on whichever server last answered, so a gateway
+# fallback here pins jdwlabs.com to the public WAN answer after one blip on the
+# HAProxy VM, and the router drops most hairpinned connections to that address.
+grep -q '^DNS=\$RESOLVER$' "$script" || { echo "FAIL: drop-in must list only the LAN resolver"; exit 1; }
+! grep -q 'FALLBACK' "$script" || { echo "FAIL: gateway fallback must not return"; exit 1; }
 
 # Writing the file proves nothing about which resolver actually wins the lookup.
 grep -q 'resolvectl query' "$script" || { echo "FAIL: no live resolution check"; exit 1; }
 verify_line=$(grep -n 'resolvectl query' "$script" | head -1 | cut -d: -f1)
 [ "$write_line" -lt "$verify_line" ] || { echo "FAIL: verification must follow the write"; exit 1; }
 
-for var in RESOLVER FALLBACK DOMAIN DROPIN; do
+for var in RESOLVER DOMAIN DROPIN; do
     grep -q "^$var=\${$var:-" "$script" || { echo "FAIL: no $var override"; exit 1; }
 done
 

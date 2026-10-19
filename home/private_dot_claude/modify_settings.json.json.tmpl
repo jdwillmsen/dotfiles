@@ -16,8 +16,23 @@ set -euo pipefail
 # gating here keeps the two in sync and falls back to Claude Code's own
 # default statusline instead. The DOTFILES WARNING prefix is grep-able from
 # `chezmoi apply -v` output.
+#
+# A gaming machine ignores that build script outright, so Go being on PATH
+# there for some other reason still never produces the binary; the role, not
+# the toolchain, decides. The directive sits inside a single-quoted string so
+# running this file unrendered stays valid bash and behaves as a non-gaming
+# role, which is what tests/template/test_settings_merge.sh relies on.
+#
+# Gaming also strips a claude-status statusLine already on disk — one carried
+# over in a restored ~/.claude would otherwise survive the merge and point at
+# a binary that machine never builds. No warning there: the default
+# statusline is the intended state on that role, not a degraded one.
+MACHINE_ROLE='{{ .machineRole }}'
 STATUS_LINE_KEYS=""
-if command -v go >/dev/null 2>&1; then
+STRIP_CLAUDE_STATUS=0
+if [ "$MACHINE_ROLE" = gaming ]; then
+    STRIP_CLAUDE_STATUS=1
+elif command -v go >/dev/null 2>&1; then
     STATUS_LINE_KEYS='
   "statusLine": { "type": "command", "command": "claude-status", "refreshInterval": 10 },
   "subagentStatusLine": { "type": "command", "command": "claude-status -subagents" },'
@@ -134,6 +149,11 @@ merged = merge(merge(defaults, existing), enforced, union_lists=True)
 for section, keys in removed.items():
     for k in keys:
         merged.get(section, {}).pop(k, None)
+if sys.argv[6] == "1":
+    for k in ("statusLine", "subagentStatusLine"):
+        v = merged.get(k)
+        if isinstance(v, dict) and str(v.get("command", "")).split(" ")[0] == "claude-status":
+            del merged[k]
 json.dump(merged, sys.stdout, indent=2)
 sys.stdout.write("\n")
-' "$DEFAULTS" "$EXISTING" "$ENFORCED" "$REMOVED" "$SKILL_TRIM_DIR"
+' "$DEFAULTS" "$EXISTING" "$ENFORCED" "$REMOVED" "$SKILL_TRIM_DIR" "$STRIP_CLAUDE_STATUS"

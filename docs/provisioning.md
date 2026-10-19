@@ -182,6 +182,13 @@ These run as part of `chezmoi apply` and need no root:
 | `run_once_47-install-go.sh` | Go toolchain |
 | `run_once_49-install-dev-tools.sh.tmpl` | docker, node/pnpm, rust, helm, gh, kubectl, talosctl, sops, age, Java — opt-in only |
 
+A `gaming` machine runs only `42` from this table (plus `40` rtk and `44` the
+Nerd Font): `43`, `45`, `46`, `47` and `49` are ignored for that role in
+`home/.chezmoiignore`, by script *target* name (`47-install-go.sh`), which is
+what chezmoi matches ignore patterns against. Without `47` there is no Go, so
+the statusline build is ignored too and Claude Code keeps its default
+statusline.
+
 `42` is table-driven across brew, winget, scoop, apt, and cargo, in that order —
 prebuilt-binary managers first, cargo last because it compiles from source. The
 apt branch is used only when `sudo -n` succeeds, so a machine without

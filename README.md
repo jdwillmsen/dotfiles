@@ -69,8 +69,15 @@ The source tree templates itself per machine, selected by a `machineRole` prompt
 | `personal` | Default identity, no extra work-only git config. |
 | `work` | Work git identity + credential config layered in (`home/dot_gitconfig.tmpl`). |
 | `ephemeral` | Auto-detected in CI/devcontainers/Codespaces (`CI`, `REMOTE_CONTAINERS`, `CODESPACES` env vars); also selectable explicitly. |
+| `gaming` | Minimal Windows gaming PC: shell, git, prompt, Claude Code (settings, plugins, MCP, skills) and the small CLI set. Skips Go, Python tooling, cloud CLIs, agent CLIs, the statusline build, tmux, T3, the agent-* timers, Codex/OpenCode/Grok config and whisper (`home/.chezmoiignore`). Claude Code keeps its default statusline. Needs no age identity. |
 
 One further prompt at `init` time: `installDevTooling` (default `false`) gates the dev/infra tooling catalog described in [`docs/provisioning.md`](docs/provisioning.md#dev-tooling-catalog). Answering it on an existing machine means re-running `chezmoi init`.
+
+A gaming PC bootstraps non-interactively, with both prompts answered on the command line:
+
+```bash
+chezmoi init --apply --no-tty --promptString machineRole=gaming --promptBool installDevTooling=false jdwillmsen
+```
 
 Other data derived automatically at init: `isWSL` (Windows Subsystem for Linux detection) gates WSL-specific templating.
 

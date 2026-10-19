@@ -18,6 +18,57 @@ run_once_49-install-dev-tools.sh.tmpl
 {{ if not (get . "installDevTooling") }}
 run_once_49-install-dev-tools.sh.tmpl
 {{ end }}
+{{/* A gaming PC gets the shell, git, prompt, SSH and Claude Code layer and
+     nothing that builds, deploys or runs agents unattended. Scripts are
+     listed by *target* name (the source name minus run_*_ attributes and
+     .tmpl), because that is what chezmoi matches ignore patterns against: a
+     source-name entry matches nothing and the script still runs.
+     work-identity is ignored because it is the only encrypted_ target, and a
+     fresh gaming machine has no age identity to decrypt it with — leaving it
+     managed would fail the bootstrap apply. */}}
+{{ if eq .machineRole "gaming" }}
+10-install-tpm.sh
+11-install-tmux-plugins.sh
+20-build-claude-status.sh
+21-build-opencode-status.sh
+43-install-agent-clis.sh
+45-install-python-tools.sh
+46-install-cloud-clis.sh
+47-install-go.sh
+49-install-dev-tools.sh
+50-install-whisper-local.sh
+51-enable-t3-session-expiry.sh
+52-enable-agent-audit.sh
+52-enable-t3-providers.sh
+53-enable-agent-metrics.sh
+54-enable-agent-report.sh
+54-set-no-mistakes-agent.sh
+55-enable-agent-notify.sh
+55-set-no-mistakes-commit-trailers.sh
+56-enable-agent-label.sh
+56-generate-claude-jira.sh
+57-enable-agent-propose.sh
+.config/git/work-identity
+.tmux.conf
+.tmux/**
+.codex/**
+.grok/**
+.config/opencode/**
+.config/agent-metrics/**
+.config/aipick/**
+.config/systemd/**
+.config/streams.json
+.config/claude-jira.json
+.local/bin/agent-*
+.local/bin/aipick
+.local/bin/check-openrouter-freshness
+.local/bin/refresh-openrouter-free
+.local/bin/devbox-health
+.local/bin/stream
+.local/bin/t3-session-expiry
+.local/bin/tmux-cheat
+AppData/Roaming/whisperkey/**
+{{ end }}
 {{ if ne .chezmoi.os "windows" }}
 AppData/**
 {{ end }}

@@ -86,6 +86,12 @@ included, not just `work` — needs a working age identity for `apply` to
 succeed at all; `machineRole` only changes who ends up consuming the
 decrypted values, not whether decryption happens.
 
+The `gaming` role is the exception: it ignores `.config/git/work-identity`
+in `home/.chezmoiignore`, and an ignored target is never read, so nothing on
+that role decrypts and a fresh gaming PC applies with no age identity at all.
+`tests/template/test_gaming_role.sh` renders every gaming target against an
+identity path that does not exist to keep it that way.
+
 ## Agent CLI API keys
 
 Keys that agent CLIs read from the environment (today the NVIDIA NIM key

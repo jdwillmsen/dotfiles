@@ -4,8 +4,9 @@ here="$(cd "$(dirname "$0")/../.." && pwd)"
 # Existing file has a user theme + a user-overridden model; script must keep both, add statusLine.
 # The model here must differ from the DEFAULTS model, or the override assertion
 # passes on the default value and proves nothing.
-# The modify script contains no template directives, so running it directly with the
-# current file content on stdin is byte-faithful to what chezmoi executes.
+# The modify script's only template directive sits inside a single-quoted string,
+# so running it unrendered is valid bash and behaves exactly as a non-gaming role
+# does; the gaming render is covered by test_gaming_role.sh.
 existing='{"theme":"light","model":"haiku"}'
 out="$(printf '%s' "$existing" | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
 # Windows ships a python3 Store-stub that fails on exec; probe for a real one.

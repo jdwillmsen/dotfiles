@@ -19,7 +19,6 @@ set -euo pipefail
 # Idempotent — re-running with the drop-in already in place is a no-op.
 
 RESOLVER=${RESOLVER:-192.168.1.199}
-FALLBACK=${FALLBACK:-192.168.1.254}
 DOMAIN=${DOMAIN:-jdwlabs.com}
 DROPIN=${DROPIN:-/etc/systemd/resolved.conf.d/10-jdwlabs-lan.conf}
 
@@ -31,13 +30,19 @@ command -v resolvectl &>/dev/null || die "needs resolvectl (systemd-resolved)"
 
 # Scoping to a routing domain rather than replacing the machine's default
 # nameservers is the whole safety argument: if the resolver on the HAProxy VM
-# is down, only jdwlabs.com degrades to the gateway's public answer, and every
-# other name still resolves exactly as before.
+# is down, only jdwlabs.com stops resolving, and every other name still
+# resolves exactly as before.
+#
+# No gateway fallback: systemd-resolved stays on whichever server last
+# answered, so one blip on the HAProxy VM would pin jdwlabs.com to the public
+# WAN answer indefinitely. That answer is useless here anyway — the router
+# drops most hairpinned connections to its own WAN address, and that VM is
+# the only path to the cluster whichever name resolves.
 desired=$(
     cat <<EOF
 # Managed by scripts/provision-lan-dns.sh — see docs/provisioning.md.
 [Resolve]
-DNS=$RESOLVER $FALLBACK
+DNS=$RESOLVER
 Domains=~$DOMAIN
 EOF
 )

@@ -147,7 +147,7 @@ sudo scripts/provision-lan-dns.sh
 ```
 
 Idempotent; re-run it any time. Environment overrides: `RESOLVER` (defaults to
-`192.168.1.199`), `FALLBACK`, `DOMAIN` and `DROPIN`.
+`192.168.1.199`), `DOMAIN` and `DROPIN`.
 
 Writes a `systemd-resolved` drop-in that routes `jdwlabs.com` to the dnsmasq
 resolver on the HAProxy VM, then verifies `cluster.jdwlabs.com` actually
@@ -159,10 +159,17 @@ resolver setting per machine rather than one router change.
 
 The drop-in uses a routing domain (`Domains=~jdwlabs.com`) instead of replacing
 the machine's default nameservers. That is the whole safety argument: if the
-resolver on the HAProxy VM goes down, only `jdwlabs.com` degrades back to the
-gateway's public answer, and every other name resolves exactly as before.
-Listing the gateway as a second server in the same block makes that fallback
-automatic rather than a manual rollback.
+resolver on the HAProxy VM goes down, only `jdwlabs.com` stops resolving, and
+every other name resolves exactly as before.
+
+The block deliberately has no gateway fallback. `systemd-resolved` stays on
+whichever server last answered, so a fallback turns one blip on the HAProxy VM
+into a permanent switch to the public WAN answer — and the gateway's NAT
+loopback rewrites every hairpinned connection to the same source address and
+port, so it drops nearly all of them for about 30 seconds after each one.
+Losing the VM loses the cluster and every ingress on the LAN regardless of
+which address the name resolves to. A machine provisioned while the fallback
+existed keeps it until the script is re-run, which rewrites the drop-in.
 
 The script verifies with `resolvectl query` rather than trusting the file it
 just wrote — a correct drop-in still loses to a VPN client rewriting

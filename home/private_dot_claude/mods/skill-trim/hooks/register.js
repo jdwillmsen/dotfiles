@@ -16,6 +16,21 @@ export const HIDDEN_SKILLS = [
   'mattpocock-skills:writing-for-agents',
   'superpowers:diagnosing-superpowers',
   'superpowers:writing-skills',
+  // Desktop-app-only tools that never exist on a Linux devbox.
+  'anthropic-skills:built-in-browser',
+  'anthropic-skills:chrome-browser',
+  'anthropic-skills:computer-use',
+  // Never invoked across this box's session history.
+  'anthropic-skills:docs',
+  'anthropic-skills:docx',
+  'anthropic-skills:import-memory',
+  'anthropic-skills:morning',
+  'anthropic-skills:pdf',
+  'anthropic-skills:pptx',
+  'anthropic-skills:skill-creator',
+  'anthropic-skills:xlsx',
+  // Pushes installing skills, which the global rules restrict.
+  'find-skills',
 ]
 
 import { sha256 } from './sha256.js'

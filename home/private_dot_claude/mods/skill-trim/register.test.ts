@@ -36,8 +36,14 @@ test('keeps visible skills and their continuation lines', () => {
   expect(out).toContain('The following skills are available')
 })
 
-test('hides exactly the fifteen agreed skills', () => {
-  expect(HIDDEN_SKILLS.length).toBe(15)
+test('hides exactly the twenty-seven agreed skills', () => {
+  expect(HIDDEN_SKILLS.length).toBe(27)
+})
+
+test('hides un-namespaced skills too', () => {
+  const out = trimListing('- find-skills: Helps users install skills.\n- axi: Agent eXperience Interface.')
+  expect(out).not.toContain('find-skills')
+  expect(out).toContain('- axi:')
 })
 
 test('the skill listing reaching Claude is trimmed', async ($, on) => {

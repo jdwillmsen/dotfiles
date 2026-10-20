@@ -70,14 +70,15 @@ Usage figures are from a 30-day transcript review.
 skills under any key spelling (`tdd`, `mattpocock-skills:tdd`, …). The
 **skill-trim** mod (`~/.claude/mods/skill-trim`, loaded in every session by
 `CLAUDE_CODE_PLUGIN_DIRS` in the settings template) does it instead: a
-`prompt.attachment` hook drops 15 unused atlassian, mattpocock-skills and
-superpowers skills from the skill listing, and they still run when invoked by
-name. A `classic.SessionStart` hook swaps superpowers' 3.4 KB
+`prompt.attachment` hook drops 27 skills from the skill listing: unused
+atlassian, mattpocock-skills and superpowers skills, the anthropic-skills that
+need the desktop app or were never invoked, and `find-skills`. They still run
+when invoked by name. A `classic.SessionStart` hook swaps superpowers' 3.4 KB
 `<EXTREMELY_IMPORTANT>` bootstrap for a 551 B version with the same routing
 (check for a matching skill first, process skills before implementation ones,
 CLAUDE.md wins); a controlled run on superpowers' issue tracker found the calm
 wording fired the right skill as often as the original. Together that is about
-8.4 KB less context per session.
+16 KB less context per session.
 
 Edit `home/private_dot_claude/mods/skill-trim/hooks/register.js` in the
 chezmoi source, never the deployed copy, then run `chezmoi apply -v` before
@@ -96,10 +97,11 @@ always-loaded ruleset cost more than it saved.
 
 ### claude.ai connectors denied in Claude Code
 
-`deniedMcpServers` in the settings template blocks **claude.ai Gmail** and
-**claude.ai Atlassian Rovo** (the latter duplicates the `atlassian` plugin's
-MCP server). They stay connected on claude.ai; only Claude Code stops loading
-them. Claude Docs and Google Drive stay enabled.
+`deniedMcpServers` in the settings template blocks **claude.ai Gmail**,
+**claude.ai Claude Docs** (never called, yet re-injects its instructions on
+every reconnect) and **claude.ai Atlassian Rovo** (duplicates the `atlassian`
+plugin's MCP server). They stay connected on claude.ai; only Claude Code stops
+loading them. Google Drive stays enabled.
 
 ## Rules that are not obvious
 

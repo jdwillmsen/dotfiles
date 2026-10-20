@@ -64,7 +64,8 @@ echo "$out" | "$PY" -c 'import json,sys; d=json.load(sys.stdin); names=[e["serve
  assert "claude.ai Slack" in names, "locally denied server dropped"; \
  assert "claude.ai Atlassian Rovo" in names, "template-denied server missing"; \
  assert names.count("claude.ai Gmail")==1, "deny entries duplicated"; \
- assert not any("Claude Docs" in n or "Google Drive" in n for n in names), "kept connector denied"; print("PASS")'
+ assert "claude.ai Claude Docs" in names, "template-denied server missing"; \
+ assert not any("Google Drive" in n for n in names), "kept connector denied"; print("PASS")'
 
 # REMOVED keys are deleted from the merged result even though the merge would
 # otherwise keep them, while unknown user keys in the same section survive.

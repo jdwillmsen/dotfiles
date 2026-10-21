@@ -1,5 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
+  "model": "opencode/glm-5.3-flash-free",
   "provider": {
     "gpu-stack": {
       "npm": "@ai-sdk/openai-compatible",

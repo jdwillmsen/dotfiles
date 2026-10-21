@@ -43,8 +43,8 @@ an Epic.
 
 ## Worktrees — `~/worktrees/<owner>/<repo>/<branch>`
 
-`gwta` namespaces by the repo's GitHub owner, so `jdwlabs/platform` and
-`dotablaze-tech/platform` cannot collide. `WT_BASE` (default `~/worktrees`)
+`gwta` namespaces by the repo's GitHub owner, so `jdwlabs/deployments` and
+`dotablaze-tech/deployments` cannot collide. `WT_BASE` (default `~/worktrees`)
 may not exist until the first `gwta` run — its absence is not an error.
 
 ## Streams — one per GitHub owner

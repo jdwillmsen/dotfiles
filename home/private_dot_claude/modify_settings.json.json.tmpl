@@ -87,7 +87,6 @@ if command -v cygpath >/dev/null 2>&1; then
 fi
 ENFORCED='{
   "deniedMcpServers": [
-    { "serverName": "claude.ai Gmail" },
     { "serverName": "claude.ai Atlassian Rovo" },
     { "serverName": "claude.ai Claude Docs" }
   ],
@@ -107,12 +106,15 @@ ENFORCED='{
     "lavish": "off"
   }
 }'
-# REMOVED keys are deleted from the merged result, since the merge otherwise
-# keeps every on-disk key forever. These skillOverrides were written to hide
+# REMOVED entries are deleted from the merged result, since the merge otherwise
+# keeps every on-disk key forever: dict sections drop the listed keys, list
+# sections drop the listed items. These skillOverrides were written to hide
 # mattpocock skills before they arrived as a plugin; plugin skills ignore
-# skillOverrides, so the entries are dead weight. Only keys listed here go;
-# anything else the user added stays.
+# skillOverrides, so the entries are dead weight. The Gmail deny was once
+# enforced, and the list union would otherwise keep it after leaving ENFORCED.
+# Only entries listed here go; anything else the user added stays.
 REMOVED='{
+  "deniedMcpServers": [{ "serverName": "claude.ai Gmail" }],
   "skillOverrides": [
     "grill-me", "grill-with-docs", "improve-codebase-architecture",
     "prototype", "setup-matt-pocock-skills", "tdd", "to-issues", "to-prd",
@@ -147,9 +149,13 @@ def merge(base, override, union_lists=False):
     return out
 # existing wins over defaults; enforced wins over both
 merged = merge(merge(defaults, existing), enforced, union_lists=True)
-for section, keys in removed.items():
-    for k in keys:
-        merged.get(section, {}).pop(k, None)
+for section, entries in removed.items():
+    current = merged.get(section)
+    if isinstance(current, list):
+        merged[section] = [x for x in current if x not in entries]
+    elif isinstance(current, dict):
+        for k in entries:
+            current.pop(k, None)
 if sys.argv[6] == "1":
     for k in ("statusLine", "subagentStatusLine"):
         v = merged.get(k)

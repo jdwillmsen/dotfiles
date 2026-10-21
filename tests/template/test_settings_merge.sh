@@ -56,14 +56,16 @@ echo "$out" | "$PY" -c 'import json,sys; d=json.load(sys.stdin); p=d["enabledPlu
  assert s["lavish"]=="off", "listed skillOverride not enforced"; print("PASS")'
 
 # deniedMcpServers is a union: the template's connectors are added, a server
-# the user denied locally survives, and re-running does not duplicate entries.
+# the user denied locally survives, re-running does not duplicate entries, and
+# the formerly enforced Gmail deny is removed.
 existing='{"deniedMcpServers":[{"serverName":"claude.ai Slack"},{"serverName":"claude.ai Gmail"}]}'
 out="$(printf '%s' "$existing" | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
 out="$(printf '%s' "$out" | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
 echo "$out" | "$PY" -c 'import json,sys; d=json.load(sys.stdin); names=[e["serverName"] for e in d["deniedMcpServers"]]; \
  assert "claude.ai Slack" in names, "locally denied server dropped"; \
  assert "claude.ai Atlassian Rovo" in names, "template-denied server missing"; \
- assert names.count("claude.ai Gmail")==1, "deny entries duplicated"; \
+ assert names.count("claude.ai Atlassian Rovo")==1, "deny entries duplicated"; \
+ assert "claude.ai Gmail" not in names, "removed deny entry kept"; \
  assert "claude.ai Claude Docs" in names, "template-denied server missing"; \
  assert not any("Google Drive" in n for n in names), "kept connector denied"; print("PASS")'
 

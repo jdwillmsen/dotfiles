@@ -59,7 +59,7 @@ agentSkills:
 agentClis:
   - name: no-mistakes
     kind: script
-    version: "v1.88.0"
+    version: "v1.99.1"
     # The vendor installer only fetches the latest stable release, and the
     # commit.trailers key script 55 writes first shipped in a pre-release, so
     # the tool's own updater takes the box the rest of the way.
@@ -68,7 +68,7 @@ agentClis:
     windowsUrl: "https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.ps1"
   - name: gnhf
     kind: npm
-    version: "0.1.47"
+    version: "0.1.51"
     package: gnhf
   # The four agent CLIs T3 Code can drive besides Claude Code, which arrives
   # with its own installer. T3 resolves each by bare binary name on PATH, so
@@ -76,22 +76,22 @@ agentClis:
   # rather than the `agent` alias the same installer also places.
   - name: codex
     kind: npm
-    version: "0.153.4"
+    version: "0.163.0"
     package: "@openai/codex"
   - name: opencode
     kind: npm
-    version: "1.18.30"
+    version: "1.19.3"
     package: opencode-ai
   - name: grok
     kind: npm
-    version: "1.0.24"
+    version: "1.0.62"
     package: "@xai-official/grok"
   # Cursor's installer declares `#!/usr/bin/env bash` and uses a `[[ ]]`
   # conditional, which the dash that `sh` resolves to on Debian parses but
   # cannot run — so this row asks to be piped to bash rather than sh.
   - name: cursor-agent
     kind: script
-    version: "2026.09.08-6caf4ff"
+    version: "2026.10.19-6bbf2c4"
     shell: bash
     posixUrl: "https://cursor.com/install"
     windowsUrl: "https://cursor.com/install?win32=true"

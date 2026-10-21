@@ -97,11 +97,12 @@ always-loaded ruleset cost more than it saved.
 
 ### claude.ai connectors denied in Claude Code
 
-`deniedMcpServers` in the settings template blocks **claude.ai Gmail**,
-**claude.ai Claude Docs** (never called, yet re-injects its instructions on
-every reconnect) and **claude.ai Atlassian Rovo** (duplicates the `atlassian`
-plugin's MCP server). They stay connected on claude.ai; only Claude Code stops
-loading them. Google Drive stays enabled.
+`deniedMcpServers` in the settings template blocks **claude.ai Claude Docs**
+(never called, yet re-injects its instructions on every reconnect) and
+**claude.ai Atlassian Rovo** (duplicates the `atlassian` plugin's MCP server).
+They stay connected on claude.ai; only Claude Code stops loading them. Google
+Drive and Gmail stay enabled; Gmail is how agents read order and receipt
+emails, and its old deny entry is listed in `REMOVED` so it is cleaned up.
 
 ## Rules that are not obvious
 

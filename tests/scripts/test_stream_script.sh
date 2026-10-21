@@ -49,14 +49,14 @@ expect() {  # $1 expected stdout, $2 label
 mkrepo platform git@github.com:jdwlabs/platform.git
 mkrepo gameops https://github.com/jdwillmsen/gameops
 mkrepo career https://github.com/jdwillmsen/career.git/
-mkrepo dota ssh://git@github.com:22/dotablaze-tech/platform.git
+mkrepo dota ssh://git@github.com:22/dotablaze-tech/apps.git
 mkrepo fork git@github.com:kunchenguid/no-mistakes.git
 mkrepo orphan
 
 cwd="$tmp/repos/platform" run slug;  expect "jdwlabs/platform" "ssh shorthand remote"
 cwd="$tmp/repos/gameops" run slug;   expect "jdwillmsen/gameops" "https remote without .git"
 cwd="$tmp/repos/career" run slug;    expect "jdwillmsen/career" "https remote with .git and trailing slash"
-cwd="$tmp/repos/dota" run slug;      expect "dotablaze-tech/platform" "ssh:// remote with a port"
+cwd="$tmp/repos/dota" run slug;      expect "dotablaze-tech/apps" "ssh:// remote with a port"
 cwd="$tmp/repos/orphan" run slug;    expect "orphan" "no remote falls back to the basename"
 run slug "$tmp/repos/platform";      expect "jdwlabs/platform" "slug takes a path argument"
 

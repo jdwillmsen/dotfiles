@@ -59,7 +59,7 @@ mkrepo() {
     [ -z "${2:-}" ] || git -C "$tmp/$1" remote add origin "$2"
 }
 mkrepo a git@github.com:jdwlabs/platform.git
-mkrepo b https://github.com/dotablaze-tech/platform
+mkrepo b https://github.com/dotablaze-tech/apps
 mkrepo c https://github.com/jdwillmsen/career.git/
 mkrepo d ssh://git@github.com:22/jdwillmsen/gameops.git
 mkrepo e
@@ -89,7 +89,7 @@ mkrepo Q
 git -C "$tmp/Q" config stream.owner JDWLabs
 
 stream_bin="$here/home/dot_local/bin/executable_stream"
-for case in "a:jdwlabs/platform" "b:dotablaze-tech/platform" "c:jdwillmsen/career" \
+for case in "a:jdwlabs/platform" "b:dotablaze-tech/apps" "c:jdwillmsen/career" \
     "d:jdwillmsen/gameops" "e:e" "f:jdwillmsen/no-mistakes" "inside:jdwlabs/platform" \
     "g:g" "h:acme/widget" "i:acme/widget" \
     "j:acme/widget" "k:acme/widget" "l:acme/widget" "m:acme/widget" "n:jdwillmsen/widget" \

@@ -119,13 +119,15 @@ t3Providers:
 # Pipeline agent for no-mistakes, as an ordered fallback list. Its config file
 # is the tool's own, shipped full of documented defaults and extended by its
 # upgrades, so script 54 rewrites this one key in place rather than chezmoi
-# managing the file. claude leads because it reviews best, then codex, then
-# grok. The list exists because a usage limit on one account was a stopped
+# managing the file. opencode leads (2026-10-21, owner's call) so the
+# pipeline runs on free models and spares the Claude plan; claude, which
+# reviews best, then codex and grok back it up. The list exists because a
+# usage limit on one account was a stopped
 # pipeline, three runs in a row: claude's five-hour window, then the free-tier
 # codex quota behind it (weekly rolling reset per OpenAI, not monthly), then
 # grok's free Build quota. Failing over is worth having even when, as then,
 # every account behind the first is also free-tier.
-noMistakesAgent: "[claude, codex, grok]"
+noMistakesAgent: "[opencode, claude, codex, grok]"
 # Trailers no-mistakes appends to the fix commits its pipeline makes, so they
 # carry the agent+model attribution every other AI-assisted commit here must.
 # Which agent made a fix depends on the fallback list above, so the email

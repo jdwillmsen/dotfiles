@@ -81,6 +81,12 @@ alias ccu='npx "ccusage@^20" daily'
 alias ccus='npx "ccusage@^20" session'
 alias ccub='npx "ccusage@^20" blocks --active'
 
+# Agent delivery: where the week stands, what the captain did, how the models score
+alias pace='agent-pace status'
+alias mcs='merge-captain status'
+alias mclog='tail -n 20 ~/.local/state/merge-captain/log.jsonl'
+alias scoreboard='agent-eval scoreboard'
+
 # Misc
 alias reload='source ~/.zshrc 2>/dev/null || source ~/.bashrc'
 alias dotfiles='cd "$(chezmoi source-path)"'

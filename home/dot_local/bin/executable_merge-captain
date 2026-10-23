@@ -38,6 +38,8 @@ STATE = Path(os.environ.get("MERGE_CAPTAIN_STATE")
              or Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "merge-captain")
 PAUSED = STATE / "PAUSED"
 LOG = STATE / "log.jsonl"
+REVIEWS = STATE / "reviews.jsonl"
+HUMAN = STATE / "human.jsonl"
 LOCK = STATE / "lock"
 
 TIERS = ("R0", "R1", "R2", "R3")
@@ -58,8 +60,6 @@ REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 TICKET = re.compile(r"[A-Z][A-Z0-9]*-[0-9]+")
 MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@-]*")
 IDENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9:_.-]{0,63}")
-REVIEW_MARK = re.compile(r"<!-- merge-captain:review sha=([0-9a-f]{40}) tier=(R[0-3]) verdict=(approve|changes) -->")
-HUMAN_MARK = re.compile(r"<!-- merge-captain:needs-human sha=([0-9a-f]{40}) reason=([a-z-]+) -->")
 GOOD_CONCLUSIONS = ("SUCCESS", "NEUTRAL", "SKIPPED")
 LABEL_COLOURS = {"risk/R0": "0e8a16", "risk/R1": "fbca04", "risk/R2": "d93f0b", "risk/R3": "b60205",
                  "needs-human": "b60205", "agent-changes-requested": "d93f0b"}
@@ -393,6 +393,7 @@ def parse_verdict(text):
 
 
 def review_comment(head, tier, verdict, lane, findings):
+    # The marker line is for people reading the thread; nothing reads it back.
     head_lines = [f"<!-- merge-captain:review sha={head} tier={tier} verdict={verdict} -->",
                   f"merge-captain review: **{verdict}** (tier {tier}, lane {md_safe(lane, 60)}, "
                   f"{len(findings)} finding{'s' if len(findings) != 1 else ''})"]
@@ -413,9 +414,9 @@ def review_comment(head, tier, verdict, lane, findings):
     return body
 
 
-def read_log():
+def read_jsonl(path):
     try:
-        lines = LOG.read_text().splitlines()
+        lines = path.read_text().splitlines()
     except OSError:
         return []
     rows = []
@@ -427,6 +428,20 @@ def read_log():
         if isinstance(row, dict):
             rows.append(row)
     return rows
+
+
+def append_jsonl(path, row, durable=False):
+    """Append one line. `durable` fsyncs it: the review record is the only thing
+    a merge trusts, so a crash must not lose or half-write it."""
+    with open(path, "a") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        if durable:
+            f.flush()
+            os.fsync(f.fileno())
+
+
+def read_log():
+    return read_jsonl(LOG)
 
 
 def merges_since(now):
@@ -457,7 +472,6 @@ class Captain:
         self.opencode_bin = find_tool("MERGE_CAPTAIN_OPENCODE", "opencode", ".local/npm-bin")
         self.examined = 0
         self.reviews = 0
-        self.self_login = None
         self.default_branch = {}
         self.label_cache = {}
         self.trace = []
@@ -539,22 +553,12 @@ class Captain:
         row = {"at": iso(self.now), "run": run_id, "repo": d["repo"], "pr": d["pr"], "head": d["head"],
                "tier": d["tier"], "action": d["action"], "reason": clean(d["reason"]), "mode": d["mode"],
                "lane": d["lane"]}
-        with open(LOG, "a") as f:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        append_jsonl(LOG, row)
 
     # -- steps ---------------------------------------------------------------
 
     def step(self, name, result):
         self.trace.append({"step": name, "result": clean(result, 160)})
-
-    def login(self):
-        if self.self_login is None:
-            j = self.gh_json(["api", "user"], "identity")
-            login = j.get("login") if isinstance(j, dict) else None
-            if not isinstance(login, str) or not login:
-                raise Stop("error", "identity unreadable")
-            self.self_login = login.lower()
-        return self.self_login
 
     def default_of(self, repo):
         if repo not in self.default_branch:
@@ -644,23 +648,23 @@ class Captain:
         if not self.gh(["pr", "comment", str(n), "--repo", repo, "--body-file", "-"], write=True, stdin=body).ok:
             raise Stop("error", "comment not posted")
 
-    def own_markers(self, d):
-        """(kind, sha, rest...) markers on comments written by the identity this tool runs as. A marker
-        from anyone else is ignored: otherwise a comment could forge a prior approval."""
-        me = self.login()
-        out = []
-        for c in d.get("comments") or []:
-            if not isinstance(c, dict) or str((c.get("author") or {}).get("login") or "").lower() != me:
-                continue
-            body = str(c.get("body") or "").lstrip()
-            m = REVIEW_MARK.match(body)
-            if m:
-                out.append(("review", m.group(1), m.group(2), m.group(3)))
-                continue
-            m = HUMAN_MARK.match(body)
-            if m:
-                out.append(("needs-human", m.group(1), m.group(2)))
-        return out
+    def review_on_record(self, repo, n, head, tier):
+        """"approve", "changes" or None from this tool's own record. Nothing on the pull request is read:
+        the owner's login also authors every agent comment, so a comment proves nothing about who wrote it."""
+        verdicts = {row.get("verdict") for row in read_jsonl(REVIEWS)
+                    if row.get("repo") == repo and row.get("pr") == n and row.get("head") == head
+                    and row.get("tier") in TIERS and TIERS.index(row["tier"]) >= TIERS.index(tier)}
+        if "changes" in verdicts:
+            return "changes"
+        return "approve" if "approve" in verdicts else None
+
+    def record_review(self, repo, n, head, tier, verdict, lane):
+        append_jsonl(REVIEWS, {"repo": repo, "pr": n, "head": head, "tier": tier, "verdict": verdict, "lane": lane,
+                               "at": iso(self.now)}, durable=True)
+
+    def human_noted(self, repo, n, head, kind):
+        return any(row.get("repo") == repo and row.get("pr") == n and row.get("head") == head
+                   and row.get("kind") == kind for row in read_jsonl(HUMAN))
 
     # -- gates ---------------------------------------------------------------
 
@@ -874,6 +878,7 @@ class Captain:
                 continue
             verdict, findings = outcome
             self.record_eval(aid, tier, findings=len(findings), pr_url=f"https://github.com/{repo}/pull/{n}")
+            self.record_review(repo, n, head, tier, verdict, lane)
             self.comment(repo, n, review_comment(head, tier, verdict, lane, findings))
             if verdict == "changes":
                 self.ensure_labels(repo, ["agent-changes-requested"])
@@ -887,9 +892,8 @@ class Captain:
         """Label needs-human and say why once per head commit and kind. Always ends the pull request."""
         if not self.live:
             raise Stop("needs-human", f"{summary} (not commented)")
-        have = {m[2] for m in self.own_markers(details) if m[0] == "needs-human" and m[1] == head}
         self.ensure_labels(repo, ["needs-human"])
-        if kind not in have:
+        if not self.human_noted(repo, n, head, kind):
             lines = [f"<!-- merge-captain:needs-human sha={head} reason={kind} -->",
                      f"merge-captain: {md_safe(text, 400)}"]
             deciding = [r for r in reasons if r["tier"] == tier][:5]
@@ -897,6 +901,7 @@ class Captain:
                 lines += ["", "Deciding rules:"]
                 lines += [f"- {md_safe(r['rule'], 60)} ({md_safe(r['where'], 100)})" for r in deciding]
             self.comment(repo, n, "\n".join(lines))
+            append_jsonl(HUMAN, {"repo": repo, "pr": n, "head": head, "kind": kind, "at": iso(self.now)})
         names = {x.get("name") for x in details.get("labels") or [] if isinstance(x, dict)}
         if "needs-human" not in names:
             self.edit_labels(repo, n, ["needs-human"], [])
@@ -947,7 +952,7 @@ class Captain:
 
         details = self.gh_json(["pr", "view", str(n), "--repo", repo, "--json",
                                 "number,title,state,isDraft,labels,author,baseRefName,headRefName,headRefOid,updatedAt,"
-                                "mergeable,mergeStateStatus,reviewDecision,reviews,statusCheckRollup,comments"],
+                                "mergeable,mergeStateStatus,reviewDecision,reviews,statusCheckRollup"],
                                "pull request")
         head = details.get("headRefOid") if isinstance(details, dict) else None
         if not isinstance(head, str) or not SHA.fullmatch(head):
@@ -983,11 +988,10 @@ class Captain:
 
         lane = None
         if tier != "R0":
-            marks = [m for m in self.own_markers(details) if m[0] == "review" and m[1] == head
-                     and TIERS.index(m[2]) >= TIERS.index(tier)]
-            if any(m[3] == "changes" for m in marks):
+            on_record = self.review_on_record(repo, n, head, tier)
+            if on_record == "changes":
                 raise Stop("blocked", "review changes on this commit")
-            if marks:
+            if on_record:
                 self.step("review", "approve on record")
                 reason = "review approve on record"
             elif not self.live:

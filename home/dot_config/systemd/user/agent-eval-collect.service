@@ -1,0 +1,14 @@
+[Unit]
+Description=Agent evaluation ledger collect and enrich
+Documentation=file://%h/.local/share/chezmoi/docs/autonomous-delivery.md
+
+[Service]
+Type=oneshot
+# Collect first so enrich joins the freshest outcomes to merged pull requests.
+ExecStart=%h/.local/bin/agent-eval collect
+ExecStart=%h/.local/bin/agent-eval enrich
+Environment=PATH=%h/.local/bin:%h/.local/npm-bin:/usr/local/bin:/usr/bin:/bin
+TimeoutStartSec=30min
+NoNewPrivileges=yes
+PrivateTmp=yes
+Nice=10

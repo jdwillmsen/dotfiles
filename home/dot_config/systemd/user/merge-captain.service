@@ -1,0 +1,14 @@
+[Unit]
+Description=Merge captain: classify, review and merge open pull requests by risk tier
+Documentation=file://%h/.local/share/chezmoi/docs/merge-captain.md
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/merge-captain run
+# A user manager starts with a bare PATH; gh, git and the model CLIs live in these.
+Environment=PATH=%h/.local/bin:%h/.local/npm-bin:/usr/local/bin:/usr/bin:/bin
+# Up to six pull requests, each with at most three reviews of ten minutes.
+TimeoutStartSec=30min
+NoNewPrivileges=yes
+PrivateTmp=yes
+Nice=10

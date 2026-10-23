@@ -101,7 +101,7 @@ files: 1
 lines: 0
 content_scanned: false
 EOF
-printf '.github/workflows/ci.yml\n' | "$cc" --rules "$rules" --files - >"$out" 2>"$err" \
+printf '.github/workflows/ci.yml\n' | "$cc" --rules "$rules" --files - --repo acme/app >"$out" 2>"$err" \
     || fail "ci.yml classification failed" "$(cat "$err")"
 diff -u "$tmp/expected" "$out" || fail "ci.yml output fields changed" "$(cat "$out")"
 
@@ -355,6 +355,7 @@ new_repo "$remote_repo"
 git -C "$remote_repo" remote add origin git@github.com:acme/deployments.git
 printf 'a\n' >"$remote_repo/app.ts"
 commit_all "$remote_repo" one
+git -C "$remote_repo" update-ref refs/remotes/origin/main HEAD
 printf 'b\n' >>"$remote_repo/app.ts"
 commit_all "$remote_repo" two
 run_in "$remote_repo" 0 --rules "$rules"
@@ -366,13 +367,14 @@ new_repo "$bare_remote"
 git -C "$bare_remote" remote add origin "$tmp/deployments.git"
 printf 'a\n' >"$bare_remote/app.ts"
 commit_all "$bare_remote" one
+git -C "$bare_remote" update-ref refs/remotes/origin/main HEAD
 printf 'b\n' >>"$bare_remote/app.ts"
 commit_all "$bare_remote" two
 run_in "$bare_remote" 0 --rules "$rules"
 grep -qx 'tier: R2' "$out" || fail "a bare remote repo did not supply the floor" "$(cat "$out")"
 grep -qx '  deploy floor,R2,repo deployments' "$out" || fail "the bare repo floor reason is wrong" "$(cat "$out")"
 
-# ── Diff mode: merge-base with origin/main, then the HEAD~1 fallback ──
+# ── Diff mode: merge-base with origin/main; no guessed base ──
 repo="$tmp/repo"
 new_repo "$repo"
 printf '# doc\n' >"$repo/README.md"
@@ -403,9 +405,9 @@ printf 'a\n' >"$fallback/app.ts"
 commit_all "$fallback" one
 git -C "$fallback" commit -q --allow-empty -m two
 printf 'b\n' >>"$fallback/app.ts"
-run_in "$fallback" 0 --rules "$rules"
-grep -qx 'tier: R1' "$out" || fail "the HEAD~1 fallback classified the wrong change" "$(cat "$out")"
-grep -qx 'lines: 1' "$out" || fail "the HEAD~1 fallback counted the wrong lines" "$(cat "$out")"
+run_in "$fallback" 1 --rules "$rules"
+grep -qx 'code: 1' "$out" || fail "a missing base did not fail with a structured error" "$(cat "$out")"
+grep -q -- '--base' "$out" || fail "the missing-base error does not say to pass --base" "$(cat "$out")"
 run_in "$fallback" 0 --rules "$rules" --base HEAD
 grep -qx 'lines: 1' "$out" || fail "--base HEAD did not diff the working tree" "$(cat "$out")"
 
@@ -416,7 +418,7 @@ commit_all "$single" one
 printf 'b\n' >>"$single/app.ts"
 run_in "$single" 0 --rules "$rules"
 grep -qx 'tier: R1' "$out" || fail "a first commit's working change was not classified" "$(cat "$out")"
-grep -qx 'lines: 1' "$out" || fail "a first commit's working change lost its line count" "$(cat "$out")"
+grep -qx 'lines: 2' "$out" || fail "a lone commit was not diffed against the empty tree" "$(cat "$out")"
 
 clean="$tmp/clean"
 new_repo "$clean"
@@ -457,6 +459,7 @@ large="$tmp/large"
 new_repo "$large"
 printf 'a\n' >"$large/app.ts"
 commit_all "$large" one
+git -C "$large" update-ref refs/remotes/origin/main HEAD
 git -C "$large" commit -q --allow-empty -m two
 python3 -c 'import sys; open(sys.argv[1], "a").write("line\n" * 800)' "$large/app.ts"
 run_in "$large" 0 --rules "$rules"
@@ -467,6 +470,7 @@ huge="$tmp/huge"
 new_repo "$huge"
 printf 'a\n' >"$huge/app.ts"
 commit_all "$huge" one
+git -C "$huge" update-ref refs/remotes/origin/main HEAD
 git -C "$huge" commit -q --allow-empty -m two
 python3 -c 'import sys; open(sys.argv[1], "w").write("kubectl delete " + "x" * 2200000 + "\n")' "$huge/app.ts"
 run_in "$huge" 0 --rules "$rules"
@@ -500,6 +504,252 @@ grep -qx 'files: 1' "$out" || fail "--pr file count is wrong" "$(cat "$out")"
 grep -qx 'lines: 1' "$out" || fail "--pr line count is wrong" "$(cat "$out")"
 [ "$(cat "$GH_ARGS_FILE")" = "$(printf 'pr\ndiff\n42\n--repo\nacme/app')" ] \
     || fail "gh did not receive the PR and repo" "$(cat "$GH_ARGS_FILE")"
+
+# ── Review fixes: every input spelling of a path must meet the same rules ──
+pr_run() {
+    local diff_file="$1" got=0
+    shift
+    ( cd "$tmp" && GH_DIFF_FILE="$diff_file" PATH="$tmp/bin:$PATH" "$cc" --rules "$rules" --pr 1 --repo acme/app "$@" ) \
+        >"$out" 2>"$err" || got=$?
+    [ "$got" = 0 ] || fail "--pr on $diff_file exited $got" "$(cat "$out" "$err")"
+}
+
+new_branch_repo() {
+    new_repo "$1"
+    printf '# doc\n' >"$1/README.md"
+    commit_all "$1" base
+    git -C "$1" update-ref refs/remotes/origin/main HEAD
+}
+
+# Renames keep the old path visible, in diff mode and in a pull request's diff.
+ren="$tmp/ren"
+new_repo "$ren"
+mkdir -p "$ren/terraform" "$ren/.github"
+seq 1 20 >"$ren/terraform/main.tf"
+seq 1 20 >"$ren/.github/CODEOWNERS"
+commit_all "$ren" base
+git -C "$ren" update-ref refs/remotes/origin/main HEAD
+mkdir -p "$ren/docs"
+git -C "$ren" mv terraform/main.tf docs/main.md
+git -C "$ren" mv .github/CODEOWNERS docs/owners.md
+echo 21 >>"$ren/docs/main.md"
+commit_all "$ren" rename
+run_in "$ren" 0 --rules "$rules" --explain
+grep -qx 'tier: R3' "$out" || fail "moving terraform and CODEOWNERS into docs is not R3" "$(cat "$out")"
+grep -qx '  infra-code,R3,terraform/main.tf' "$out" || fail "the renamed-away terraform path is hidden" "$(cat "$out")"
+grep -qx '  governance,R3,.github/CODEOWNERS' "$out" || fail "the renamed-away CODEOWNERS path is hidden" "$(cat "$out")"
+
+cat >"$tmp/rename.diff" <<'DIFF'
+diff --git a/terraform/main.tf b/docs/main.md
+similarity index 90%
+rename from terraform/main.tf
+rename to docs/main.md
+--- a/terraform/main.tf
++++ b/docs/main.md
+@@ -1 +1 @@
+-a
++b
+diff --git a/.github/CODEOWNERS b/docs/owners.md
+similarity index 100%
+rename from .github/CODEOWNERS
+rename to docs/owners.md
+DIFF
+pr_run "$tmp/rename.diff" --explain
+grep -qx 'tier: R3' "$out" || fail "a renamed pull request diff is not R3" "$(cat "$out")"
+grep -qx '  infra-code,R3,terraform/main.tf' "$out" || fail "--pr hid the old terraform path" "$(cat "$out")"
+grep -qx '  governance,R3,.github/CODEOWNERS' "$out" || fail "--pr hid the old CODEOWNERS path" "$(cat "$out")"
+grep -qx 'files: 4' "$out" || fail "--pr did not count both sides of each rename" "$(cat "$out")"
+
+# Names git quotes (tab, quote, backslash) are decoded, not skipped.
+quoted="$tmp/quoted"
+new_branch_repo "$quoted"
+mkdir -p "$quoted/.github/workflows"
+printf 'on: push\n' >"$quoted/.github/workflows/$(printf 'a\tb').yml"
+printf 'echo "kubectl delete pod x"\n' >"$quoted/$(printf 'we\tird"q.sh')"
+commit_all "$quoted" quoted
+run_in "$quoted" 0 --rules "$rules" --explain
+grep -q '^  ci-workflows,R2,' "$out" || fail "a tab in a workflow name hid the ci rule" "$(cat "$out")"
+grep -q '^  destructive-command,R3,' "$out" || fail "a quoted file name escaped the content rules" "$(cat "$out")"
+grep -qx 'tier: R3' "$out" || fail "quoted file names did not reach R3" "$(cat "$out")"
+
+cat >"$tmp/quoted.diff" <<'DIFF'
+diff --git "a/.github/workflows/a\tb.yml" "b/.github/workflows/a\tb.yml"
+--- "a/.github/workflows/a\tb.yml"
++++ "b/.github/workflows/a\tb.yml"
+@@ -1 +1,2 @@
+ on: push
++  pull_request:
+diff --git "a/we\"ird\\x.sh" "b/we\"ird\\x.sh"
+--- "a/we\"ird\\x.sh"
++++ "b/we\"ird\\x.sh"
+@@ -0,0 +1 @@
++kubectl delete pod x
+DIFF
+pr_run "$tmp/quoted.diff" --explain
+grep -q '^  ci-workflows,R2,' "$out" || fail "--pr did not decode a quoted workflow name" "$(cat "$out")"
+grep -q '^  destructive-command,R3,' "$out" || fail "--pr content rules missed a quoted file name" "$(cat "$out")"
+grep -qx 'files: 2' "$out" || fail "--pr counted a quoted name twice" "$(cat "$out")"
+
+# A path that is not valid UTF-8 cannot be judged, so it is critical.
+bytes="$tmp/bytes"
+new_branch_repo "$bytes"
+mkdir -p "$bytes/docs"
+printf 'x\n' >"$bytes/docs/$(printf 'bad\377name').md"
+run_in "$bytes" 0 --rules "$rules"
+grep -qx 'tier: R3' "$out" || fail "an undecodable path is not R3" "$(cat "$out")"
+grep -q '^  undecodable-path,R3,' "$out" || fail "an undecodable path has no reason" "$(cat "$out")"
+printf 'diff --git "a/docs/\\377.md" "b/docs/\\377.md"\n--- "a/docs/\\377.md"\n+++ "b/docs/\\377.md"\n@@ -0,0 +1 @@\n+x\n' \
+    >"$tmp/bytes.diff"
+pr_run "$tmp/bytes.diff"
+grep -q '^  undecodable-path,R3,' "$out" || fail "--pr missed an undecodable quoted path" "$(cat "$out")"
+printf 'printf "\\377\\376"\nkubectl delete pod x\n' >"$bytes/run.sh"
+commit_all "$bytes" raw
+rm "$bytes/docs/"*.md
+run_in "$bytes" 0 --rules "$rules"
+grep -q '^  destructive-command,R3,run.sh' "$out" || fail "non-UTF-8 content stopped classification" "$(cat "$out")"
+printf 'diff --git a/run.sh b/run.sh\n--- a/run.sh\n+++ b/run.sh\n@@ -0,0 +1,2 @@\n+\377\376\n+kubectl delete pod x\n' \
+    >"$tmp/raw.diff"
+pr_run "$tmp/raw.diff"
+grep -q '^  destructive-command,R3,run.sh' "$out" || fail "--pr stopped on non-UTF-8 diff text" "$(cat "$out")"
+
+# The base is never guessed: a branch is judged from its merge base or not at all.
+noorigin="$tmp/noorigin"
+new_repo "$noorigin"
+printf '# doc\n' >"$noorigin/README.md"
+commit_all "$noorigin" one
+mkdir -p "$noorigin/terraform"
+printf 'x\n' >"$noorigin/terraform/main.tf"
+commit_all "$noorigin" two
+printf '# doc2\n' >"$noorigin/README.md"
+commit_all "$noorigin" three
+run_in "$noorigin" 1 --rules "$rules"
+grep -q -- '--base' "$out" || fail "the no-origin error does not mention --base" "$(cat "$out")"
+if grep -q '^tier:' "$out"; then fail "a missing base still produced a tier" "$(cat "$out")"; fi
+run_in "$noorigin" 0 --rules "$rules" --base HEAD~2
+grep -qx 'tier: R3' "$out" || fail "--base HEAD~2 missed the terraform commit" "$(cat "$out")"
+orphan="$tmp/orphan"
+new_branch_repo "$orphan"
+git -C "$orphan" checkout -q --orphan unrelated
+printf 'x\n' >"$orphan/app.ts"
+commit_all "$orphan" unrelated
+printf 'y\n' >>"$orphan/app.ts"
+commit_all "$orphan" more
+run_in "$orphan" 1 --rules "$rules"
+grep -q -- '--base' "$out" || fail "an unrelated history did not ask for --base" "$(cat "$out")"
+
+# Untracked files are part of the change, content included, but ignored ones are not.
+untracked="$tmp/untracked"
+new_branch_repo "$untracked"
+printf 'ignored.log\n' >"$untracked/.gitignore"
+commit_all "$untracked" ignore
+git -C "$untracked" update-ref refs/remotes/origin/main HEAD
+run_in "$untracked" 0 --rules "$rules"
+grep -qx 'files: 0' "$out" || fail "a clean repo with an ignore file is not empty" "$(cat "$out")"
+printf 'kubectl delete pod x\n' >"$untracked/ignored.log"
+run_in "$untracked" 0 --rules "$rules"
+grep -qx 'files: 0' "$out" || fail "an ignored file was classified" "$(cat "$out")"
+mkdir -p "$untracked/terraform"
+printf 'x\n' >"$untracked/terraform/new.tf"
+printf 'echo hi\nkubectl delete pod x\n' >"$untracked/run.sh"
+run_in "$untracked" 0 --rules "$rules" --explain
+grep -qx 'tier: R3' "$out" || fail "untracked files were not classified" "$(cat "$out")"
+grep -qx '  infra-code,R3,terraform/new.tf' "$out" || fail "an untracked terraform file was missed" "$(cat "$out")"
+grep -qx '  destructive-command,R3,run.sh' "$out" || fail "untracked content was not scanned" "$(cat "$out")"
+grep -qx 'files: 2' "$out" || fail "untracked files were miscounted" "$(cat "$out")"
+grep -qx 'lines: 3' "$out" || fail "untracked lines were miscounted" "$(cat "$out")"
+rm -r "$untracked/terraform" "$untracked/run.sh"
+python3 -c 'import sys; open(sys.argv[1], "w").write("kubectl delete " + "x" * 1100000 + "\n")' "$untracked/big.sh"
+run_in "$untracked" 0 --rules "$rules"
+grep -qx 'content_scanned: false' "$out" || fail "an untracked file over the cap was still scanned" "$(cat "$out")"
+rm "$untracked/big.sh"
+
+# Header lines count only outside a hunk: an added `++ b/x` line is content.
+trick="$tmp/trick"
+new_branch_repo "$trick"
+printf 'echo ok\n' >"$trick/run.sh"
+commit_all "$trick" script
+git -C "$trick" update-ref refs/remotes/origin/main HEAD
+printf '%s\n' '++ b/docs/x.md' 'kubectl delete pod x' >>"$trick/run.sh"
+run_in "$trick" 0 --rules "$rules" --explain
+grep -qx '  destructive-command,R3,run.sh' "$out" || fail "an added '++ b/' line redirected later lines" "$(cat "$out")"
+if grep -q 'docs/x.md' "$out"; then fail "an added '++ b/' line was read as a file header" "$(cat "$out")"; fi
+cat >"$tmp/trick.diff" <<'DIFF'
+diff --git a/run.sh b/run.sh
+--- a/run.sh
++++ b/run.sh
+@@ -1,2 +1,4 @@
+ echo ok
++++ b/docs/x.md
++kubectl delete pod x
+ echo end
+@@ -9 +11 @@ context
+--- a/docs/y.md
++++ b/docs/y.md
+DIFF
+pr_run "$tmp/trick.diff" --explain
+grep -qx '  destructive-command,R3,run.sh' "$out" || fail "--pr read an in-hunk '+++' line as a header" "$(cat "$out")"
+if grep -q 'docs/x.md' "$out"; then fail "--pr listed a path that only appears inside a hunk" "$(cat "$out")"; fi
+
+# One canonical key per path: odd spellings still get content scanning.
+spaced="$tmp/spaced"
+new_branch_repo "$spaced"
+printf 'echo ok\n' >"$spaced/ run.sh"
+printf 'echo ok\n' >"$spaced/back\\slash.sh"
+commit_all "$spaced" scripts
+git -C "$spaced" update-ref refs/remotes/origin/main HEAD
+printf 'kubectl delete pod x\n' >>"$spaced/ run.sh"
+printf 'kubectl delete pod x\n' >>"$spaced/back\\slash.sh"
+run_in "$spaced" 0 --rules "$rules" --explain
+grep -qx '  destructive-command,R3,run.sh' "$out" || fail "a leading-space name skipped content scanning" "$(cat "$out")"
+grep -qx '  destructive-command,R3,back/slash.sh' "$out" || fail "a backslash name skipped content scanning" "$(cat "$out")"
+
+# The docs rule must not swallow build files; absolute and respelled paths meet the same rules.
+expect_files_tier CMakeLists.txt R1
+expect_files_tier native/CMakeLists.txt R1
+expect_files_tier notes.txt R0
+expect_files_tier /terraform/main.tf R3
+expect_files_tier .github//CODEOWNERS R3
+expect_files_tier ./.github/CODEOWNERS R3
+expect_files_tier //terraform//main.tf R3
+expect_files_tier docs/../terraform/main.tf R3
+expect_files_tier '.\.github\CODEOWNERS' R3
+expect_files_tier home/dot_local/bin/executable_change-class R3
+expect_files_tier home/dot_local/bin/executable_agent-pace R3
+expect_files_tier home/dot_local/bin/executable_agent-eval R3
+expect_files_tier home/dot_local/bin/agent-gate R3
+expect_files_tier home/dot_local/bin/agent-gate-check R3
+printf 'docs/\377.md\n' | "$cc" --rules "$rules" --files - >"$out" 2>"$err" || fail "--files rejected a non-UTF-8 path" "$(cat "$out" "$err")"
+grep -qx 'tier: R3' "$out" || fail "--files treated a non-UTF-8 path as docs" "$(cat "$out")"
+
+# An unknown repo is said so, and the directory name still feeds the floors.
+anon="$tmp/deployments"
+new_repo "$anon"
+printf 'a\n' >"$anon/app.ts"
+commit_all "$anon" one
+run_in "$anon" 0 --rules "$rules"
+grep -qx 'warnings\[1\]: repo unknown, floors skipped' "$out" || fail "an unknown repo gave no warning" "$(cat "$out")"
+grep -qx 'tier: R2' "$out" || fail "the directory name did not stand in for the repo" "$(cat "$out")"
+run_in "$anon" 0 --rules "$rules" --repo acme/app
+if grep -q '^warnings' "$out"; then fail "a named repo still warned"; fi
+grep -qx 'tier: R1' "$out" || fail "--repo did not override the directory name" "$(cat "$out")"
+run_in "$remote_repo" 0 --rules "$rules"
+if grep -q '^warnings' "$out"; then fail "a repo with an origin warned"; fi
+printf 'README.md\n' | ( cd "$tmp" && "$cc" --rules "$rules" --files - ) >"$out"
+grep -qx 'warnings\[1\]: repo unknown, floors skipped' "$out" || fail "--files outside a repo gave no warning" "$(cat "$out")"
+
+# Caps: a diff over the scan cap is not buffered whole, yet every path is still judged.
+{
+    printf 'diff --git a/big.sh b/big.sh\n--- a/big.sh\n+++ b/big.sh\n@@ -0,0 +1,50000 @@\n'
+    python3 -c 'import sys
+for _ in range(50000):
+    sys.stdout.write("+" + "x" * 78 + "\n")'
+    printf 'diff --git a/terraform/late.tf b/terraform/late.tf\n--- a/terraform/late.tf\n+++ b/terraform/late.tf\n@@ -0,0 +1 @@\n+x\n'
+} >"$tmp/capped.diff"
+[ "$(wc -c <"$tmp/capped.diff")" -gt 2097152 ] || fail "the capped diff fixture is too small"
+pr_run "$tmp/capped.diff"
+grep -qx 'tier: R3' "$out" || fail "a path after the scan cap was not judged" "$(cat "$out")"
+grep -qx 'content_scanned: false' "$out" || fail "a diff over the cap claimed a content scan" "$(cat "$out")"
+grep -qx 'files: 2' "$out" || fail "a diff over the cap lost a path" "$(cat "$out")"
 
 # ── --fail-at and usage errors ──
 printf 'scripts/provision-x.sh\n' | "$cc" --rules "$rules" --files - --fail-at R3 >"$out" || got=$?

@@ -8,9 +8,12 @@ stderr.
 """
 import argparse
 import json
+import os
 import re
+import stat
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -19,6 +22,8 @@ EXIT_FAIL, EXIT_USAGE, EXIT_DENIED = 1, 2, 3
 TIERS = ("R0", "R1", "R2", "R3")
 TIER_INDEX = {t: i for i, t in enumerate(TIERS)}
 CONTENT_SCAN_CAP = 2 * 1024 * 1024
+UNTRACKED_FILE_CAP = 1024 * 1024
+EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
 # Fast path before any real work: harnesses probe --version constantly.
 if __name__ == "__main__" and len(sys.argv) == 2 and sys.argv[1] in ("-v", "-V", "--version"):
@@ -48,7 +53,7 @@ def toon_scalar(v):
     if isinstance(v, (int, float)):
         return str(v)
     s = str(v)
-    if s == "" or s != s.strip() or re.search(r'[,:"\\\n\[\]{}]', s) or s in ("true", "false", "null") \
+    if s == "" or s != s.strip() or re.search(r'[,:"\\\n\r\t\[\]{}]', s) or s in ("true", "false", "null") \
             or re.fullmatch(r"-?\d+(\.\d+)?", s):
         return json.dumps(s, ensure_ascii=False)
     return s
@@ -74,6 +79,9 @@ def emit_result(result):
     out.append(f"lines: {result['lines']}")
     if result.get("content_scanned") is False:
         out.append("content_scanned: false")
+    warnings = result.get("warnings") or []
+    if warnings:
+        out.append(f"warnings[{len(warnings)}]: {','.join(warnings)}")
     print("\n".join(out))
 
 
@@ -148,10 +156,27 @@ def matches(patterns, path):
 
 
 def normalize_path(path):
-    path = path.strip().replace("\\", "/")
-    while path.startswith("./"):
-        path = path[2:]
-    return path
+    # Rules are written against clean repo-relative paths, so every spelling of
+    # the same file (leading or doubled slashes, ./ and ../ segments, backslashes)
+    # must collapse to one key or a rule can be dodged by respelling the path.
+    parts = []
+    for seg in path.strip().replace("\\", "/").split("/"):
+        if seg in ("", "."):
+            continue
+        if seg == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(seg)
+    return "/".join(parts)
+
+
+def canon(raw, bad):
+    """The one canonical key for a path; records names that are not valid UTF-8 in `bad`."""
+    key = normalize_path(raw.encode("utf-8", "surrogateescape").decode("utf-8", "replace"))
+    if key and re.search("[\udc80-\udcff]", raw):
+        bad.add(key)
+    return key
 
 
 # ── Policy ───────────────────────────────────────────────────────────────────
@@ -266,7 +291,7 @@ def load_policy(path):
 
 def run(cmd, cwd=None):
     try:
-        return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+        return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, errors="replace")
     except FileNotFoundError:
         fail(f"{cmd[0]} is not installed")
     except OSError as e:
@@ -277,36 +302,54 @@ def git(args, cwd=None):
     return run(["git", *args], cwd)
 
 
+def git_raw(args, cwd, label):
+    try:
+        r = subprocess.run(["git", *args], cwd=cwd, capture_output=True)
+    except FileNotFoundError:
+        fail("git is not installed")
+    except OSError as e:
+        fail(f"cannot run git: {e}")
+    if r.returncode != 0:
+        fail(f"{label} failed: {r.stderr.decode('utf-8', 'replace').strip()}")
+    return r.stdout
+
+
 def repo_root():
     r = git(["rev-parse", "--show-toplevel"])
     return Path(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else None
 
 
 def repo_identity(explicit, root):
+    """Return (name, known); an unknown name is only the directory name, a weak match."""
     if explicit:
-        return explicit.strip().rstrip("/")
+        return explicit.strip().rstrip("/"), True
     if root is None:
-        return ""
+        return "", False
     r = git(["remote", "get-url", "origin"], cwd=root)
     if r.returncode != 0 or not r.stdout.strip():
-        return ""
+        return root.name, False
     url = r.stdout.strip()
     while url.endswith("/"):
         url = url[:-1]
     if url.endswith(".git"):
         url = url[:-4]
     if url.startswith("file://"):
-        return url.rsplit("/", 1)[-1]
+        return url.rsplit("/", 1)[-1], True
     if url.startswith("git@") and ":" in url:
         path = url.split(":", 1)[1]
     elif "://" in url:
         rest = url.split("://", 1)[1]
         path = rest.split("/", 1)[1] if "/" in rest else rest
     elif re.fullmatch(r"[^/]+/[^/]+", url):
-        return url
+        return url, True
     else:
-        return url.rsplit("/", 1)[-1]
-    return "/".join(path.split("/")[-2:]) if "/" in path else path
+        return url.rsplit("/", 1)[-1], True
+    return ("/".join(path.split("/")[-2:]) if "/" in path else path), True
+
+
+def empty_tree(root):
+    r = git(["hash-object", "-t", "tree", "/dev/null"], cwd=root)
+    return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else EMPTY_TREE
 
 
 def resolve_base(requested, root):
@@ -314,116 +357,351 @@ def resolve_base(requested, root):
         r = git(["rev-parse", "--verify", f"{requested}^{{commit}}"], cwd=root)
         if r.returncode != 0:
             fail(f"cannot resolve base {requested!r}")
-        return requested
+        return r.stdout.strip()
+    if git(["rev-parse", "--verify", "HEAD^{commit}"], cwd=root).returncode != 0:
+        return empty_tree(root)
     r = git(["merge-base", "HEAD", "origin/main"], cwd=root)
     if r.returncode == 0 and r.stdout.strip():
         return r.stdout.strip()
-    r = git(["rev-parse", "--verify", "HEAD~1^{commit}"], cwd=root)
-    if r.returncode == 0:
-        return "HEAD~1"
-    r = git(["rev-parse", "--verify", "HEAD^{commit}"], cwd=root)
-    return "HEAD" if r.returncode == 0 else None
+    # Guessing a base (such as HEAD~1) would judge a multi-commit branch on its
+    # last commit alone, a lower tier than the branch deserves.
+    count = git(["rev-list", "--count", "HEAD"], cwd=root)
+    if count.returncode == 0 and count.stdout.strip() == "1":
+        return empty_tree(root)
+    fail("no merge base with origin/main; pass --base REF")
 
 
-def diff_inputs(root, base):
-    name_only = git(["-c", "core.quotePath=false", "diff", "--name-only", base], cwd=root)
-    if name_only.returncode != 0:
-        fail(f"git diff failed: {name_only.stderr.strip()}")
-    paths = [normalize_path(p) for p in name_only.stdout.splitlines() if p.strip()]
-    paths = list(dict.fromkeys(paths))
+# ── Unified diff parsing ─────────────────────────────────────────────────────
 
-    numstat = git(["-c", "core.quotePath=false", "diff", "--numstat", base], cwd=root)
-    if numstat.returncode != 0:
-        fail(f"git diff --numstat failed: {numstat.stderr.strip()}")
-    lines = 0
-    for row in numstat.stdout.splitlines():
-        parts = row.split("\t", 2)
-        if len(parts) < 2:
+C_ESCAPES = {"a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11, "\\": 92, '"': 34}
+HUNK_HEADER = re.compile(r"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
+
+
+def read_quoted(text, start):
+    """Decode the C-style quoted token at text[start]; return (value, index after the quote)."""
+    out = bytearray()
+    i = start + 1
+    while i < len(text):
+        c = text[i]
+        if c == '"':
+            return out.decode("utf-8", "surrogateescape"), i + 1
+        if c != "\\":
+            out += c.encode("utf-8", "surrogateescape")
+            i += 1
             continue
-        for value in parts[:2]:
-            if value.isdigit():
-                lines += int(value)
+        i += 1
+        if i >= len(text):
+            break
+        if text[i] in C_ESCAPES:
+            out.append(C_ESCAPES[text[i]])
+            i += 1
+        elif text[i] in "01234567":
+            j = i
+            while j < len(text) and j - i < 3 and text[j] in "01234567":
+                j += 1
+            value = int(text[i:j], 8)
+            if value > 255:
+                break
+            out.append(value)
+            i = j
+        else:
+            break
+    raise ValueError("bad quoted path")
 
-    diff = git(["-c", "core.quotePath=false", "diff", "--unified=0", base], cwd=root)
-    if diff.returncode != 0:
-        fail(f"git diff failed: {diff.stderr.strip()}")
-    return paths, lines, diff.stdout
+
+def path_token(text):
+    """A path field from a diff header; an undecodable quoted one gets a marker byte so it is flagged."""
+    if text.startswith('"'):
+        try:
+            return read_quoted(text, 0)[0]
+        except ValueError:
+            return text + "\udcff"
+    return text.split("\t", 1)[0]
 
 
-def parse_unified(text):
-    paths = []
-    changed = {}
-    current = None
-    old = None
-    in_hunk = False
-    for line in text.splitlines():
-        if line.startswith("diff --git "):
-            m = re.match(r"diff --git a/(.*) b/(.*)$", line)
-            if m:
-                old, new = m.group(1), m.group(2)
-                current = new
-                if current not in paths:
-                    paths.append(current)
-                changed.setdefault(current, [])
-            in_hunk = False
-            continue
-        if line.startswith("--- "):
-            value = line[4:].strip()
-            if value != "/dev/null":
-                old = value[2:] if value.startswith("a/") else value
-            continue
-        if line.startswith("+++ "):
-            value = line[4:].strip()
-            if value == "/dev/null":
-                current = old
+def strip_side(path, side):
+    return path[2:] if path.startswith(side + "/") else path
+
+
+def git_header_paths(rest):
+    """Candidate (old, new) pairs from `diff --git` text; ambiguous only for unquoted names with spaces."""
+    try:
+        if rest.startswith('"'):
+            left, end = read_quoted(rest, 0)
+            right = rest[end + 1:]
+        else:
+            quoted = rest.find(' "')
+            if quoted != -1:
+                left, right = rest[:quoted], rest[quoted + 1:]
             else:
-                current = value[2:] if value.startswith("b/") else value
-                if current not in paths:
-                    paths.append(current)
-                changed.setdefault(current, [])
-            in_hunk = False
-            continue
-        if line.startswith("@@ "):
-            in_hunk = True
-            continue
-        if in_hunk and current is not None and line.startswith("+"):
-            changed.setdefault(current, []).append(line[1:])
-        elif in_hunk and current is not None and line.startswith("-"):
-            changed.setdefault(current, []).append(line[1:])
-    return [normalize_path(p) for p in paths], changed
+                left = right = None
+                first = None
+                for i, ch in enumerate(rest):
+                    if ch != " ":
+                        continue
+                    lhs, rhs = rest[:i], rest[i + 1:]
+                    if not (lhs.startswith("a/") and rhs.startswith("b/")):
+                        continue
+                    if lhs[2:] == rhs[2:]:
+                        return [(lhs[2:], rhs[2:])]
+                    first = first or (lhs, rhs)
+                if first is None:
+                    return [(rest, rest)]
+                left, right = first
+        if right.startswith('"'):
+            right = read_quoted(right, 0)[0]
+        return [(strip_side(left, "a"), strip_side(right, "b"))]
+    except ValueError:
+        return [(rest + "\udcff", rest)]
+
+
+class DiffParser:
+    """Streams a unified diff into paths and changed lines.
+
+    Lines only count as content while the hunk header's counts say a hunk is
+    still open, so an added line that reads `++ b/x` cannot pass as a file header.
+    """
+
+    def __init__(self, cap):
+        self.cap = cap
+        self.paths = []
+        self.bad = set()
+        self.changed = {}
+        self.lines = 0
+        self.total = 0
+        self.truncated = False
+        self._known = set()
+        self._file = None
+        self._current = None
+        self._old_left = 0
+        self._new_left = 0
+
+    def consume(self, stream, drain):
+        while True:
+            raw = stream.readline(self.cap + 1)
+            if not raw:
+                break
+            if not raw.endswith(b"\n") and len(raw) > self.cap:
+                # A single line past the cap: discard the rest of it unread.
+                self.truncated = True
+                while True:
+                    more = stream.readline(65536)
+                    if not more or more.endswith(b"\n"):
+                        break
+            self.total += len(raw)
+            if self.total > self.cap:
+                self.truncated = True
+                if not drain:
+                    break
+            self.feed(raw.decode("utf-8", "surrogateescape").rstrip("\n"))
+        self._finish()
+
+    def _add(self, raw):
+        key = canon(raw, self.bad)
+        if not key:
+            return None
+        if key not in self._known:
+            self._known.add(key)
+            self.paths.append(key)
+        self.changed.setdefault(key, [])
+        return key
+
+    def _begin(self):
+        self._finish()
+        self._file = {"candidates": [], "sure": False}
+        self._current = None
+
+    def _finish(self):
+        f = self._file
+        if f is not None and not f["sure"]:
+            for old, new in f["candidates"]:
+                self._add(old)
+                self._add(new)
+        self._file = None
+
+    def _sure(self, raw):
+        if self._file is None:
+            self._begin()
+        self._file["sure"] = True
+        return self._add(raw)
+
+    def _record(self, line):
+        self.lines += 1
+        if not self.truncated and self._current is not None:
+            self.changed[self._current].append(line[1:])
+
+    def feed(self, line):
+        if self._old_left > 0 or self._new_left > 0:
+            lead = line[:1]
+            if lead == "\\":
+                return
+            if lead == "+":
+                self._new_left -= 1
+                self._record(line)
+            elif lead == "-":
+                self._old_left -= 1
+                self._record(line)
+            else:
+                self._old_left -= 1
+                self._new_left -= 1
+            self._old_left = max(self._old_left, 0)
+            self._new_left = max(self._new_left, 0)
+            return
+        if line.startswith("diff --git "):
+            self._begin()
+            self._file["candidates"] = git_header_paths(line[len("diff --git "):])
+        elif line.startswith("--- "):
+            if self._file is not None and self._file.get("plus") is not None:
+                self._begin()
+            value = path_token(line[4:])
+            if self._file is None:
+                self._begin()
+            self._file["minus"] = None if value == "/dev/null" else strip_side(value, "a")
+            if self._file["minus"] is not None:
+                self._current = self._sure(self._file["minus"])
+        elif line.startswith("+++ "):
+            if self._file is None:
+                self._begin()
+            value = path_token(line[4:])
+            self._file["plus"] = None if value == "/dev/null" else strip_side(value, "b")
+            if self._file["plus"] is not None:
+                self._current = self._sure(self._file["plus"])
+        elif line.startswith(("rename from ", "copy from ")):
+            self._sure(path_token(line.split(" from ", 1)[1]))
+        elif line.startswith(("rename to ", "copy to ")):
+            self._current = self._sure(path_token(line.split(" to ", 1)[1]))
+        elif line.startswith("@@ "):
+            m = HUNK_HEADER.match(line)
+            if m:
+                self._old_left = 1 if m.group(1) is None else int(m.group(1))
+                self._new_left = 1 if m.group(2) is None else int(m.group(2))
+
+
+def spawn_diff(cmd, cwd):
+    errors = tempfile.TemporaryFile()
+    try:
+        proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=errors)
+    except FileNotFoundError:
+        fail(f"{cmd[0]} is not installed")
+    except OSError as e:
+        fail(f"cannot run {cmd[0]}: {e}")
+    return proc, errors
+
+
+def stream_diff(cmd, cwd, drain, label):
+    proc, errors = spawn_diff(cmd, cwd)
+    parser = DiffParser(CONTENT_SCAN_CAP)
+    try:
+        parser.consume(proc.stdout, drain)
+        if parser.truncated and not drain:
+            proc.kill()
+        code = proc.wait()
+    finally:
+        proc.stdout.close()
+    if code != 0 and not (parser.truncated and not drain):
+        errors.seek(0)
+        detail = errors.read().decode("utf-8", "replace").strip()
+        errors.close()
+        fail(f"{label} failed: {detail}")
+    errors.close()
+    return parser
 
 
 def pr_inputs(number, repo):
     cmd = ["gh", "pr", "diff", str(number)]
     if repo:
         cmd += ["--repo", repo]
-    r = run(cmd)
-    if r.returncode != 0:
-        detail = (r.stderr or r.stdout).strip()
-        fail(f"gh pr diff {number} failed: {detail}")
-    paths, changed = parse_unified(r.stdout)
-    lines = sum(len(v) for v in changed.values())
-    return paths, lines, r.stdout
+    parser = stream_diff(cmd, None, True, f"gh pr diff {number}")
+    changed = None if parser.truncated else parser.changed
+    return parser.paths, parser.bad, parser.lines, changed
+
+
+def diff_inputs(root, base):
+    common = ["-c", "core.quotePath=false", "diff", "--no-renames", "--no-ext-diff"]
+    bad = set()
+    paths = []
+    known = set()
+
+    def add(raw):
+        key = canon(raw, bad)
+        if key and key not in known:
+            known.add(key)
+            paths.append(key)
+        return key
+
+    names = git_raw([*common, "-z", "--name-only", base, "--"], root, "git diff --name-only")
+    for raw in names.split(b"\0"):
+        if raw:
+            add(raw.decode("utf-8", "surrogateescape"))
+
+    lines = 0
+    numstat = git_raw([*common, "-z", "--numstat", base, "--"], root, "git diff --numstat")
+    for record in numstat.split(b"\0"):
+        parts = record.split(b"\t", 2)
+        for value in (parts[:2] if len(parts) >= 2 else ()):
+            if value.isdigit():
+                lines += int(value)
+
+    parser = stream_diff(["git", *common, "--unified=0", "--src-prefix=a/", "--dst-prefix=b/", base, "--"],
+                         root, False, "git diff")
+    for key in parser.paths:
+        add(key)
+    bad |= parser.bad
+    changed = None if parser.truncated else parser.changed
+    spent = parser.total
+
+    untracked = git_raw(["ls-files", "-o", "--exclude-standard", "-z"], root, "git ls-files")
+    for raw in untracked.split(b"\0"):
+        if not raw:
+            continue
+        key = add(raw.decode("utf-8", "surrogateescape"))
+        full = os.path.join(os.fsencode(root), raw)
+        try:
+            if not stat.S_ISREG(os.lstat(full).st_mode):
+                continue
+            with open(full, "rb") as fh:
+                data = fh.read(UNTRACKED_FILE_CAP + 1)
+        except OSError:
+            changed = None
+            continue
+        if len(data) > UNTRACKED_FILE_CAP:
+            data = data[:UNTRACKED_FILE_CAP]
+            changed = None
+        spent += len(data)
+        if spent > CONTENT_SCAN_CAP:
+            changed = None
+        text = data.decode("utf-8", "surrogateescape")
+        added = text.split("\n")
+        if added and added[-1] == "":
+            added.pop()
+        lines += len(added)
+        if changed is not None and key:
+            changed.setdefault(key, []).extend(added)
+    return paths, bad, lines, changed
 
 
 def read_paths(value):
     if value == "-":
-        text = sys.stdin.read()
+        data = sys.stdin.buffer.read()
     else:
         try:
-            text = Path(value).read_text(encoding="utf-8")
+            data = Path(value).read_bytes()
         except OSError as e:
             fail(f"cannot read files {value}: {e.strerror}")
-    return list(dict.fromkeys(normalize_path(line) for line in text.splitlines() if line.strip()))
+    bad = set()
+    keys = [canon(line, bad) for line in data.decode("utf-8", "surrogateescape").splitlines() if line.strip()]
+    return list(dict.fromkeys(k for k in keys if k)), bad
 
 
 def read_plan(value):
     if value == "-":
-        return sys.stdin.read()
-    try:
-        return Path(value).read_text(encoding="utf-8")
-    except OSError as e:
-        fail(f"cannot read plan {value}: {e.strerror}")
+        data = sys.stdin.buffer.read()
+    else:
+        try:
+            data = Path(value).read_bytes()
+        except OSError as e:
+            fail(f"cannot read plan {value}: {e.strerror}")
+    return data.decode("utf-8", "replace")
 
 
 # ── Classification ───────────────────────────────────────────────────────────
@@ -432,16 +710,22 @@ def _floor_matches(floor, full, bare):
     return bool(full) and floor["repo"] in (full, bare)
 
 
-def classify(paths, lines, changed, plan_text, policy, repo, content_scanned, explain):
+def classify(paths, bad, lines, changed, plan_text, policy, repo, repo_known, content_scanned, explain):
     reasons = []
+    warnings = []
     tags = set()
     best = -1
-    all_docs_r0 = bool(paths)
+    all_docs_r0 = bool(paths) and not bad
 
     path_rules = [r for r in policy["rules"] if r["paths"]]
     content_rules = [r for r in policy["rules"] if r["content"]]
     plan_rules = [r for r in policy["rules"] if r["plan"]]
     content_skip = {}
+
+    for path in sorted(bad):
+        reasons.append({"rule": "undecodable-path", "tier": "R3", "where": path, "tag": "path"})
+        tags.add("path")
+        best = max(best, TIER_INDEX["R3"])
 
     for path in paths:
         matched = [r for r in path_rules if matches(r["paths"], path) and not matches(r["exclude"], path)]
@@ -496,6 +780,8 @@ def classify(paths, lines, changed, plan_text, policy, repo, content_scanned, ex
 
     bare = repo.rsplit("/", 1)[-1] if repo else ""
     floor_tier = None
+    if paths and policy["floors"] and not repo_known:
+        warnings.append("repo unknown, floors skipped")
     if paths and not (all_docs_r0 and base_tier == "R0"):
         for floor in policy["floors"]:
             if not _floor_matches(floor, repo, bare):
@@ -549,6 +835,7 @@ def classify(paths, lines, changed, plan_text, policy, repo, content_scanned, ex
         "files": len(paths),
         "lines": lines,
         "content_scanned": content_scanned,
+        "warnings": warnings,
     }
 
 
@@ -603,54 +890,34 @@ def main(argv):
 
     plan_text = "\n".join(read_plan(p) for p in args.plan)
     root = repo_root()
-    repo = repo_identity(args.repo, root)
+    repo, repo_known = repo_identity(args.repo, root)
 
+    bad = set()
     content_scanned = None
     if args.files is not None:
-        paths = read_paths(args.files)
+        paths, bad = read_paths(args.files)
         lines = 0
         changed = None
         content_scanned = False
     elif args.pr is not None:
-        paths, lines, pr_diff = pr_inputs(args.pr, args.repo)
-        if len(pr_diff.encode("utf-8", "replace")) > CONTENT_SCAN_CAP:
-            changed = None
-            content_scanned = False
-        else:
-            parsed_paths, changed = parse_unified(pr_diff)
-            known = set(paths)
-            paths += [p for p in parsed_paths if p not in known]
-            content_scanned = True
+        paths, bad, lines, changed = pr_inputs(args.pr, args.repo)
+        content_scanned = changed is not None
     elif args.plan and not (args.diff or args.base):
         # A plan is classified before any code exists, so the working tree's
         # diff must not leak into its tier.
         paths, lines, changed, content_scanned = [], 0, None, None
-    else:
-        if root is None:
-            if args.plan:
-                paths, lines, changed, content_scanned = [], 0, None, None
-            else:
-                fail("not a git repository")
+    elif root is None:
+        if args.plan:
+            paths, lines, changed, content_scanned = [], 0, None, None
         else:
-            head = git(["rev-parse", "--verify", "HEAD^{commit}"], cwd=root)
-            if head.returncode != 0:
-                paths, lines, diff_text = [], 0, ""
-            else:
-                base = resolve_base(args.base, root)
-                if base is None:
-                    paths, lines, diff_text = [], 0, ""
-                else:
-                    paths, lines, diff_text = diff_inputs(root, base)
-            if len(diff_text.encode("utf-8", "replace")) > CONTENT_SCAN_CAP:
-                changed = None
-                content_scanned = False
-            else:
-                parsed_paths, changed = parse_unified(diff_text)
-                known = set(paths)
-                paths += [p for p in parsed_paths if p not in known]
-                content_scanned = True
+            fail("not a git repository")
+    else:
+        base = resolve_base(args.base, root)
+        paths, bad, lines, changed = diff_inputs(root, base)
+        content_scanned = changed is not None
 
-    result = classify(paths, lines, changed, plan_text, policy, repo, content_scanned, args.explain)
+    result = classify(paths, bad, lines, changed, plan_text, policy, repo, repo_known, content_scanned,
+                      args.explain)
     emit_result(result)
 
     if args.fail_at and TIER_INDEX[result["tier"]] >= TIER_INDEX[args.fail_at]:

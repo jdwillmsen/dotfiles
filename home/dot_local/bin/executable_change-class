@@ -858,7 +858,7 @@ def classify(paths, bad, lines, changed, plan_text, policy, repo, repo_known, co
 
     floor_tier = None
     if paths and policy["floors"] and not repo_known:
-        warnings.append("repo unknown, floors skipped")
+        warnings.append("repo unknown, floors matched on directory name" if repo else "repo unknown, floors skipped")
     if paths and not (all_docs_r0 and base_tier == "R0"):
         for floor in policy["floors"]:
             if not _floor_matches(floor, repo, bare):

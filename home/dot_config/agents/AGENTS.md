@@ -94,7 +94,7 @@ before you merge: `change-class --plan FILE` for a plan or ticket,
 `change-class` (or `--pr N`) for a diff. Policy: `~/.config/agents/change-risk.toml`;
 rationale: dotfiles `docs/autonomous-delivery.md`. Highest tier wins; when
 unsure, classify up. Put the result on the PR and ticket as labels
-(`risk/R2`, `tag/prd`).
+(PRs: `risk/R2`, `tag/prd`; tickets: `risk-R2`).
 
 | Tier | Examples | Review before merge | Human |
 |---|---|---|---|

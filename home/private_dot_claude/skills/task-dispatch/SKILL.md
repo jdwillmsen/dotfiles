@@ -37,7 +37,8 @@ dispatch only when you will actually run the task.
 ## 3. Brief and launch
 
 - Create the worktree yourself (`gwta`, or `git worktree add <path> -b <branch>
-  origin/main`) and pass its path; shared isolation runs in the parent's cwd.
+  origin/main`; when the task depends on an open PR, start from that PR's branch
+  `origin/<pr-branch>` instead and tell the worker what is pending in it) and pass its path; shared isolation runs in the parent's cwd.
 - Launch with `delegate_task`, `clientRequestId` = the assignment id. The brief is
   all the worker has: ticket key, goal, repo and worktree path, files and
   constraints, the exact commands that prove it works, the commit trailers for

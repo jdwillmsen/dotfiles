@@ -74,7 +74,7 @@ named, never read as zero).
 
 Top level: `schema` (1), `window`, `start`, `end` (exclusive), `label_date`,
 `generated_at`, `current`, `previous`, `trend`, `flags`, `delivery`, `audit`,
-`insights`.
+`models`, `insights`.
 
 - **`current`, `previous`**: `populations.{interactive,scripted}` each with
   `sessions`, `cost_usd`, `cost_by_pipeline` (`none` for unattributed),

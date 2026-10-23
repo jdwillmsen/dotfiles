@@ -195,8 +195,8 @@ repos = ["jdwlabs/deployments", "dotablaze-tech/deployments"]
 paths = ["charts/*/templates/**", "charts/*/values.yaml"]
 
 # --- content rules -----------------------------------------------------------
-# Tried against changed lines of every file a path rule did not already put at
-# R0, so a runbook that mentions `kubectl delete` stays a doc.
+# Tried against changed lines for each content rule unless that rule's `exclude`
+# globs match the path. Rules without exclusions also scan docs and tests.
 
 [[rule]]
 id = "embedded-secret"
@@ -223,7 +223,7 @@ exclude = ["**/*.md", "docs/**", "tests/**"]
 id = "destructive-command"
 tag = "destructive"
 tier = "R3"
-content = ['\brm\s+(-[a-zA-Z]+\s+|--[a-z-]+\s+)+(/(?!tmp/[A-Za-z0-9_.-]*[A-Za-z0-9_-](\s|[\x22\x27]|$))|~|[\x22\x27]?\$HOME)', '\bkubectl\s+delete\b', '\bterraform\s+destroy\b', '\bgit\s+push\s+(-f\b|--force\b)', '(?i)\bDROP\s+(TABLE|DATABASE|SCHEMA)\b', '(?i)\bTRUNCATE\s+TABLE\b', '(?i)\bDELETE\s+FROM\b(?![^;]*\bWHERE\b)']
+content = ['\brm\s+(-[a-zA-Z]+\s+|--[a-z-]+\s+)+(/(?!tmp/[A-Za-z0-9_.-]*[A-Za-z0-9_-](\s|[\x22\x27]|$))|~|[\x22\x27]?\$HOME)', '\bkubectl\s+delete\b', '\bterraform\s+destroy\b', '\bgit\s+push\b[^\n;|&]*\s(-f\b|--force\b|\+[^\s]+)', '(?i)\bDROP\s+(TABLE|DATABASE|SCHEMA)\b', '(?i)\bTRUNCATE\s+TABLE\b', '(?i)\bDELETE\s+FROM\b(?![^;]*\bWHERE\b)']
 exclude = ["**/*.md", "docs/**", "tests/**", "**/test_*.sh"]
 
 # --- plan rules --------------------------------------------------------------

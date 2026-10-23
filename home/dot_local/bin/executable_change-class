@@ -476,12 +476,21 @@ def classify(paths, lines, changed, plan_text, policy, repo, content_scanned, ex
                     best = max(best, TIER_INDEX[rule["tier"]])
 
     if plan_text:
+        plan_hit = False
         for rule in plan_rules:
             if any(rx.search(plan_text) for rx in rule["plan"]):
+                plan_hit = True
                 reasons.append({"rule": rule["id"], "tier": rule["tier"], "where": "plan",
                                 "tag": rule["tag"]})
                 tags.add(rule["tag"])
                 best = max(best, TIER_INDEX[rule["tier"]])
+        # With no paths to judge, a plan nothing recognised is ordinary code.
+        if not plan_hit and not paths:
+            default = policy["default"]
+            reasons.append({"rule": "default", "tier": default["tier"], "where": "plan",
+                            "tag": default["tag"]})
+            tags.add(default["tag"])
+            best = max(best, TIER_INDEX[default["tier"]])
 
     base_tier = TIERS[best] if best >= 0 else "R0"
 
@@ -566,6 +575,7 @@ def build_parser():
                       "  change-class --fail-at R3             exit 3 when the tier is R3")
     p.add_argument("--rules", metavar="FILE", help="policy file (default ~/.config/agents/change-risk.toml)")
     p.add_argument("--base", metavar="REF", help="diff against another base")
+    p.add_argument("--diff", action="store_true", help="with --plan, also classify the working diff")
     p.add_argument("--pr", type=int, metavar="N", help="use gh pr diff for that pull request")
     p.add_argument("--repo", metavar="O/R", help="repository name for floors and gh")
     p.add_argument("--files", metavar="FILE|-", help="newline-separated paths, '-' for stdin")
@@ -611,6 +621,10 @@ def main(argv):
             known = set(paths)
             paths += [p for p in parsed_paths if p not in known]
             content_scanned = True
+    elif args.plan and not (args.diff or args.base):
+        # A plan is classified before any code exists, so the working tree's
+        # diff must not leak into its tier.
+        paths, lines, changed, content_scanned = [], 0, None, None
     else:
         if root is None:
             if args.plan:

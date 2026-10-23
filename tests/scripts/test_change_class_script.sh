@@ -390,11 +390,11 @@ if grep -qx 'content_scanned: false' "$out"; then fail "a normal diff claimed a 
 
 got=0
 wipe='wipe the world and restart the server while players are online'
-( cd "$repo" && printf '%s\n' "$wipe" | "$cc" --rules "$rules" --plan - ) \
+( cd "$repo" && printf '%s\n' "$wipe" | "$cc" --rules "$rules" --plan - --diff ) \
     >"$out" 2>"$err" || got=$?
 [ "$got" = 0 ] || fail "diff plus plan exited $got" "$(cat "$out" "$err")"
 grep -qx 'tier: R3' "$out" || fail "a diff plus an R3 plan did not combine to R3" "$(cat "$out")"
-( cd "$repo" && printf 'add a unit test for the parser\n' | "$cc" --rules "$rules" --plan - ) >"$out"
+( cd "$repo" && printf 'add a unit test for the parser\n' | "$cc" --rules "$rules" --plan - --diff ) >"$out"
 grep -qx 'tier: R1' "$out" || fail "a benign plan lowered the diff tier" "$(cat "$out")"
 
 fallback="$tmp/fallback"
@@ -514,5 +514,14 @@ run 2 --bogus
 
 run 0 --version
 grep -qx '1.0.0' "$out" || fail "--version did not print the version" "$(cat "$out")"
+
+
+# --plan alone must ignore the working diff (the repo above has an R1 diff).
+( cd "$repo" && printf 'add a unit test for the parser\n' | "$cc" --rules "$rules" --plan - ) >"$out"
+grep -qx 'tier: R0' "$out" || fail "a plan alone was lifted by the working diff" "$(cat "$out")"
+( cd "$repo" && printf 'refactor the map renderer\n' | "$cc" --rules "$rules" --plan - ) >"$out"
+grep -qx 'tier: R1' "$out" || fail "an unrecognised plan is not the default R1" "$(cat "$out")"
+( cd "$repo" && printf 'refactor the renderer and add tests\n' | "$cc" --rules "$rules" --plan - ) >"$out"
+grep -qx 'tier: R1' "$out" || fail "a mixed plan was lowered to R0" "$(cat "$out")"
 
 echo "test_change_class_script: OK"

@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+# clone-repos — re-clone the declared repos onto this machine.
+#
+# Code is not backed up; a fresh machine gets it back from GitHub. The list is
+# rendered by chezmoi to ~/.config/clone-repos/repos.tsv. Agent-facing: stdout
+# is TOON, errors included. Exit 0 when every selected repo is present, 1 when
+# any could not be cloned or its path is taken, 2 for a usage error.
+set -uo pipefail
+
+VERSION="1.0.0"
+LIST="${CLONE_REPOS_LIST:-$HOME/.config/clone-repos/repos.tsv}"
+ROOT="${CLONE_REPOS_ROOT:-$HOME/projects}"
+# Only the git fallback reads this; tests point it at local bare repos.
+URL_BASE="${CLONE_REPOS_URL_BASE:-https://github.com}"
+ERR_MAX=160
+
+usage() {
+    cat <<'EOF'
+Usage: clone-repos [--group G[,G...]] [--dry-run] [--root DIR]
+
+Clone every repo in the selected groups that is not already on disk. Existing
+clones are reported and never touched, so it is safe to re-run.
+
+  --group G    groups to clone (repeatable, or comma-separated); `all` is every
+               repo. Default: this machine's role default from the list.
+  --dry-run    report what would be cloned, clone nothing
+  --root DIR   where repo paths are rooted (default ~/projects,
+               env CLONE_REPOS_ROOT)
+  --list FILE  repo list (default ~/.config/clone-repos/repos.tsv,
+               env CLONE_REPOS_LIST)
+
+Clones with `gh repo clone` when gh is logged in, else `git clone` over HTTPS.
+EOF
+}
+
+# TOON scalar: quoted only when bare text would be misread.
+q() {
+    local s="${1//$'\n'/ }"
+    s="${s//$'\r'/}"
+    if [ -z "$s" ] || [[ "$s" =~ [,:\"\\\[\]{}] ]] || [[ "$s" == -* ]] ||
+        [[ "$s" == " "* ]] || [[ "$s" == *" " ]] || [[ "$s" =~ ^(true|false|null)$ ]]; then
+        s="${s//\\/\\\\}"
+        printf '"%s"' "${s//\"/\\\"}"
+    else
+        printf '%s' "$s"
+    fi
+}
+
+tilde() { case "$1" in "$HOME"/*) printf '%s/%s' '~' "${1#"$HOME"/}" ;; *) printf '%s' "$1" ;; esac; }
+
+die() {
+    local code="$1" msg="$2"
+    shift 2
+    printf 'error: %s\n' "$(q "$msg")"
+    if [ "$#" -gt 0 ]; then
+        printf 'help[%d]:\n' "$#"
+        printf '  %s\n' "$@"
+    fi
+    exit "$code"
+}
+
+groups=()
+dry_run=false
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -h | --help) usage; exit 0 ;;
+        -v | -V | --version) echo "$VERSION"; exit 0 ;;
+        --dry-run | -n) dry_run=true ;;
+        --group | -g)
+            [ "$#" -ge 2 ] || die 2 "--group needs a value" "clone-repos --help"
+            IFS=, read -ra g <<<"$2"; groups+=("${g[@]}"); shift ;;
+        --group=*) IFS=, read -ra g <<<"${1#*=}"; groups+=("${g[@]}") ;;
+        --root)
+            [ "$#" -ge 2 ] || die 2 "--root needs a value" "clone-repos --help"
+            ROOT="$2"; shift ;;
+        --root=*) ROOT="${1#*=}" ;;
+        --list)
+            [ "$#" -ge 2 ] || die 2 "--list needs a value" "clone-repos --help"
+            LIST="$2"; shift ;;
+        --list=*) LIST="${1#*=}" ;;
+        *) die 2 "unknown argument: $1" "clone-repos --help" ;;
+    esac
+    shift
+done
+
+[ -f "$LIST" ] || die 1 "no repo list at $(tilde "$LIST")" "chezmoi apply" "clone-repos --list <file>"
+[ -n "$ROOT" ] || die 2 "--root is empty" "clone-repos --help"
+ROOT="${ROOT%/}"
+
+# Parse and validate the whole list before cloning anything: a bad row found
+# halfway through would leave a partial restore that looks deliberate.
+slugs=() paths=() tags=()
+default_group=all
+lineno=0
+list_label="$(tilde "$LIST")"
+seen_paths=" "
+while IFS= read -r line || [ -n "$line" ]; do
+    lineno=$((lineno + 1))
+    line="${line%$'\r'}"
+    [ -z "${line//[[:space:]]/}" ] && continue
+    [[ "$line" == \#* ]] && continue
+    IFS=$'\t' read -r slug path tag extra <<<"$line"
+    if [ "$slug" = default-group ]; then
+        default_group="${path:-all}"
+        continue
+    fi
+    where="$list_label:$lineno"
+    [ -z "${extra:-}" ] || die 1 "$where: too many fields"
+    [[ "$slug" =~ ^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+$ ]] || die 1 "$where: invalid slug '$slug'"
+    # The path becomes a directory under the root, so it must not climb out of it.
+    if [ -z "${path:-}" ] || [[ "$path" == /* ]] || [[ "$path" =~ ^[A-Za-z]: ]] ||
+        [[ "/$path/" == */../* ]] || [[ "/$path/" == */./* ]] || [[ "$path" =~ [^A-Za-z0-9._/-] ]]; then
+        die 1 "$where: invalid path '${path:-}'"
+    fi
+    key=" $(printf '%s' "$path" | tr '[:upper:]' '[:lower:]') "
+    [[ "$seen_paths" == *"$key"* ]] && die 1 "$where: duplicate path '$path'"
+    seen_paths+="${key# }"
+    slugs+=("$slug") paths+=("$path") tags+=("${tag:-}")
+done <"$LIST"
+
+[ "${#slugs[@]}" -gt 0 ] || die 1 "$(tilde "$LIST") lists no repos" "chezmoi apply"
+
+if [ "${#groups[@]}" -eq 0 ]; then
+    IFS=, read -ra groups <<<"$default_group"
+fi
+
+known=" all "
+for t in "${tags[@]}"; do
+    IFS=, read -ra ts <<<"$t"
+    for x in "${ts[@]}"; do [[ "$known" == *" $x "* ]] || known+="$x "; done
+done
+for g in "${groups[@]}"; do
+    [[ "$known" == *" $g "* ]] || {
+        k="${known# }"
+        die 2 "unknown group '$g' (known: ${k% })" "clone-repos --group <group> --dry-run"
+    }
+done
+
+selected=()
+for i in "${!slugs[@]}"; do
+    for g in "${groups[@]}"; do
+        if [ "$g" = all ] || [[ ",${tags[$i]}," == *",$g,"* ]]; then
+            selected+=("$i")
+            break
+        fi
+    done
+done
+
+# A repo that exists but points elsewhere is reported, not "fixed": the rule is
+# that nothing here ever changes a clone that is already on disk.
+origin_matches() {
+    local url want
+    url="$(git -C "$1" remote get-url origin 2>/dev/null | tr '[:upper:]' '[:lower:]')" || return 1
+    url="${url%/}"
+    url="${url%.git}"
+    want="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+    [[ "$url" == *[:/]"$want" ]]
+}
+
+via=git
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    via=gh
+fi
+
+# A credential prompt nobody answers would hang a non-interactive run forever.
+export GIT_TERMINAL_PROMPT=0
+export GH_PROMPT_DISABLED=1
+
+clone() {
+    if [ "$via" = gh ]; then
+        gh repo clone "$1" "$2" -- --quiet
+    else
+        git clone --quiet "$URL_BASE/$1.git" "$2"
+    fi
+}
+
+errlog="$(mktemp)"
+trap 'rm -f "$errlog"' EXIT
+
+rows=() errors=()
+n_cloned=0 n_exists=0 n_would=0 n_failed=0 n_conflict=0
+for i in "${selected[@]}"; do
+    slug="${slugs[$i]}" path="${paths[$i]}" dest="$ROOT/${paths[$i]}"
+    status=""
+    if [ -e "$dest/.git" ]; then
+        if origin_matches "$dest" "$slug"; then
+            status=exists; n_exists=$((n_exists + 1))
+        else
+            status=conflict; n_conflict=$((n_conflict + 1))
+            errors+=("$(q "$slug"),$(q "$(tilde "$dest") is a repo whose origin is not $slug")")
+        fi
+    elif [ -e "$dest" ] && { [ ! -d "$dest" ] || [ -n "$(ls -A "$dest" 2>/dev/null)" ]; }; then
+        # git refuses a non-empty target anyway; saying why beats its message.
+        status=conflict; n_conflict=$((n_conflict + 1))
+        errors+=("$(q "$slug"),$(q "$(tilde "$dest") exists and is not a git repo")")
+    elif [ "$dry_run" = true ]; then
+        status=would-clone; n_would=$((n_would + 1))
+    else
+        mkdir -p "$(dirname "$dest")"
+        if clone "$slug" "$dest" >/dev/null 2>"$errlog"; then
+            status=cloned; n_cloned=$((n_cloned + 1))
+        else
+            status=failed; n_failed=$((n_failed + 1))
+            msg="$(grep -v '^[[:space:]]*$' "$errlog" | tail -n 1)"
+            errors+=("$(q "$slug"),$(q "${msg:0:$ERR_MAX}")")
+        fi
+    fi
+    rows+=("$(q "$slug"),$(q "$path"),$status")
+done
+
+total="${#selected[@]}"
+printf 'root: %s\n' "$(q "$(tilde "$ROOT")")"
+printf 'groups: %s\n' "$(q "$(IFS=,; echo "${groups[*]}")")"
+printf 'via: %s\n' "$via"
+[ "$dry_run" = true ] && echo "dry_run: true"
+if [ "$total" -eq 0 ]; then
+    echo "repos: 0 (no repo in the list carries these groups)"
+else
+    printf 'repos[%d]{slug,path,status}:\n' "$total"
+    printf '  %s\n' "${rows[@]}"
+fi
+summary="exists=$n_exists"
+[ "$dry_run" = true ] && summary="would_clone=$n_would $summary" || summary="cloned=$n_cloned $summary"
+summary+=" failed=$n_failed conflict=$n_conflict total=$total"
+printf 'summary: %s\n' "$summary"
+
+if [ "${#errors[@]}" -gt 0 ]; then
+    printf 'errors[%d]{slug,error}:\n' "${#errors[@]}"
+    printf '  %s\n' "${errors[@]}"
+    hints=()
+    [ "$n_failed" -eq 0 ] || hints+=("gh auth status" "gh repo view <slug>")
+    [ "$n_conflict" -eq 0 ] || hints+=("mv <path> <path>.old, then clone-repos --group $(IFS=,; echo "${groups[*]}")")
+    printf 'help[%d]:
+' "${#hints[@]}"
+    printf '  %s
+' "${hints[@]}"
+    exit 1
+fi
+if [ "$dry_run" = true ] && [ "$n_would" -gt 0 ]; then
+    echo "help[1]:"
+    echo "  clone-repos --group $(IFS=,; echo "${groups[*]}")"
+fi
+exit 0

@@ -1,0 +1,6 @@
+# Rendered by chezmoi from `repos` in .chezmoidata.yaml — edit it there.
+# slug<TAB>path under the root<TAB>comma-separated groups
+default-group	{{ get .repoDefaultGroups .machineRole | default (list "all") | join "," }}
+{{ range .repos -}}
+{{ .slug }}	{{ .path }}	{{ .groups | join "," }}
+{{ end -}}

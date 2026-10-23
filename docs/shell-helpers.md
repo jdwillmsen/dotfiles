@@ -144,3 +144,35 @@ specifically; the override file still works, since it is explicit.
 
 Resolves a repo's `<owner>/<repo>`, its Jira project, and the stream's open
 PRs and alerts. See [streams.md](streams.md).
+
+## `clone-repos` — restore the repo set on a fresh machine
+
+Code is not backed up; a reinstalled machine gets it back from GitHub. The
+list is `repos` in `home/.chezmoidata.yaml`, rendered by `chezmoi apply` to
+`~/.config/clone-repos/repos.tsv` (slug, path under the root, groups).
+
+```bash
+clone-repos --dry-run             # what this machine's default would clone
+clone-repos                       # clone the role default (gaming: core; others: all)
+clone-repos --group jdwlabs       # one group; comma-separate or repeat for more
+clone-repos --group all --root /d/src  # every repo, somewhere other than ~/projects
+```
+
+Groups: `core` (gaming-rig, dotfiles), `jdwillmsen`, `jdwlabs`, `dotablaze`,
+plus `all`. The per-role default lives in `repoDefaultGroups` beside the list.
+
+- Idempotent: an existing clone is reported as `exists` and never fetched,
+  pulled or reconfigured. A path taken by a non-repo, or by a repo whose
+  `origin` is a different slug, is a `conflict` and left alone.
+- Clones with `gh repo clone` when `gh auth status` passes, else `git clone`
+  over HTTPS through the configured credential helper. Prompts are disabled,
+  so a missing login fails the row instead of hanging.
+- Paths follow the stream layout (`~/projects/<owner>/<repo>`, see
+  [streams.md](streams.md)); `Dotablaze/dotablaze-tech` is filed under
+  `dotablaze-tech/`.
+- Output is TOON; exit 0 when every selected repo is present, 1 when any
+  clone failed or conflicted (the rest still run), 2 for a usage error.
+
+`jdwillmsen/experiments-archive` (private) is deliberately not listed: it holds
+retired repos as `<repo>/<branch>` branches, and git bundles under
+`bundles/2026-10`. Clone it by hand when something old is needed.

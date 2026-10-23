@@ -13,3 +13,6 @@ dot_zshrc text eol=lf
 # chezmoi applies from the working tree, so an autocrlf-smudged checkout
 # would push CRLF into the live ~/.claude files.
 home/private_dot_claude/*.md text eol=lf
+# A bash script with CRLF endings fails on its first line, and a fresh Windows
+# checkout defaults to autocrlf before ~/.gitconfig exists.
+home/dot_local/bin/executable_clone-repos text eol=lf

@@ -49,6 +49,8 @@ CONCURRENCY_WINDOW_S = 4 * 3600
 END_GAME_F = 0.85
 EVIDENCE_FLOOR = 0.2
 EVAL_TIMEOUT_S = 30
+R2_REVIEWERS = ("claude-sonnet", "claude-opus")
+R3_REVIEWER = "claude-opus"
 TICKET = re.compile(r"[A-Z][A-Z0-9]*-[0-9]+")
 LANE_KEYS = ("id", "group", "provider", "model", "status", "share", "max_risk", "concurrency", "classes")
 
@@ -552,7 +554,12 @@ def cmd_ladder(args):
     ctx = Ctx(load_policy(), now_epoch())
     check_task(ctx, args.cls, args.risk)
     exclude = parse_lane_list(args.exclude, ctx)
-    eligible = active(ctx, eligible_lanes(ctx, args.cls, args.risk, exclude, open_assignments(ctx.now)))
+    if args.implementer and args.implementer not in ctx.by_id:
+        usage_error(f"unknown lane: {args.implementer}", "Lane ids are in lanes.toml")
+    candidates = eligible_lanes(ctx, args.cls, args.risk, exclude, open_assignments(ctx.now))
+    if args.cls == "review":
+        candidates = [x for x in candidates if review_rule(ctx, args.risk, args.implementer)[0](x)]
+    eligible = active(ctx, candidates)
     rungs = build_ladder(ctx, eligible, args.cls)
     rows = [{"rank": i + 1, "lane": lane["id"], "group": lane["group"], "evidence": round(post, 3)}
             for i, (lane, post) in enumerate(rungs)]
@@ -562,24 +569,41 @@ def cmd_ladder(args):
     return 0
 
 
+def review_rule(ctx, risk, implementer):
+    """Who may review work done by `implementer` at this tier, as a predicate over
+    a lane plus the reason when nobody can. An unknown implementer excludes no
+    one beyond the tier rule itself."""
+    impl = ctx.by_id.get(implementer) if implementer else None
+    if risk == "R3":
+        why = "no independent R3 reviewer" if implementer == R3_REVIEWER else f"{R3_REVIEWER} cannot review"
+        return (lambda c: c["id"] == R3_REVIEWER and implementer != R3_REVIEWER), why
+    if risk == "R2":
+        return (lambda c: c["id"] in R2_REVIEWERS and c["id"] != implementer), \
+            "no sonnet-or-better reviewer other than the implementer"
+    if risk == "R1":
+        return (lambda c: c["id"] != implementer and (impl is None or c["family"] != impl["family"])), \
+            "no eligible reviewer of another model family"
+    return (lambda c: True), "no reviewer"
+
+
+def can_review(lane, risk):
+    return ("review" in lane["classes"] and lane["status"] == "active"
+            and RISKS.index(lane["max_risk"]) >= RISKS.index(risk))
+
+
 def pick_review_lane(ctx, lane, cls, risk):
     """The tier rule's reviewer: none for R0, another family for R1, sonnet or
-    better for R2, opus for R3."""
+    opus other than the implementer for R2, opus for R3."""
     if risk == "R0" or cls == "review":
         return None
-    if risk == "R3":
-        return "claude-opus"
-
-    def usable(cand):
-        return not ctx.blocked(cand) and not (cand["group"] == "claude" and ctx.paused)
-
-    if risk == "R2":
-        picks = [ctx.by_id[i] for i in ("claude-sonnet", "claude-opus") if i in ctx.by_id]
-        return next((c["id"] for c in picks if usable(c)), picks[0]["id"] if picks else None)
-    cands = [c for c in ctx.lanes if "review" in c["classes"] and c["status"] == "active"
-             and RISKS.index(c["max_risk"]) >= RISKS.index(risk) and c["family"] != lane["family"] and usable(c)]
+    allowed, _ = review_rule(ctx, risk, lane["id"])
+    cands = [c for c in ctx.lanes if can_review(c, risk) and allowed(c)]
     cands.sort(key=lambda c: c["id"] != "claude-sonnet")
-    return cands[0]["id"] if cands else None
+    usable = [c for c in cands if not ctx.blocked(c) and not (c["group"] == "claude" and ctx.paused)]
+    # A paused claude lane still reviews once its window reopens; a free lane that
+    # is out of service for days does not.
+    pool = usable or ([c for c in cands if c["group"] == "claude"] if risk in ("R2", "R3") else [])
+    return pool[0]["id"] if pool else None
 
 
 def make_id(now, taken):
@@ -594,7 +618,15 @@ def choose(ctx, args, busy):
     cls, risk = args.cls, args.risk
     exclude = parse_lane_list(args.exclude, ctx)
     pace_cfg, ev_cfg = ctx.cfg["pacing"], ctx.cfg["evaluation"]
+    if cls == "review" and risk != "R0":
+        allowed, why = review_rule(ctx, risk, args.implementer)
+        if not any(can_review(x, risk) and allowed(x) for x in ctx.lanes):
+            return {"result": "none", "reason": why}
+    else:
+        allowed = None
     candidates = eligible_lanes(ctx, cls, risk, exclude, busy)
+    if allowed:
+        candidates = [x for x in candidates if allowed(x)]
     if not candidates:
         return {"result": "none", "reason": "no lane lists this class at this risk and is available and under its cap"}
     eligible = active(ctx, candidates)
@@ -604,7 +636,7 @@ def choose(ctx, args, busy):
                            f"{ctx.pace['five_hour_pct']:g}%: retry after the reset")}
 
     pool = eligible
-    if args.implementer and risk == "R1" and cls in ("review", "review-fix"):
+    if args.implementer and risk == "R1" and cls == "review-fix":
         fam = ctx.by_id[args.implementer]["family"]
         other = [x for x in eligible if x["family"] != fam]
         pool = other or eligible
@@ -751,6 +783,7 @@ def build_parser():
     ld.add_argument("--class", dest="cls", required=True, metavar="C")
     ld.add_argument("--risk", required=True, metavar="R")
     ld.add_argument("--exclude", metavar="LANE,...")
+    ld.add_argument("--implementer", metavar="LANE", help="lane that wrote the change, for class review")
     ld.add_argument("--json", action="store_true")
     return p
 

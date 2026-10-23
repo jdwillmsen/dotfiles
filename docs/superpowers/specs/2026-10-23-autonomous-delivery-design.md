@@ -147,9 +147,26 @@ Eligibility for `assign`, applied before weights: the lane lists the class;
 its `max_risk` is at or above the task risk; it is not excluded; it is under
 its `concurrency` cap (count of unfinished assignments in the ledger younger
 than 4 hours). R3 work is eligible only for lanes that may implement R3
-(claude-opus, claude-sonnet) and the reviewer for R3 is always claude-opus.
-Classes `review` and `review-fix` for R1 prefer a lane of a family different
-from the implementer (`--implementer LANE` supplies it).
+(claude-opus, claude-sonnet).
+
+Reviewers follow the tier rule, in `assign --class review`, in the `review_lane`
+field of every other class and in `ladder --class review`; `--implementer LANE`
+supplies the lane that wrote the change. The implementer's own lane is never
+its reviewer.
+
+- R0: no reviewer (`review_lane: null`); a direct R0 review request may use any
+  eligible lane.
+- R1: a lane of a different model family than the implementer. With no such
+  lane available `assign` returns `result: none` with a reason; it never falls
+  back to the same family.
+- R2: `claude-sonnet` or `claude-opus`, other than the implementer, so a Sonnet
+  implementation is reviewed by Opus.
+- R3: `claude-opus` only. When Opus is the implementer, `assign --class review`
+  returns `result: none` ("no independent R3 reviewer"), `review_lane` is null,
+  and the human review that R3 requires applies anyway.
+
+An unknown implementer applies the tier rule without the exclusion. Class
+`review-fix` at R1 only prefers a different family.
 
 Weight of an eligible lane = share × pacing multiplier × evidence factor ×
 exploration boost:

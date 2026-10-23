@@ -404,9 +404,11 @@ rm "$tmp/eval/assignments.jsonl"
 
 # ── Reviewer by tier ──
 run 0 assign --class impl --risk R3 --seed r --no-log --json
-check "j['review_lane'] == 'claude-opus'" "R3 reviewer is not opus"
+check "j['review_lane'] == ('claude-opus' if j['lane'] != 'claude-opus' else None)" "R3 reviewer is not an independent opus"
 run 0 assign --class impl --risk R2 --seed r --no-log --json
-check "j['review_lane'] == 'claude-sonnet'" "R2 reviewer is not sonnet"
+# The implementer never reviews itself, so a sonnet implementation goes to opus.
+check "j['review_lane'] == ('claude-opus' if j['lane'] == 'claude-sonnet' else 'claude-sonnet')" \
+    "R2 reviewer is not the other of sonnet and opus"
 run 0 assign --class docs --risk R0 --seed r --no-log --json
 check "j['review_lane'] is None" "R0 has a reviewer"
 run 0 assign --class impl --risk R1 --seed r --no-log --json
@@ -416,6 +418,103 @@ for s in $(seq 1 25); do
     run 0 assign --class review-fix --risk R1 --implementer opencode-glm-flash-free --seed "f$s" --no-log --json
     check "j['lane'] not in ('opencode-glm-flash-free', 'opencode-nim-glm')" "review-fix went to the implementer's family"
 done
+
+# A reviewer is never the implementer's lane (nor, at R1, its family), whatever the seed.
+# In-process: 100 seeds for every implementer lane and tier would be thousands of spawns.
+python3 -I - "$pace" "$policy" <<'PY' || fail "reviewer rule broken for class review"
+import importlib.machinery, importlib.util, json, subprocess, sys, tomllib
+from argparse import Namespace
+pace, policy = sys.argv[1:]
+loader = importlib.machinery.SourceFileLoader("agent_pace", pace)
+mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("agent_pace", loader))
+loader.exec_module(mod)
+lanes = tomllib.load(open(policy, "rb"))["lane"]
+fam = {x["id"]: x["family"] for x in lanes}
+ctx = mod.Ctx(mod.load_policy(), mod.now_epoch())
+
+def pick(cls, risk, impl, seed):
+    return mod.choose(ctx, Namespace(cls=cls, risk=risk, exclude="", implementer=impl, seed=seed, ticket=None), {})
+
+for risk in ("R1", "R2", "R3"):
+    for impl in fam:
+        seen = set()
+        for n in range(100):
+            res = pick("review", risk, impl, f"rv{n}")
+            if res["result"] == "none":
+                assert res["reason"], (risk, impl, res)
+                seen.add(None)
+                continue
+            assert res["result"] == "assigned", (risk, impl, res)
+            lane = res["lane"]["id"]
+            assert lane != impl, (risk, impl, "reviewed itself")
+            if risk == "R1":
+                assert fam[lane] != fam[impl], (risk, impl, lane, "same family")
+            if risk == "R2":
+                assert lane in ("claude-sonnet", "claude-opus"), (risk, impl, lane)
+            if risk == "R3":
+                assert lane == "claude-opus", (risk, impl, lane)
+            seen.add(lane)
+        if risk == "R3" and impl == "claude-opus":
+            assert seen == {None}, seen
+            assert res["reason"] == "no independent R3 reviewer", res
+        elif risk == "R3":
+            assert seen == {"claude-opus"}, (impl, seen)
+        elif risk == "R2":
+            assert None not in seen, (impl, seen)
+
+# The review_lane field of any other class follows the same rule.
+for risk in ("R1", "R2", "R3"):
+    for n in range(100):
+        res = pick("impl", risk, None, f"rl{n}")
+        if res["result"] != "assigned":
+            continue
+        chosen, rl = res["lane"], res["review_lane"]
+        assert rl != chosen["id"], (risk, chosen["id"], rl)
+        if rl and risk == "R1":
+            assert fam[rl] != chosen["family"], (risk, chosen["id"], rl)
+        if risk == "R2":
+            assert rl == ("claude-opus" if chosen["id"] == "claude-sonnet" else "claude-sonnet"), (chosen["id"], rl)
+        if risk == "R3":
+            assert rl == (None if chosen["id"] == "claude-opus" else "claude-opus"), (chosen["id"], rl)
+
+def ladder(risk, *extra):
+    r = subprocess.run([pace, "ladder", "--class", "review", "--risk", risk, *extra, "--json"],
+                       capture_output=True, text=True, check=True)
+    return [x["lane"] for x in json.loads(r.stdout)["ladder"]]
+
+for risk in ("R1", "R2", "R3"):
+    for impl in fam:
+        rungs = ladder(risk, "--implementer", impl)
+        assert impl not in rungs, (risk, impl, rungs)
+        if risk == "R1":
+            assert all(fam[x] != fam[impl] for x in rungs), (impl, rungs)
+        if risk == "R2":
+            assert set(rungs) <= {"claude-sonnet", "claude-opus"}, (impl, rungs)
+        if risk == "R3":
+            assert set(rungs) <= {"claude-opus"}, (impl, rungs)
+# An unknown implementer applies the tier rule without the exclusion.
+assert ladder("R3") == ["claude-opus"]
+assert ladder("R2") == ["claude-sonnet", "claude-opus"]
+PY
+# Through the CLI: the one case with no independent reviewer exits 3 and says why.
+run 3 assign --class review --risk R3 --implementer claude-opus --no-log --json
+check "j['result'] == 'none' and j['reason'] == 'no independent R3 reviewer'" "opus implementing R3 got a reviewer"
+run 0 assign --class review --risk R3 --implementer claude-sonnet --no-log --json
+check "j['lane'] == 'claude-opus'" "R3 review did not go to opus"
+run 2 ladder --class review --risk R1 --implementer no-such-lane
+# R1 with only one family left reviews nothing rather than reviewing itself.
+only_anthropic="$tmp/anthropic-only.toml"
+python3 - "$policy" "$only_anthropic" <<'PY'
+import re, sys
+text = open(sys.argv[1]).read()
+head, *blocks = re.split(r"(?m)^(?=\[\[lane\]\])", text)
+keep = [b for b in blocks if 'family = "anthropic"' in b]
+open(sys.argv[2], "w").write(head + "".join(keep))
+PY
+AGENT_PACE_LANES="$only_anthropic" run 3 assign --class review --risk R1 --implementer claude-sonnet --no-log --json
+check "j['result'] == 'none' and j['reason']" "R1 review fell back to the implementer's family"
+AGENT_PACE_LANES="$only_anthropic" run 0 assign --class impl --risk R1 --implementer claude-sonnet --no-log --json
+check "j['review_lane'] is None" "R1 review_lane fell back to the implementer's family"
 
 # ── Evidence: ladder order, factor, floor ──
 weights '{"lanes": {

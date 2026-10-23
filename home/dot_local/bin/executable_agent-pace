@@ -271,7 +271,9 @@ def pace_state(cfg, now):
                     s["state"] = "on"
                 else:
                     s["state"] = "under" if gap > 0 else "over"
-                    m = 1 + float(p["gain"]) * gap / max(line, 5.0)
+                    # The floor stops the first days of a window, when the line is
+                    # near zero, from pinning the mix to a clamp on a few points of gap.
+                    m = 1 + float(p["gain"]) * gap / max(line, 25.0)
                     m = clamp(m, float(p["claude_weight_min"]), float(p["claude_weight_max"]))
                     if f > END_GAME_F and used < float(p["target_end_pct"]):
                         m = max(m, 1.0)

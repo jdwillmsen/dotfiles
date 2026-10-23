@@ -748,7 +748,8 @@ def _rule_applies(rule, full, bare, repo_known):
     return any(_repo_matches(r, full, bare) for r in rule["repos"])
 
 
-def classify(paths, bad, lines, changed, plan_text, policy, repo, repo_known, content_scanned, explain):
+def classify(paths, bad, lines, changed, plan_text, policy, repo, repo_known, content_scanned, explain,
+             scan_skipped=False):
     reasons = []
     warnings = []
     tags = set()
@@ -768,6 +769,10 @@ def classify(paths, bad, lines, changed, plan_text, policy, repo, repo_known, co
         clipped = True
         reasons.append({"rule": "scan-truncated", "tier": "R2", "where": where, "tag": None})
         best = max(best, TIER_INDEX["R2"])
+
+    if scan_skipped:
+        # A diff too large to read is a reason to look harder, never a quiet pass.
+        clip_reason("diff over the scan cap")
 
     for path in sorted(bad):
         reasons.append({"rule": "undecodable-path", "tier": "R3", "where": path, "tag": "path"})
@@ -970,6 +975,7 @@ def main(argv):
 
     bad = set()
     content_scanned = None
+    scan_skipped = False
     if args.files is not None:
         paths, bad = read_paths(args.files)
         lines = 0
@@ -978,6 +984,7 @@ def main(argv):
     elif args.pr is not None:
         paths, bad, lines, changed = pr_inputs(args.pr, args.repo)
         content_scanned = changed is not None
+        scan_skipped = changed is None
     elif args.plan and not (args.diff or args.base):
         # A plan is classified before any code exists, so the working tree's
         # diff must not leak into its tier.
@@ -991,9 +998,10 @@ def main(argv):
         base = resolve_base(args.base, root)
         paths, bad, lines, changed = diff_inputs(root, base)
         content_scanned = changed is not None
+        scan_skipped = changed is None
 
     result = classify(paths, bad, lines, changed, plan_text, policy, repo, repo_known, content_scanned,
-                      args.explain)
+                      args.explain, scan_skipped)
     emit_result(result)
 
     if args.fail_at and TIER_INDEX[result["tier"]] >= TIER_INDEX[args.fail_at]:

@@ -77,8 +77,48 @@ a low share. It receives only R0 work. When the scoreboard has enough samples,
 `agent-eval verdicts` says keep, probation or drop; to widen it, change
 `status` to `active` and raise `max_risk` one step at a time.
 
+## Running it
+
+Live since 2026-10-23. Two systemd user timers drive it:
+
+| Timer | When | What |
+|---|---|---|
+| `merge-captain.timer` | every 15 minutes | classify open PRs, review, merge R0–R2 where the repo is live |
+| `agent-eval-collect.timer` | daily 06:45 | `agent-eval collect` then `enrich`, so reports have outcomes |
+
+Only `jdwillmsen/dotfiles` is live (up to R2). The other repos are `dry-run`:
+they are classified and logged, nothing is written. Read what the captain did:
+
+```sh
+merge-captain status                       # config in force, caps used, last runs
+tail -n 20 ~/.local/state/merge-captain/log.jsonl
+merge-captain explain jdwillmsen/gameops#210    # what it would do for one PR, no side effects
+agent-pace status                          # where the week should be, and the model mix
+agent-eval scoreboard                      # how each model is doing per task class
+```
+
+Stop it at once with `merge-captain pause --reason "why"`; `resume` undoes it.
+To take another repo live, change its `mode` in `merge-captain.toml` in the
+dotfiles source (a change to that file is R3, so a person approves it).
+
+## Known limits
+
+- A review the captain trusts is one its own ledgers back. A process running as
+  the same unix user can still forge that; the guard hook stops accidents and
+  injected shortcuts under Claude Code only. A separate account and a
+  fine-grained token are the real fix (JDW-209).
+- Reviewers are Claude lanes only. `opencode run` cannot be locked down to no
+  tools, so free-model reviewers are off. Free lanes still build and are scored.
+- The captain does not yet know which model wrote a PR; it reads commit
+  trailers for that (`Assisted-by:`), and falls back to "unknown" without them.
+- GitHub search allows 30 calls a minute; `agent-eval enrich` paces itself and
+  resumes on the next run if it hits the limit.
+- The weekly pace line is linear in time, not weighted by when work happens.
+
 ## Not built yet
 
-- GitHub labels and rulesets keyed to the risk tier, and a Jira field for it.
+- GitHub rulesets keyed to the risk tier, and a Jira field for it.
 - Mirroring the ledgers into the metrics store.
-- A weekday-weighted pace curve; the line is linear for now.
+- A weekday-weighted pace curve (JDW-195).
+- A rollback safety net for production services: a last-known-good record and an
+  automatic revert on a failed health check.

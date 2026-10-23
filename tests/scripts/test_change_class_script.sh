@@ -774,4 +774,130 @@ grep -qx 'tier: R1' "$out" || fail "an unrecognised plan is not the default R1" 
 ( cd "$repo" && printf 'refactor the renderer and add tests\n' | "$cc" --rules "$rules" --plan - ) >"$out"
 grep -qx 'tier: R1' "$out" || fail "a mixed plan was lowered to R0" "$(cat "$out")"
 
+# ── Fixes from review: scoped rules, R0 content scanning, scan caps, --plan usage ──
+write_rules() {
+    local file="$1"
+    sed -n '/^\[tiers.R0\]/,/^tag = "code"/p' "$glob_rules" >"$file"
+    cat >>"$file"
+}
+
+scoped="$tmp/scoped.toml"
+write_rules "$scoped" <<'TOML'
+
+[[rule]]
+id = "scoped-path"
+tag = "scoped"
+tier = "R3"
+paths = ["src/**"]
+repos = ["deployments", "jdwlabs/platform"]
+
+[[rule]]
+id = "scoped-plan"
+tag = "scoped"
+tier = "R3"
+plan = ['launch the rockets']
+repos = ["deployments"]
+TOML
+scoped_tier() {
+    local want="$1" got=0
+    shift
+    printf 'src/a.ts\n' | ( cd "$tmp" && "$cc" --rules "$scoped" --files - "$@" ) >"$out" 2>"$err" || got=$?
+    [ "$got" = 0 ] || fail "scoped classification exited $got" "$(cat "$out" "$err")"
+    grep -qx "tier: $want" "$out" || fail "scoped rule: $* gave the wrong tier, want $want" "$(cat "$out")"
+}
+scoped_tier R3 --repo acme/deployments
+scoped_tier R3 --repo Acme/DEPLOYMENTS
+scoped_tier R3 --repo jdwlabs/platform
+scoped_tier R1 --repo acme/app
+scoped_tier R1 --repo other/platform
+scoped_tier R3
+( cd "$tmp" && printf 'launch the rockets\n' | "$cc" --rules "$scoped" --plan - --repo acme/app ) >"$out"
+grep -qx 'tier: R1' "$out" || fail "a scoped plan rule applied to another repo" "$(cat "$out")"
+( cd "$tmp" && printf 'launch the rockets\n' | "$cc" --rules "$scoped" --plan - --repo acme/deployments ) >"$out"
+grep -qx 'tier: R3' "$out" || fail "a scoped plan rule missed its repo" "$(cat "$out")"
+for bad_repos in '"deployments"' '[1]' '[]' '[""]'; do
+    write_rules "$tmp/bad-repos.toml" <<TOML
+
+[[rule]]
+id = "bad"
+tag = "x"
+tier = "R3"
+paths = ["src/**"]
+repos = $bad_repos
+TOML
+    run 1 --rules "$tmp/bad-repos.toml" --plan /dev/null
+    grep -q 'repos must be' "$out" || fail "repos = $bad_repos was not rejected" "$(cat "$out")"
+done
+
+scan="$tmp/scan.toml"
+write_rules "$scan" <<'TOML'
+
+[[rule]]
+id = "docs"
+tag = "docs"
+tier = "R0"
+paths = ["**/*.md", "**/*.txt"]
+
+[[rule]]
+id = "embedded-secret"
+tag = "secrets"
+tier = "R3"
+content = ['\bgh[pousr]_[A-Za-z0-9]{20,}']
+exclude = ["**/*.md"]
+TOML
+token="gh""p_$(printf 'a%.0s' $(seq 1 24))"
+secret="$tmp/secret"
+new_repo "$secret"
+printf 'x\n' >"$secret/notes.txt"
+printf 'x\n' >"$secret/README.md"
+commit_all "$secret" base
+printf 'key %s\n' "$token" >>"$secret/notes.txt"
+run_in "$secret" 0 --rules "$scan" --base HEAD
+grep -qx 'tier: R3' "$out" || fail "a secret in an R0 text file went unscanned" "$(cat "$out")"
+grep -qx '  embedded-secret,R3,notes.txt' "$out" || fail "the notes.txt secret reason is missing" "$(cat "$out")"
+git -C "$secret" checkout -q -- notes.txt
+printf 'key %s\n' "$token" >>"$secret/README.md"
+run_in "$secret" 0 --rules "$scan" --base HEAD
+grep -qx 'tier: R0' "$out" || fail "a secret in an excluded markdown file was not R0" "$(cat "$out")"
+
+caps="$tmp/caps"
+new_repo "$caps"
+printf 'a\n' >"$caps/app.ts"
+commit_all "$caps" base
+python3 -c 'import sys; open(sys.argv[1], "w").write("a" * 1900000 + "\n")' "$caps/app.ts"
+start=$SECONDS
+run_in "$caps" 0 --rules "$rules" --base HEAD
+[ $((SECONDS - start)) -lt 5 ] || fail "a 2 MB single line took $((SECONDS - start))s to classify"
+grep -qx '  scan-truncated,R2,app.ts' "$out" || fail "a clipped line gave no scan-truncated reason" "$(cat "$out")"
+grep -qx 'content_scanned: partial' "$out" || fail "a clipped scan did not say partial" "$(cat "$out")"
+grep -qx 'tier: R2' "$out" || fail "a clipped scan did not raise the tier to R2" "$(cat "$out")"
+
+# A secret hidden behind the line cap is never matched, so the clip must be what flags it.
+python3 -c 'import sys; open(sys.argv[1], "w").write("a" * 5000 + sys.argv[2] + "\n")' "$caps/app.ts" "$token"
+run_in "$caps" 0 --rules "$scan" --base HEAD
+grep -qx 'tier: R2' "$out" || fail "a secret past the line cap was not flagged" "$(cat "$out")"
+grep -qx '  scan-truncated,R2,app.ts' "$out" || fail "the past-cap secret has no scan-truncated reason" "$(cat "$out")"
+
+python3 -c 'import sys; open(sys.argv[1], "w").write("x\n" * 20001)' "$caps/app.ts"
+run_in "$caps" 0 --rules "$rules" --base HEAD
+grep -qx '  scan-truncated,R2,app.ts' "$out" || fail "a file over the line count cap gave no scan-truncated" "$(cat "$out")"
+
+printf 'x\n' >"$caps/app.ts"
+CHANGE_CLASS_SCAN_BUDGET=-1 run_in "$caps" 0 --rules "$rules" --base HEAD
+grep -qx '  scan-truncated,R2,app.ts' "$out" || fail "an exhausted scan budget gave no scan-truncated" "$(cat "$out")"
+grep -qx 'content_scanned: partial' "$out" || fail "an exhausted scan budget did not say partial" "$(cat "$out")"
+run_in "$caps" 0 --rules "$rules" --base HEAD
+if grep -q 'scan-truncated' "$out"; then fail "a small file reported a clipped scan"; fi
+
+python3 -c 'import sys; sys.stdout.write("add docs " + "word " * 30000)' >"$tmp/big-plan.txt"
+start=$SECONDS
+run_in "$tmp" 0 --rules "$rules" --plan "$tmp/big-plan.txt"
+[ $((SECONDS - start)) -lt 5 ] || fail "a 150 KB plan took $((SECONDS - start))s to classify"
+grep -qx '  scan-truncated,R2,plan' "$out" || fail "an oversized plan gave no scan-truncated" "$(cat "$out")"
+
+run_in "$tmp" 2 --rules "$rules" --plan 'wipe the world'
+grep -qx 'code: 2' "$out" || fail "plan text as an argument did not exit 2" "$(cat "$out")"
+grep -q -- '--plan -' "$out" || fail "the plan usage error does not point at stdin" "$(cat "$out")"
+run_in "$tmp" 0 --rules "$rules" --plan "$tmp/big-plan.txt"
+
 echo "test_change_class_script: OK"

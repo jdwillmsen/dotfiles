@@ -209,14 +209,74 @@ run 0 status --json
 check "not j['five_hour_paused']" "a reset window still pauses"
 
 # ── Stale reading: flagged, baseline shares ──
+# Usage cannot fall before its window resets, so an old five-hour reading at the
+# threshold keeps the pause while the reset is still ahead.
 quota 45 99 2 0 3.5
 run 0 status --json
-check "j['stale'] and j['state'] == 'stale' and j['claude_multiplier'] == 1.0 and not j['five_hour_paused']" "stale reading paced"
+check "j['stale'] and j['state'] == 'stale' and j['claude_multiplier'] == 1.0" "stale seven-day reading paced"
+check "j['five_hour_stale'] and j['five_hour_paused']" "a stale five-hour reading at the threshold lifted the pause"
+run 0 shares --json
+check "{r['lane']: r['effective_pct'] for r in j['lanes']}['claude-sonnet'] == 0.0" "a stale paused reading left claude weight"
+# A stale reading below the threshold proves nothing, so it does not pause.
+quota 45 50 2 0 3.5
+run 0 status --json
+check "j['five_hour_stale'] and not j['five_hour_paused']" "a stale reading below the threshold paused"
 run 0 shares --json
 check "{r['lane']: r['effective_pct'] for r in j['lanes']}['claude-sonnet'] == 40.0" "stale reading moved the shares"
+# A stale reading at the threshold whose window has reset no longer pauses.
+quota 45 99 -1 0 3.5
+run 0 status --json
+check "j['five_hour_stale'] and not j['five_hour_paused']" "a stale reading from a reset window paused"
 quota 29 10 3 0 3.5
 run 0 status --json
 check "not j['stale'] and j['claude_multiplier'] == 2.0" "a 29 minute reading was called stale"
+
+# ── A seven-day window that has already reset ──
+quota 1 10 3 20 -0.5
+run 0 status --json
+check "j['state'] == 'rolled' and j['claude_multiplier'] == 1.0 and j['gap_pct'] is None" "a reset seven-day window still paced"
+check "'baseline' in j['recommendation']"
+run 0 shares --json
+check "{r['lane']: r['effective_pct'] for r in j['lanes']}['claude-sonnet'] == 40.0" "a reset seven-day window moved the shares"
+run 0 status
+grep -q "^state: rolled" "$out" || fail "rolled TOON has no state" "$(cat "$out")"
+
+# ── Bad quota data is skipped and counted, never fatal ──
+good_line() {
+    printf '{"at": %s, "five_hour_pct": 10, "five_hour_resets_at": %s, "seven_day_pct": 27.5, "seven_day_resets_at": %s}\n' \
+        "$((now_epoch - 60))" "$((now_epoch + 10800))" "$((now_epoch + 302400))"
+}
+{
+    good_line
+    echo '{"at": 1e20, "seven_day_pct": 50, "seven_day_resets_at": 1e20}'
+    echo '{"at": 1000000000, "seven_day_pct": 50}'
+    echo '{"at": 5000000000, "seven_day_pct": 50}'
+    echo '{"at": NaN, "seven_day_pct": 50}'
+    echo "{\"at\": $((now_epoch - 30)), \"seven_day_pct\": NaN, \"seven_day_resets_at\": $((now_epoch + 302400))}"
+    echo "{\"at\": $((now_epoch - 30)), \"seven_day_pct\": Infinity}"
+    echo "{\"at\": $((now_epoch - 30)), \"seven_day_pct\": 140, \"seven_day_resets_at\": $((now_epoch + 302400))}"
+    echo "{\"at\": $((now_epoch - 30)), \"five_hour_pct\": -5}"
+    echo "{\"at\": $((now_epoch - 30)), \"seven_day_pct\": 50, \"seven_day_resets_at\": 1e20}"
+    echo "{\"at\": $((now_epoch - 30)), \"seven_day_pct\": 50, \"seven_day_resets_at\": \"nan\"}"
+    echo 'not json at all'
+    printf '\xff\xfe{"at": 1}\n'
+} >"$AGENT_PACE_QUOTA"
+run 0 status --json
+check "j['quota_skipped'] == 12" "skipped quota lines are miscounted"
+check "j['state'] == 'under' and j['used_pct'] == 27.5 and j['claude_multiplier'] == 1.632" "a bad line displaced the good reading"
+run 0 status
+grep -q "^quota_skipped: 12" "$out" || fail "status TOON has no quota_skipped" "$(cat "$out")"
+# Invalid UTF-8 beside a good line is survivable; the lone bad line is counted.
+{ printf '\xff\xfe\n'; good_line; } >"$AGENT_PACE_QUOTA"
+run 0 status --json
+check "j['quota_skipped'] == 1 and j['state'] == 'under'" "invalid UTF-8 in the quota file broke status"
+# Nothing usable at all is no-data, still not an error.
+printf '{"at": NaN}\n{"seven_day_pct": 10}\n' >"$AGENT_PACE_QUOTA"
+run 0 status --json
+check "j['state'] == 'no-data' and j['quota_skipped'] == 2 and j['claude_multiplier'] == 1.0" "unusable quota did not fall back to baseline"
+quota 1 10 3 0 3.5
+run 0 status --json
+check "j['quota_skipped'] == 0" "a clean quota file reported skipped lines"
 
 # ── Lanes drop out ──
 quota 1 10 3 47 3.5

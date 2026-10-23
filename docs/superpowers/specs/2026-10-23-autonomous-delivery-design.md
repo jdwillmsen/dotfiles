@@ -121,6 +121,9 @@ Pacing rules (the contract for the tests):
   (now − start) / 7 days, clamped to [0, 1]. Pace line = `target_end_pct × f`.
   Gap = pace line − used. A stale reading (older than 30 minutes) is reported
   as stale, and pacing falls back to baseline shares.
+  A window whose `seven_day_resets_at` has passed is `rolled` and also paces at
+  baseline. Readings with non-finite numbers, percentages outside 0..100 or
+  epochs outside 2020..2100 are skipped and counted as `quota_skipped`.
 - Within `band_pct` of the line: baseline shares.
 - Under the line: the `claude` group weight multiplier is
   `clamp(1 + gain × gap / max(pace_line, 25), min, max)`; over the line the same
@@ -129,7 +132,8 @@ Pacing rules (the contract for the tests):
   headroom left, the multiplier is at least 1.
 - Opus never exceeds `opus_share_cap` of the total, whatever the multiplier.
 - `five_hour_pct ≥ five_hour_pause_pct`: `claude` lanes get weight 0 until
-  `five_hour_resets_at`; work that only a claude lane may do (see below) is
+  `five_hour_resets_at`, even when the reading is older than 30 minutes (usage
+  cannot fall before the reset); work that only a claude lane may do (see below) is
   reported as `defer` with the reset time, not silently given to a free lane.
 - Lanes with `unavailable_until` in the future, a cooldown (below) or status
   `paused` get weight 0. Status `explore` lanes only receive R0 work.

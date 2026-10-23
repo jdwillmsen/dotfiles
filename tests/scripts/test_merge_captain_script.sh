@@ -762,8 +762,57 @@ fx rev claude 1 approve nap=5
 fx pr 145
 fx class 145 R0
 MERGE_CAPTAIN_DEADLINE_S=4 want 0 run
-expect 144 merged "review approve by"
+# The review finished after the deadline: it is posted and recorded, but nothing is merged or labelled until the next run.
+expect 144 waiting deadline
 expect 145 skipped deadline
+[ "$(count '^pr merge' "$S/gh.log")" = 0 ] || fail "merged after the deadline"
+grep -q '"verdict": "approve"' "$STATE/reviews.jsonl" || fail "a finished review must still be recorded" "$(cat "$STATE/reviews.jsonl" 2>&1)"
+want 0 run
+expect 144 merged "approve on record"
+[ "$(cat "$S/claude.n")" = 1 ] || fail "the recorded review should have been enough"
+# A finished `changes` review loses its label to the deadline, not its verdict.
+newcase
+fx pr 146
+fx class 146 R1
+fx pace 1 lane=claude-sonnet provider=claudeAgent model=claude-sonnet-5-5
+fx rev claude 1 changes nap=5
+MERGE_CAPTAIN_DEADLINE_S=4 want 0 run
+expect 146 blocked "review changes"
+grep -q 'agent-changes-requested' "$S/gh.log" && fail "a label was written after the deadline"
+grep -q '"verdict": "changes"' "$STATE/reviews.jsonl" || fail "the changes verdict was not recorded"
+# The hard deadline kills a hung reviewer, still logs the run and releases the lock.
+newcase
+fx pr 147
+fx class 147 R1
+fx pace 1 lane=claude-sonnet provider=claudeAgent model=claude-sonnet-5-5
+fx rev claude 1 approve nap=40
+start=$SECONDS
+MERGE_CAPTAIN_HARD_DEADLINE_S=2 want 0 run
+[ $((SECONDS - start)) -lt 20 ] || fail "the hard deadline did not stop a hung reviewer" "$(cat "$out")"
+grep -q '^hard_deadline: true' "$out" || fail "hard deadline not reported" "$(cat "$out")"
+expect 147 waiting hard-deadline
+grep -q 'merge-captain: hard deadline' "$err" || fail "hard deadline not logged" "$(cat "$err")"
+python3 -I - "$STATE/log.jsonl" <<'PY' || fail "final run line" "$(cat "$STATE/log.jsonl")"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+assert rows[-1]["action"] == "run" and "hard deadline" in rows[-1]["reason"], rows[-1]
+assert any(r["pr"] == 147 and r["reason"].startswith("hard-deadline") for r in rows), rows
+PY
+[ ! -e "$STATE/reviews.jsonl" ] || fail "a killed review was recorded"
+fx pace 2 lane=claude-sonnet provider=claudeAgent model=claude-sonnet-5-5
+fx rev claude 2 approve
+want 0 run
+grep -q '^busy' "$out" && fail "the lock was not released after a hard deadline"
+expect 147 merged "review approve by"
+# An unsupported provider takes no reviewer call from the cap.
+newcase max_reviews_per_run=1
+fx pr 148
+fx class 148 R1
+fx pace 1 lane=codex-luna provider=codex model=gpt-6-luna
+fx pace 2 lane=claude-sonnet provider=claudeAgent model=claude-sonnet-5-5
+fx rev claude 1 approve
+want 0 run
+expect 148 merged "review approve by claude-sonnet"
 # A head that failed twice is left alone for six hours, and only that head.
 newcase
 fx pr 150

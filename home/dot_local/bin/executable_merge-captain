@@ -54,12 +54,15 @@ LIMIT_DEFAULTS = {"max_prs_per_run": 6, "max_reviews_per_run": 2, "max_merges_pe
                   "review_timeout_s": 300, "max_diff_bytes": 150000}
 SKIP_LABELS = ("hold", "no-agent-merge")
 SETTLE_S = 120
-GH_TIMEOUT_S = 90
-TOOL_TIMEOUT_S = 120
+GH_TIMEOUT_S = 60
+TOOL_TIMEOUT_S = 60
 HOUR_S = 3600
-# No reviewer call and no new pull request starts after this. With review_timeout_s and the gh calls a
-# pull request already under way can still make, the unit's TimeoutStartSec leaves room to finish.
+# No reviewer call, label write, merge or new pull request starts after this. A reviewer call begun just
+# before it can still run for review_timeout_s, which is why the hard deadline sits five minutes later.
 RUN_DEADLINE_S = 1200
+# Whatever is still running then is killed and the run ends cleanly: a hung gh or model CLI must not hold the
+# lock until the unit's TimeoutStartSec kills the process with no final log line.
+HARD_DEADLINE_S = 1500
 MAX_REVIEW_TRIES = 2
 # Failed review calls per head commit before the captain stops asking, and for how long it stays quiet.
 MAX_FAILED_ATTEMPTS = 2
@@ -332,6 +335,12 @@ def run_cmd(argv, stdin=None, timeout=TOOL_TIMEOUT_S, cwd=None, env=None):
             pass
         p.communicate()
         return Result(124, "", "timed out", timed_out=True)
+    except BaseException:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        raise
     return Result(p.returncode, out, err)
 
 
@@ -363,6 +372,29 @@ class Stop(Exception):
 
 class Refused(Exception):
     """A gh call the safety rules do not allow. Always a bug in this tool."""
+
+
+class HardDeadline(BaseException):
+    """Raised by the alarm. Not an Exception, so no handler for a pull request's failure swallows it."""
+
+
+_alarm = {"armed": False}
+
+
+def arm_hard_deadline(seconds):
+    def fire(signum, frame):
+        if _alarm["armed"]:
+            _alarm["armed"] = False
+            raise HardDeadline()
+
+    signal.signal(signal.SIGALRM, fire)
+    _alarm["armed"] = True
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+
+
+def disarm_hard_deadline():
+    _alarm["armed"] = False
+    signal.setitimer(signal.ITIMER_REAL, 0)
 
 
 # ── Review prompt (fixed text; not configurable) ─────────────────────────────
@@ -525,14 +557,17 @@ def merges_since(now):
 
 # ── Captain ──────────────────────────────────────────────────────────────────
 
-def run_deadline():
-    raw = os.environ.get("MERGE_CAPTAIN_DEADLINE_S")
+def deadline_from_env(name, default):
+    raw = os.environ.get(name)
     if not raw:
-        return RUN_DEADLINE_S
+        return default
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError:
-        die(EXIT_USAGE, f"MERGE_CAPTAIN_DEADLINE_S is not a number: {raw!r}")
+        die(EXIT_USAGE, f"{name} is not a number: {raw!r}")
+    if value <= 0:
+        die(EXIT_USAGE, f"{name} must be positive: {raw!r}")
+    return value
 
 
 class Captain:
@@ -552,7 +587,9 @@ class Captain:
         self.examined = 0
         self.review_calls = 0
         self.started = time.monotonic()
-        self.deadline_s = run_deadline()
+        self.deadline_s = deadline_from_env("MERGE_CAPTAIN_DEADLINE_S", RUN_DEADLINE_S)
+        self.hard_deadline_s = deadline_from_env("MERGE_CAPTAIN_HARD_DEADLINE_S", HARD_DEADLINE_S)
+        self.pending = None
         self.deadline_logged = False
         self.default_branch = {}
         self.label_cache = {}
@@ -614,6 +651,9 @@ class Captain:
 
     def gh(self, args, *, write=False, stdin=None):
         (self.guard_write if write else self.guard_read)(args)
+        # A comment is exempt: it publishes a review that is already paid for and recorded nowhere else.
+        if write and args[:2] != ["pr", "comment"] and self.past_deadline():
+            raise Stop("waiting", "deadline")
         env = dict(os.environ, GH_PROMPT_DISABLED="1", NO_COLOR="1", GH_NO_UPDATE_NOTIFIER="1", GH_PAGER="cat")
         return run_cmd([self.gh_bin, *args], stdin=stdin, timeout=GH_TIMEOUT_S, cwd=self.scratch, env=env)
 
@@ -1001,13 +1041,14 @@ class Captain:
             if PAUSED.exists():
                 raise Stop("skipped", "paused")
             tried.append(lane)
+            if provider not in self.cfg["providers"]:
+                # Nothing was run, so it takes no call from the cap, and it is not the lane's fault, so it must
+                # not count toward its cooldown either.
+                self.record_eval(aid, tier, status="interrupted", note="provider not supported by merge-captain")
+                continue
             self.review_calls += 1
             self.step("review", f"lane {lane}")
             outcome = self.run_reviewer(provider, model, prompt)
-            if outcome == "unsupported":
-                # Not the lane's fault, so it must not count toward its cooldown.
-                self.record_eval(aid, tier, status="interrupted", note="provider not supported by merge-captain")
-                continue
             if isinstance(outcome, str):
                 self.record_eval(aid, tier, status="interrupted", note=f"review {outcome}")
                 self.record_attempt(repo, n, head, lane, outcome)
@@ -1018,16 +1059,21 @@ class Captain:
             try:
                 self.comment(repo, n, review_comment(head, tier, verdict, lane, findings, same_family))
             except Stop as s:
+                self.record_eval(aid, tier, status="interrupted", note="review comment not posted")
                 if s.action != "error":
                     raise
-                self.record_eval(aid, tier, status="interrupted", note="review comment not posted")
                 self.record_attempt(repo, n, head, lane, "comment-failed")
                 raise Stop("waiting", "comment-failed", lane) from None
             self.record_eval(aid, tier, findings=len(findings), pr_url=f"https://github.com/{repo}/pull/{n}")
             self.record_review(repo, n, head, tier, verdict, lane)
             if verdict == "changes":
-                self.ensure_labels(repo, ["agent-changes-requested"])
-                self.edit_labels(repo, n, ["agent-changes-requested"], [])
+                try:
+                    self.ensure_labels(repo, ["agent-changes-requested"])
+                    self.edit_labels(repo, n, ["agent-changes-requested"], [])
+                except Stop as s:
+                    # The verdict is recorded already; a label the deadline refused is not worth losing it.
+                    if s.reason != "deadline":
+                        raise
                 raise Stop("blocked", f"review changes: {len(findings)} finding{'s' if len(findings) != 1 else ''}",
                            lane)
             return lane
@@ -1062,6 +1108,7 @@ class Captain:
         d = {"repo": repo, "pr": n, "head": pr.get("headRefOid"), "tier": None, "action": "skipped", "reason": "",
              "mode": mode, "lane": None, "tags": []}
         self.trace = []
+        self.pending = d
         try:
             self.decide(rc, pr, mode, d)
         except Stop as s:
@@ -1070,6 +1117,7 @@ class Captain:
             d["action"], d["reason"] = "error", f"refused: {e}"
         except Exception as e:  # noqa: BLE001 — one malformed pull request must not end the run
             d["action"], d["reason"] = "error", f"internal: {type(e).__name__}"
+        self.pending = None
         self.step("decision", f"{d['action']}: {d['reason']}")
         return d
 
@@ -1235,7 +1283,8 @@ def cmd_run(args):
     live, dry = mode_counts(repos, args.dry_run)
     head = {"run": run_id, "mode_live": live, "mode_dry": dry}
     nothing = {"repo": None, "pr": None, "head": None, "tier": None, "mode": None, "lane": None}
-    decisions, failed_lists = [], 0
+    decisions, failed_lists, hard = [], 0, False
+    arm_hard_deadline(cap.hard_deadline_s)
     try:
         if PAUSED.exists():
             cap.write_log(run_id, {**nothing, "action": "skipped", "reason": "paused"})
@@ -1255,11 +1304,23 @@ def cmd_run(args):
                     d = cap.process(rc, pr)
                     cap.write_log(run_id, d)
                     decisions.append(d)
+    except HardDeadline:
+        hard = True
+        log("hard deadline")
+        if cap.pending is not None:
+            d = cap.pending
+            d["action"], d["reason"] = "waiting", "hard-deadline: stopped mid-way, check whether it merged"
+            cap.write_log(run_id, d)
+            decisions.append(d)
     finally:
+        disarm_hard_deadline()
         merged = sum(1 for d in decisions if d["action"] == "merged")
-        cap.write_log(run_id, {**nothing, "action": "run", "reason": f"{len(decisions)} decisions, {merged} merged"})
+        cap.write_log(run_id, {**nothing, "action": "run", "reason": f"{len(decisions)} decisions, {merged} merged"
+                                                                     + ("; hard deadline" if hard else "")})
         cap.close()
         lock.close()
+    if hard:
+        head["hard_deadline"] = True
     rows = [{"repo": d["repo"], "pr": d["pr"] if d["pr"] is not None else "-", "tier": d["tier"] or "-",
              "action": d["action"], "reason": clean(d["reason"])} for d in decisions]
     print(toon(head) + "\n" + decisions_block(rows))

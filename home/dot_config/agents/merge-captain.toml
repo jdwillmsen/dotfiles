@@ -1,0 +1,95 @@
+# Repositories merge-captain looks after, read by `merge-captain`. A repository
+# that is not listed is ignored. Flipping one to live is a one-line edit here.
+#
+# mode: live    comment, label, review and merge, up to max_tier
+#       dry-run classify and log what would happen; writes nothing, runs no reviewer
+#       off     ignored
+# max_tier: highest risk tier it may merge on its own (R0, R1 or R2). R3 is never
+# merged, whatever is written here.
+# allow_no_checks: true lets a repository with no CI at all merge; otherwise a
+# pull request that reports no checks waits.
+
+[limits]
+max_prs_per_run = 6
+max_reviews_per_run = 2
+max_merges_per_hour = 6
+review_timeout_s = 300
+max_diff_bytes = 150000
+
+[reviewers]
+# Providers a review may run on. A lane on any other provider is excluded from
+# the lane choice, so a review is never assigned to a lane it cannot run. The
+# free opencode models refuse the tool-less invocation a diff review needs, so
+# only claudeAgent is listed.
+providers = ["claudeAgent"]
+
+[checks]
+# Names of checks whose failure is tolerated. Every other failing check blocks
+# the merge, required or not.
+ignore = []
+
+[authors]
+# Only pull requests opened by these logins are touched. A bot is spelled with
+# its [bot] suffix whether gh reports it as app/name or name[bot]; a name
+# without the suffix matches a person only.
+allow = ["jdwillmsen", "jdwlabs-agent-bot[bot]", "renovate[bot]", "dependabot[bot]"]
+
+[[repo]]
+name = "jdwillmsen/dotfiles"
+mode = "live"
+max_tier = "R2"
+
+[[repo]]
+name = "jdwillmsen/gameops"
+mode = "dry-run"
+max_tier = "R2"
+
+[[repo]]
+name = "jdwillmsen/jdw-deployments"
+mode = "dry-run"
+max_tier = "R2"
+
+[[repo]]
+name = "jdwillmsen/fwb-minecraft"
+mode = "dry-run"
+max_tier = "R2"
+
+[[repo]]
+name = "jdwillmsen/career"
+mode = "dry-run"
+max_tier = "R2"
+
+[[repo]]
+name = "jdwillmsen/countdown-app"
+mode = "dry-run"
+max_tier = "R2"
+
+[[repo]]
+name = "jdwlabs/apps"
+mode = "dry-run"
+max_tier = "R2"
+
+[[repo]]
+name = "jdwlabs/deployments"
+mode = "dry-run"
+max_tier = "R2"
+
+[[repo]]
+name = "jdwlabs/infrastructure"
+mode = "dry-run"
+max_tier = "R2"
+
+[[repo]]
+name = "jdwlabs/platform"
+mode = "dry-run"
+max_tier = "R2"
+
+[[repo]]
+name = "dotablaze-tech/apps"
+mode = "dry-run"
+max_tier = "R2"
+
+[[repo]]
+name = "dotablaze-tech/deployments"
+mode = "dry-run"
+max_tier = "R2"

@@ -1,0 +1,230 @@
+# Work lanes and weekly pacing, read by `agent-pace` and `agent-eval`.
+# A lane is one (provider, model) a task can be dispatched to. Shares are the
+# baseline fraction of dispatched tasks; pacing shifts weight between the
+# `claude` group (draws the Max plan quota) and the `free` group (does not).
+
+[pacing]
+# Aim to end the 7-day window at this percent used, leaving a safety margin.
+target_end_pct = 95
+# Within this many points of the pace line is "on pace" and shares stay put.
+band_pct = 5
+# How hard a gap from the pace line moves the claude share (multiplier slope).
+gain = 1.5
+claude_weight_min = 0.25
+claude_weight_max = 2.0
+# Claude lanes stop receiving new work at this five-hour percent.
+five_hour_pause_pct = 85
+# Opus never takes more than this fraction of all dispatches, whatever the pace.
+opus_share_cap = 0.20
+
+[classes]
+# plan: design and decomposition       impl: bounded code change
+# impl-large: multi-file feature       review-fix: apply review findings
+# review: read a diff and report       research: gather facts
+# spike: time-boxed investigation      docs: writing       test: add tests
+# ops: run a procedure                 summarize: read and condense
+all = ["plan", "impl", "impl-large", "review-fix", "review", "research", "spike", "docs", "test", "ops", "summarize"]
+
+# Evidence needed before a lane's own results outweigh its prior, and the
+# floor of samples a lane gets on R0/R1 work so it can be judged at all.
+[evaluation]
+prior_weight = 6
+min_samples = 8
+explore_fraction = 0.15
+# A lane that fails for infrastructure reasons this many times in a row is
+# skipped for the cooldown, without touching its quality score.
+cooldown_failures = 3
+cooldown_hours = 2
+# Promotion/demotion advice thresholds on the Wilson lower bound of quality.
+keep_lb = 0.60
+probation_lb = 0.40
+promote_lb = 0.75
+promote_min_n = 15
+
+# status: active (normal) | explore (R0 only, to be judged) | paused (never).
+# max_risk: highest tier the lane may implement; reviews follow the tier rule.
+# unavailable_until: ISO date; the lane is skipped before then.
+
+[[lane]]
+id = "claude-opus"
+group = "claude"
+provider = "claudeAgent"
+model = "claude-opus-5-5"
+family = "anthropic"
+status = "active"
+share = 10
+max_risk = "R3"
+concurrency = 3
+prior = 0.92
+classes = ["plan", "impl", "impl-large", "review", "review-fix", "research", "spike", "ops"]
+notes = "Planning, final pre-merge review, security, architecture, and what Sonnet failed."
+
+[[lane]]
+id = "claude-sonnet"
+group = "claude"
+provider = "claudeAgent"
+model = "claude-sonnet-5-5"
+family = "anthropic"
+status = "active"
+share = 40
+max_risk = "R3"
+concurrency = 4
+prior = 0.88
+classes = ["plan", "impl", "impl-large", "review", "review-fix", "research", "spike", "docs", "test", "ops"]
+notes = "Default workhorse and first escalation from a free lane."
+
+[[lane]]
+id = "claude-haiku"
+group = "claude"
+provider = "claudeAgent"
+model = "claude-haiku-5-5"
+family = "anthropic"
+status = "active"
+share = 3
+max_risk = "R1"
+concurrency = 3
+prior = 0.75
+classes = ["summarize", "research", "docs", "ops"]
+notes = "Search, log reading, summaries."
+
+[[lane]]
+id = "opencode-deepseek-flash-free"
+group = "free"
+provider = "opencode"
+model = "opencode/deepseek-v4.1-flash-free"
+family = "deepseek"
+status = "active"
+share = 12
+max_risk = "R1"
+concurrency = 3
+prior = 0.80
+classes = ["impl", "review-fix", "review", "test", "docs", "research"]
+notes = "Ran out of context on a large task; keep to bounded work."
+
+[[lane]]
+id = "opencode-glm-flash-free"
+group = "free"
+provider = "opencode"
+model = "opencode/glm-5.3-flash-free"
+family = "glm"
+status = "active"
+share = 12
+max_risk = "R1"
+concurrency = 3
+prior = 0.78
+classes = ["impl", "impl-large", "review-fix", "test", "docs", "research"]
+notes = "Writes good tests, leaves them un-gofmt'd; stalled once on 2026-10-21."
+
+[[lane]]
+id = "opencode-mimo-free"
+group = "free"
+provider = "opencode"
+model = "opencode/mimo-v2.6-flash-free"
+family = "mimo"
+status = "active"
+share = 6
+max_risk = "R1"
+concurrency = 2
+prior = 0.70
+classes = ["impl", "impl-large", "review-fix", "test", "docs"]
+notes = "Slow (median 43 min) but completed 3 of 3."
+
+[[lane]]
+id = "opencode-nim-glm"
+group = "free"
+provider = "opencode"
+model = "nvidia/z-ai/glm-5.3"
+family = "glm"
+status = "active"
+share = 8
+max_risk = "R1"
+concurrency = 3
+prior = 0.60
+classes = ["impl", "impl-large", "review-fix", "research"]
+notes = "429s above about 3 concurrent agents; commits survive a mid-run kill, so inspect the worktree."
+
+[[lane]]
+id = "opencode-nemotron-ultra-free"
+group = "free"
+provider = "opencode"
+model = "opencode/nemotron-3-ultra-free"
+family = "nemotron"
+status = "explore"
+share = 3
+max_risk = "R0"
+concurrency = 2
+prior = 0.55
+classes = ["docs", "test", "review-fix", "summarize"]
+notes = "New candidate: judge on R0 work only."
+
+[[lane]]
+id = "opencode-big-pickle"
+group = "free"
+provider = "opencode"
+model = "opencode/big-pickle"
+family = "unknown"
+status = "explore"
+share = 2
+max_risk = "R0"
+concurrency = 2
+prior = 0.50
+classes = ["docs", "test", "summarize"]
+notes = "New candidate: judge on R0 work only."
+
+[[lane]]
+id = "opencode-flint-free"
+group = "free"
+provider = "opencode"
+model = "opencode/flint-40b-free"
+family = "flint"
+status = "explore"
+share = 2
+max_risk = "R0"
+concurrency = 2
+prior = 0.50
+classes = ["docs", "test", "summarize"]
+notes = "New candidate: judge on R0 work only."
+
+[[lane]]
+id = "codex-luna"
+group = "free"
+provider = "codex"
+model = "gpt-6-luna"
+family = "openai"
+status = "active"
+share = 0
+max_risk = "R1"
+concurrency = 2
+prior = 0.85
+classes = ["review", "research", "impl", "review-fix"]
+unavailable_until = "2026-11-17"
+notes = "ChatGPT Free plan hit its usage limit on 2026-10-21; second-opinion reviewer when back."
+
+[[lane]]
+id = "grok-4-7"
+group = "free"
+provider = "grok"
+model = "grok-4.7"
+family = "xai"
+status = "active"
+share = 2
+max_risk = "R1"
+concurrency = 1
+prior = 0.60
+classes = ["review", "research"]
+notes = "Free Build quota exhausts fast; reserve for second-opinion review."
+
+[[lane]]
+id = "antigravity-gemini-flash"
+group = "free"
+provider = "antigravity"
+model = "gemini-3.8-flash-high"
+family = "google"
+status = "active"
+share = 0
+max_risk = "R0"
+concurrency = 1
+prior = 0.70
+classes = ["docs", "plan", "summarize"]
+unavailable_until = "2026-10-28"
+notes = "Quota exhausted 2026-10-21; design drafts and tiny fixes only."

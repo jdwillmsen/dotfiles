@@ -1,0 +1,220 @@
+# Change risk policy, read by `change-class`. Highest matching tier wins, so
+# adding a rule can only make the classifier more cautious, never less.
+# R0 trivial   R1 low   R2 medium   R3 critical (the only tier a human reviews)
+
+[tiers.R0]
+name = "trivial"
+merge = "auto"
+reviewer = "none"
+human = false
+interview = false
+
+[tiers.R1]
+name = "low"
+merge = "agent-review"
+reviewer = "review@other-family"
+human = false
+interview = false
+
+[tiers.R2]
+name = "medium"
+merge = "agent-review"
+reviewer = "review@sonnet+"
+human = false
+interview = false
+
+[tiers.R3]
+name = "critical"
+merge = "human"
+reviewer = "review@opus"
+human = true
+interview = true
+
+# Size alone never makes a change critical; it can lift R0/R1 up to the cap.
+[size]
+files = 25
+lines = 800
+cap = "R2"
+
+# A path that matches no rule is ordinary code.
+[default]
+tier = "R1"
+tag = "code"
+
+# Per-repo minimums, matched on `owner/repo` or bare `repo`. A doc-only change
+# is exempt, so documentation never waits on a deployment floor.
+[[floor]]
+repo = "deployments"
+tier = "R2"
+tag = "deploy"
+
+[[floor]]
+repo = "jdw-deployments"
+tier = "R2"
+tag = "deploy"
+
+[[floor]]
+repo = "infrastructure"
+tier = "R2"
+tag = "infra"
+
+# --- path rules --------------------------------------------------------------
+# paths: gitignore-style globs, `**` crosses directories. exclude: globs that
+# switch the rule off. content: regexes tried against added and removed lines.
+
+[[rule]]
+id = "docs"
+tag = "docs"
+tier = "R0"
+paths = ["**/*.md", "docs/**", "LICENSE*", "**/*.txt"]
+exclude = ["**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md"]
+
+[[rule]]
+id = "tests"
+tag = "tests"
+tier = "R0"
+paths = ["tests/**", "**/test/**", "**/__tests__/**", "**/*_test.go", "**/*.test.ts", "**/*.test.tsx", "**/*.spec.ts", "**/test_*.py", "**/*.test.js"]
+
+[[rule]]
+id = "lockfiles"
+tag = "deps"
+tier = "R1"
+paths = ["**/package-lock.json", "**/pnpm-lock.yaml", "**/yarn.lock", "**/go.sum", "**/poetry.lock", "**/Cargo.lock"]
+
+[[rule]]
+id = "manifests"
+tag = "deps"
+tier = "R1"
+paths = ["**/package.json", "**/go.mod", "**/requirements*.txt", "**/pyproject.toml", "**/Cargo.toml"]
+
+[[rule]]
+id = "renovate-config"
+tag = "deps"
+tier = "R1"
+paths = ["renovate.json", ".github/renovate.json*"]
+
+[[rule]]
+id = "ci-workflows"
+tag = "ci"
+tier = "R2"
+paths = [".github/workflows/**", ".github/actions/**", "**/Dockerfile*", "**/.gitlab-ci.yml"]
+
+[[rule]]
+id = "governance"
+tag = "governance"
+tier = "R3"
+paths = [".github/CODEOWNERS", "CODEOWNERS", ".github/rulesets/**", ".github/branch-protection*", ".coderabbit.yaml"]
+
+[[rule]]
+id = "promotion-workflow"
+tag = "prd"
+tier = "R3"
+paths = [".github/workflows/promote-prd*", ".github/workflows/*prd*", ".github/workflows/*release*"]
+
+[[rule]]
+id = "deploy-config"
+tag = "deploy"
+tier = "R2"
+paths = ["charts/**", "argocd/**", "**/values*.yaml", "**/kustomization.yaml", "apps/**/deploy/**"]
+
+[[rule]]
+id = "prd-config"
+tag = "prd"
+tier = "R3"
+paths = ["**/values-prd*.yaml", "**/prd/**", "**/*-prd.yaml", "**/prd-*.yaml", "**/production/**"]
+
+[[rule]]
+id = "infra-code"
+tag = "infra-apply"
+tier = "R3"
+paths = ["**/*.tf", "**/*.tfvars", "terraform/**", "talos/**", "**/cloud-init*", "**/hostconverge*", "ansible/**", "proxmox/**"]
+
+[[rule]]
+id = "host-provisioning"
+tag = "host"
+tier = "R3"
+paths = ["scripts/provision-*", "**/provision*.sh", "**/sudoers*", "**/systemd/system/**", "**/*.service.tmpl"]
+
+[[rule]]
+id = "auth-and-secrets"
+tag = "auth"
+tier = "R3"
+paths = ["**/auth/**", "**/*secret*", "**/*.sops.*", "**/*.age", ".sops.yaml", "**/rbac*", "**/*jwt*", "**/*oauth*", "**/*credential*"]
+exclude = ["**/*.md", "docs/**", "tests/**"]
+
+[[rule]]
+id = "network-policy"
+tag = "network"
+tier = "R3"
+paths = ["**/networkpolicy*", "**/network-polic*/**", "**/ingress*.yaml", "**/*firewall*"]
+
+[[rule]]
+id = "data-and-migrations"
+tag = "data"
+tier = "R3"
+paths = ["**/migrations/**", "**/*.sql", "**/schema.prisma", "**/db/migrate/**"]
+
+[[rule]]
+id = "agent-rules"
+tag = "agent-rules"
+tier = "R3"
+paths = ["**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md", "home/private_dot_claude/modify_settings*", "**/.claude/settings*.json", "**/change-risk.toml", "**/lanes.toml"]
+
+[[rule]]
+id = "game-world"
+tag = "players"
+tier = "R3"
+paths = ["**/server.properties", "**/bedrock_server*", "**/worlds/**", "**/world-reset*"]
+
+# --- content rules -----------------------------------------------------------
+# Tried against changed lines of every file a path rule did not already put at
+# R0, so a runbook that mentions `kubectl delete` stays a doc.
+
+[[rule]]
+id = "embedded-secret"
+tag = "secrets"
+tier = "R3"
+content = ['(?i)(api[_-]?key|secret|token|passwd|password)\s*[:=]\s*[\x22\x27]?[A-Za-z0-9/+_\-]{20,}', '-----BEGIN [A-Z ]*PRIVATE KEY-----', '\bgh[pousr]_[A-Za-z0-9]{20,}']
+exclude = ["**/*.md", "docs/**", "tests/**"]
+
+[[rule]]
+id = "destructive-command"
+tag = "destructive"
+tier = "R3"
+content = ['\brm\s+-[a-zA-Z]*r[a-zA-Z]*f?\s+/(?!tmp)', '\bkubectl\s+delete\b', '\bterraform\s+destroy\b', '\bgit\s+push\s+(-f\b|--force\b)', '(?i)\bDROP\s+(TABLE|DATABASE|SCHEMA)\b', '(?i)\bTRUNCATE\s+TABLE\b', '(?i)\bDELETE\s+FROM\b(?![^;]*\bWHERE\b)']
+exclude = ["**/*.md", "docs/**", "tests/**", "**/test_*.sh"]
+
+# --- plan rules --------------------------------------------------------------
+# Tried against the plan text (or a ticket body or PR description). A hit
+# classifies the whole piece of work before any agent starts, and an R3 plan
+# is interviewed with the owner first.
+
+[[rule]]
+id = "plan-irreversible"
+tag = "irreversible"
+tier = "R3"
+plan = ['(?i)\b(wipe|purge|truncate|drop|delete|destroy|reset)\b[^.\n]{0,40}\b(world|database|db|data|cluster|volume|bucket|backup|namespace|account)s?\b', '(?i)\bforce[- ]push', '(?i)\bmigrat(e|ion)s?\b[^.\n]{0,40}\b(data|database|schema|users?)\b', '(?i)\bcut-?over\b']
+
+[[rule]]
+id = "plan-secrets"
+tag = "auth"
+tier = "R3"
+plan = ['(?i)\brotat(e|ing)\b[^.\n]{0,30}\b(secret|key|token|credential|password|signing)', '(?i)\b(auth|authentication|authorization|rbac|permission)s?\b[^.\n]{0,30}\b(model|redesign|rewrite|change)', '(?i)\bmint|issue\b[^.\n]{0,20}\b(token|credential)']
+
+[[rule]]
+id = "plan-people-impact"
+tag = "players"
+tier = "R3"
+plan = ['(?i)\brestart\b[^.\n]{0,40}\b(server|game|minecraft|players?)', '(?i)\b(players?|users?)\b[^.\n]{0,30}\b(online|connected|mid-?game)', '(?i)\b(billing|payment|invoice|spend|purchase)s?\b']
+
+[[rule]]
+id = "plan-exposure"
+tag = "network"
+tier = "R3"
+plan = ['(?i)\b(expose|publish|open)\b[^.\n]{0,30}\b(publicly|to the internet|port|ingress)', '(?i)\bfirewall|network ?polic', '(?i)\bdisable\b[^.\n]{0,30}\b(auth|tls|mfa|branch protection|ruleset)']
+
+[[rule]]
+id = "plan-production"
+tag = "prd"
+tier = "R2"
+plan = ['(?i)\b(prd|production|prod)\b', '(?i)\broll ?out\b', '(?i)\bpromot(e|ion)\b']

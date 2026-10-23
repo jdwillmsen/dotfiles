@@ -900,4 +900,66 @@ grep -qx 'code: 2' "$out" || fail "plan text as an argument did not exit 2" "$(c
 grep -q -- '--plan -' "$out" || fail "the plan usage error does not point at stdin" "$(cat "$out")"
 run_in "$tmp" 0 --rules "$rules" --plan "$tmp/big-plan.txt"
 
+# ── Back-test of the real policy on merged-PR shapes from the owner's repos ──
+# Each case was classified too low (or too high) once; keep them pinned.
+real_case() {
+    local repo="$1" path="$2" want="$3" got
+    repo_files "$repo" "$path"
+    got="$(sed -n 's/^tier: //p' "$out")"
+    [ "$got" = "$want" ] || fail "$repo $path classified $got, want $want" "$(cat "$out")"
+}
+real_case jdwlabs/platform charts/platform/templates/migrations-configmap.yaml R3
+real_case jdwlabs/platform charts/platform/templates/network-policies.yaml R3
+real_case jdwlabs/platform charts/platform/templates/httproute-public.yaml R3
+real_case jdwlabs/platform charts/platform/templates/headlamp-rolebinding.yaml R3
+real_case jdwlabs/platform charts/grafana/Chart.yaml R2
+real_case jdwlabs/infrastructure bootstrap/internal/talos/patches/control-plane.yaml R3
+real_case jdwlabs/infrastructure bootstrap/internal/secrets/recipients.go R3
+real_case jdwlabs/infrastructure .github/workflows/terraform-apply.yml R3
+real_case jdwlabs/deployments charts/usersrole/Chart.yaml R2
+real_case jdwlabs/deployments charts/usersrole/values-prd.yaml R3
+real_case jdwlabs/deployments charts/profile-service/templates/clientsettingspolicy.yaml R3
+real_case jdwlabs/deployments charts/profile-service/values.yaml R3
+real_case jdwlabs/deployments .github/prd-auto-promote R3
+real_case jdwillmsen/jdw-deployments charts/crew-lab/values.yaml R2
+real_case jdwillmsen/jdw-deployments charts/minecraft-fwb/values.yaml R3
+real_case jdwillmsen/dotfiles home/private_dot_claude/hooks/pre.sh R3
+real_case jdwillmsen/dotfiles home/run_onchange_58-enable-agent-delivery.sh.tmpl R3
+real_case jdwillmsen/dotfiles home/dot_config/opencode/opencode.json R3
+real_case jdwlabs/apps apps/backend/auth/go.sum R2
+real_case jdwlabs/apps docs/adr/0004-live-e2e-gates-prd-promotion.md R0
+real_case jdwlabs/platform docs/GATEWAY-EXPOSURE.md R0
+
+for text_tier in \
+    'Update tests. Then drop the users table.|R3' \
+    'Update the README and remove the old backup volume|R3' \
+    'Fix typo in docs then delete all PVCs in jdwlabs-prd|R3' \
+    'Promote usersrole to prd|R3' \
+    'Grant the service account cluster-admin|R3' \
+    'Remove branch protection from main|R3' \
+    'Update the sops recipients|R3' \
+    'Bump Talos to 1.9|R3' \
+    'Apply the terraform change|R3' \
+    'Merge the PR without review|R3' \
+    'Scale the minecraft statefulset to zero|R3' \
+    'Update the README with install steps|R0' \
+    'Add a unit test for the parser|R0' \
+    'Refactor the map renderer|R1'; do
+    got="$(plan_tier "$tmp" "${text_tier%|*}")"
+    [ "$got" = "${text_tier##*|}" ] || fail "plan '${text_tier%|*}' classified $got, want ${text_tier##*|}" "$(cat "$out")"
+done
+
+# A destructive command in a script is critical however it is spelled.
+destructive_repo="$tmp/destructive-forms"
+new_repo "$destructive_repo"
+echo base >"$destructive_repo/a.txt"
+commit_all "$destructive_repo" base
+git -C "$destructive_repo" update-ref refs/remotes/origin/main HEAD
+# shellcheck disable=SC2016  # the text is classified, never expanded
+for cmd in 'rm -r -f /' 'rm -rf ~' 'rm -rf "$HOME"' 'rm --recursive --force /'; do
+    printf '%s\n' "$cmd" >"$destructive_repo/run.sh"
+    got="$( cd "$destructive_repo" && "$cc" --rules "$rules" --base origin/main | sed -n 's/^tier: //p' )"
+    [ "$got" = R3 ] || fail "destructive form '$cmd' classified $got, want R3"
+done
+
 echo "test_change_class_script: OK"

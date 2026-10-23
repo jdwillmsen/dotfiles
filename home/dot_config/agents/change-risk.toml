@@ -184,14 +184,15 @@ tag = "auth"
 tier = "R2"
 paths = ["**/auth/**/package-lock.json", "**/auth/**/package.json", "**/auth/**/go.mod", "**/auth/**/go.sum"]
 
-# The shared chart in the deployments repos is loaded by the prd Argo apps,
-# so a change to its templates or default values reaches prd on merge.
+# The prd Argo apps load each chart's templates and default values, so a change
+# to either reaches prd on merge. A Chart.yaml appVersion bump is the routine
+# non-prd rollout and stays R2.
 [[rule]]
 id = "shared-chart"
 tag = "prd"
 tier = "R3"
-repos = ["deployments", "jdw-deployments"]
-paths = ["charts/*/templates/**", "charts/*/values.yaml", "charts/*/Chart.yaml"]
+repos = ["deployments"]
+paths = ["charts/*/templates/**", "charts/*/values.yaml"]
 
 # --- content rules -----------------------------------------------------------
 # Tried against changed lines of every file a path rule did not already put at

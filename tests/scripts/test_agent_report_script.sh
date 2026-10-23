@@ -44,10 +44,69 @@ export AGENT_METRICS_NOW="2026-10-09T12:00:00+00:00"
 export AGENT_REPORT_AUDIT_DIR="$tmp/audit-reports"
 export AGENT_REPORT_NM_DB="$tmp/no-mistakes.sqlite"
 export AGENT_REPORT_GH_GAP=0
+export AGENT_REPORT_EVAL="$tmp/bin/agent-eval-stub"
+export EVAL_LOG="$tmp/eval.log"
 export GIT_AUTHOR_NAME=test GIT_AUTHOR_EMAIL=test@example.invalid
 export GIT_COMMITTER_NAME=test GIT_COMMITTER_EMAIL=test@example.invalid
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null
 export PATH="$tmp/bin:$PATH"
+
+# A stub agent-eval returning the shape `agent-eval report --format json` has.
+# STUB_EVAL_MODE picks the reply: populated (default), empty, fail, badjson,
+# wrongwindow or nonumber.
+cat >"$tmp/bin/agent-eval-stub" <<'STUB'
+#!/usr/bin/env python3
+import datetime as dt, json, os, sys
+a = sys.argv[1:]
+with open(os.environ["EVAL_LOG"], "a") as fh:
+    fh.write(" ".join(a) + "\n")
+mode = os.environ.get("STUB_EVAL_MODE", "populated")
+if mode == "fail":
+    sys.stderr.write("agent-eval exploded with SENTINEL-FREE-TEXT\n")
+    sys.exit(3)
+if mode == "badjson":
+    print("not json {")
+    sys.exit(0)
+window, end = a[a.index("--window") + 1], dt.date.fromisoformat(a[a.index("--end") + 1])
+if window == "monthly":
+    def first(d, n):
+        m = d.year * 12 + d.month - 1 + n
+        return dt.date(m // 12, m % 12 + 1, 1)
+    start, pstart = first(end, -1), first(end, -2)
+else:
+    span = dt.timedelta(days={"daily": 1, "weekly": 7, "biweekly": 14}[window])
+    start, pstart = end - span, end - 2 * span
+
+def block(s, e, populated, prev):
+    out = {"start": s.isoformat(), "end": e.isoformat(),
+           "dispatches": {"total": 0, "by_lane": {}, "by_class": {}}, "outcomes": {"total": 0, "by_lane": {}},
+           "pace": None, "cooldowns": [], "verdicts": []}
+    if populated and prev:
+        out["dispatches"] = {"total": 4, "by_lane": {"codex": 4}, "by_class": {"impl": 4}}
+    elif populated:
+        out["dispatches"] = {"total": 7, "by_lane": {"codex": 4, "nim-glm": 3}, "by_class": {"impl": 5, "docs": 2}}
+        out["outcomes"] = {"total": 4, "by_lane": {"codex": {"attempts": 4, "completed": 3, "completion": 0.75, "judged": 4,
+                                                             "success": 3, "quality": 0.75, "quality_lb": 0.3}}}
+        out["pace"] = {"assignments": 4, "used_last": 62.5, "line_last": 50.0, "multiplier_mean": 1.25,
+                       "multiplier_min": 1.0, "multiplier_max": 1.5}
+        out["cooldowns"] = [{"lane": "nim-glm", "at": "2026-10-02T10:00:00Z", "until": "2026-10-02T16:00:00Z"}]
+        out["verdicts"] = [
+            {"lane": "codex", "class": "impl", "n": 4, "quality_lb": 0.3, "verdict": "probation", "advise": None},
+            {"lane": "nim-glm", "class": "docs", "n": 6, "quality_lb": 0.1, "verdict": "drop-for-class", "advise": None},
+            {"lane": "codex", "class": "ops", "n": 9, "quality_lb": 0.8, "verdict": "keep", "advise": "allow R2"}]
+    return out
+
+empty = mode == "empty"
+rep = {"window": "weekly" if mode == "wrongwindow" else window, "empty": empty,
+       **block(start, end, not empty, False), "previous": block(pstart, start, not empty, True),
+       "observations": ["The evaluation ledger is empty: no dispatches or outcomes recorded yet."] if empty else
+       ["7 dispatches against 4 in the previous window.", "Most dispatches went to codex (4 of 7)."]}
+if mode == "nonumber":
+    rep["dispatches"]["total"] = "many"
+print(json.dumps(rep, indent=2))
+STUB
+chmod +x "$tmp/bin/agent-eval-stub"
+: >"$EVAL_LOG"
 
 out="$tmp/out"
 err="$tmp/err"
@@ -991,6 +1050,83 @@ cp "$store/reports/2026-10-04-weekly.json" "$tmp/first.json"
 AGENT_METRICS_NOW="2026-10-09T15:30:00+00:00" run 0 --window weekly --end 2026-10-09 --no-insights --no-github
 cmp -s "$tmp/first.json" "$store/reports/2026-10-04-weekly.json" || fail "an unchanged re-run rewrote generated_at"
 [ "$(gs rev-parse HEAD)" = "$before" ] || fail "an unchanged re-run committed"
+reset_store
+
+# ── Models: the agent-eval section ──
+mj() { python3 -c 'import json, sys; m = json.load(open(sys.argv[1]))["models"]; print(json.dumps(eval(sys.argv[2], {"m": m}), sort_keys=True))' "$(field json)" "$1"; }
+mmd() { cat "$(field md)"; }
+
+: >"$EVAL_LOG"
+run 0 --window weekly --end 2026-10-09 --dry-run --no-insights --no-github
+[ "$(cat "$EVAL_LOG")" = "report --window weekly --end 2026-10-05 --format json" ] || fail "agent-eval was called with the wrong arguments" "$(cat "$EVAL_LOG")"
+[ "$(mj 'm["dispatches"]["total"]')" = 7 ] && [ "$(mj 'm["previous"]["dispatches"]["total"]')" = 4 ] || fail "the models section is not stored" "$(mj 'm')"
+md="$(mmd)"
+for want in "## Models" "Pace: used 62.5%, pace line 50%, gap +12.5 points; multiplier mean 1.25 (min 1, max 1.5) over 4 assignments." \
+    "| Lane | This window | Previous | Change |" "| codex | 4 | 4 | +0% |" "| nim-glm | 3 | 0 | new |" \
+    "| Class | This window | Previous | Change |" "| impl | 5 | 4 | +25% |" \
+    "### Completion and quality by lane" "| codex | 4 | 3 | 75.0% | 4 | 75.0% | 0.3 |" \
+    "### Verdicts" "| nim-glm | docs | 6 | 0.1 | drop-for-class |  |" "| codex | ops | 9 | 0.8 | keep | allow R2 |" \
+    "### Cooldowns" "| nim-glm | 2026-10-02T10:00:00Z | 2026-10-02T16:00:00Z |" \
+    "### Observations" "- Most dispatches went to codex (4 of 7)."; do
+    grep -qF -- "$want" <<<"$md" || fail "the models section lacks '$want'" "$md"
+done
+
+# Every window agent-eval supports is asked for with the window's own end date; the other two are skipped, not approximated.
+for w in daily weekly biweekly monthly; do
+    : >"$EVAL_LOG"
+    run 0 --window "$w" --end 2026-10-09 --dry-run --no-insights --no-github
+    [ "$(wc -l <"$EVAL_LOG")" = 1 ] && grep -q "^report --window $w --end [0-9-]* --format json$" "$EVAL_LOG" || fail "$w did not call agent-eval once" "$(cat "$EVAL_LOG")"
+    [ "$(mj 'm["window"]')" = '"'"$w"'"' ] || fail "$w stored the wrong models window" "$(mj 'm')"
+done
+[ "$(sed 's/.* --end \([0-9-]*\) .*/\1/' "$EVAL_LOG")" = 2026-10-01 ] || fail "monthly was not anchored on the first of the month" "$(cat "$EVAL_LOG")"
+for w in quarterly yearly; do
+    : >"$EVAL_LOG"
+    run 0 --window "$w" --end 2026-10-09 --dry-run --no-insights --no-github
+    [ ! -s "$EVAL_LOG" ] || fail "$w called agent-eval" "$(cat "$EVAL_LOG")"
+    [ "$(mj 'm')" = "{\"skipped\": \"agent-eval has no $w window\"}" ] || fail "$w models section is not skipped" "$(mj 'm')"
+    grep -qF "Model evaluation skipped (agent-eval has no $w window)." <<<"$(mmd)" || fail "$w Markdown does not say the section was skipped" "$(mmd)"
+done
+
+# The daily report shows pace and cooldowns only.
+run 0 --window daily --end 2026-10-09 --dry-run --no-insights
+md="$(mmd)"
+grep -qF "Pace: used 62.5%" <<<"$md" && grep -qF "### Cooldowns" <<<"$md" && grep -qF "| nim-glm | 2026-10-02T10:00:00Z |" <<<"$md" || fail "the daily models section lacks pace or cooldowns" "$md"
+for not in "Dispatches" "Completion and quality" "### Verdicts" "### Observations" "| codex | 4 |"; do
+    ! grep -qF -- "$not" <<<"$md" || fail "the daily models section shows '$not'" "$md"
+done
+
+# An empty ledger is one line saying so.
+STUB_EVAL_MODE=empty run 0 --window weekly --end 2026-10-09 --dry-run --no-insights --no-github
+md="$(mmd)"
+grep -qF "The evaluation ledger is empty: no dispatches or outcomes recorded yet." <<<"$md" || fail "an empty ledger is not said" "$md"
+! grep -q "Completion and quality\|Pace:" <<<"$md" || fail "an empty ledger still renders tables" "$md"
+[ "$(mj 'm["empty"]')" = true ] || fail "the empty flag is not stored"
+
+# A failed call, bad JSON, a reply for another window, a non-number or a missing tool is errored with a fixed code, never zero,
+# and the rest of the report still builds; the tool's own text stays out of the report.
+for case in "fail eval_exit" "badjson bad_output" "wrongwindow bad_output" "nonumber bad_output"; do
+    mode="${case% *}" reason="${case#* }"
+    STUB_EVAL_MODE="$mode" run 0 --window biweekly --end 2026-10-09 --dry-run --no-insights --no-github
+    [ "$(mj '[m.get("errored"), m.get("reason")]')" = "[true, \"$reason\"]" ] || fail "$mode is not errored as $reason" "$(mj 'm')"
+    md="$(mmd)"
+    grep -qF "Errored, so unknown rather than zero (reason: $reason)." <<<"$md" || fail "$mode is not marked errored in the Markdown" "$md"
+    grep -q "## Interactive" <<<"$md" && grep -q "## Delivery" <<<"$md" || fail "$mode stopped the rest of the report" "$md"
+    ! grep -q "SENTINEL-FREE-TEXT" "$(field json)" "$(field md)" || fail "$mode leaked the tool's own text into the report"
+    [ "$mode" != fail ] || grep -q "SENTINEL-FREE-TEXT" "$err" || fail "the tool's own text was not logged to stderr" "$(cat "$err")"
+done
+AGENT_REPORT_EVAL="$tmp/no-such-agent-eval" run 0 --window weekly --end 2026-10-09 --dry-run --no-insights --no-github
+[ "$(mj 'm["reason"]')" = '"not_installed"' ] || fail "a missing agent-eval is not not_installed" "$(mj 'm')"
+
+# A re-run is byte-identical even when the clock has moved on, models section included.
+reset_store
+run 0 --window weekly --end 2026-10-09 --no-insights --no-github
+cp "$store/reports/2026-10-04-weekly.json" "$tmp/first.json"
+cp "$store/reports/2026-10-04-weekly.md" "$tmp/first.md"
+grep -q "## Models" "$tmp/first.md" || fail "the stored Markdown lacks the models section"
+before="$(gs rev-parse HEAD)"
+AGENT_METRICS_NOW="2026-10-09T15:30:00+00:00" run 0 --window weekly --end 2026-10-09 --no-insights --no-github
+cmp -s "$tmp/first.json" "$store/reports/2026-10-04-weekly.json" && cmp -s "$tmp/first.md" "$store/reports/2026-10-04-weekly.md" || fail "a re-run with models changed the report"
+[ "$(gs rev-parse HEAD)" = "$before" ] || fail "a re-run with models committed"
 reset_store
 
 # ── Units: one template service and six calendar timers ──

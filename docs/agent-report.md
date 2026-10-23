@@ -19,6 +19,7 @@ The design is in
    `scripted`, never blended.
 3. Daily only: raises flags from `~/.config/agent-metrics/thresholds.json`.
 4. Weekly and longer: measures delivery (GitHub merged PRs, no-mistakes runs).
+   Every window: asks `agent-eval` how the model lanes did (below).
 5. Weekly, biweekly, monthly and quarterly: embeds the audit's config
    inventory when its JSON exists.
 6. Weekly and monthly: one capped model call for commentary, after the budget
@@ -95,6 +96,10 @@ Top level: `schema` (1), `window`, `start`, `end` (exclusive), `label_date`,
 - **`audit`**: the audit report's `hooks`, `disable_candidates` and
   `instructions`, or null when the audit has not written that window's JSON.
   Strings that are not identifiers are replaced by `_invalid`.
+- **`models`**: `agent-eval report --format json` for the window, as returned
+  (dispatches, outcomes, pace, cooldowns and verdicts for the window, the same
+  under `previous`, and `observations`), or `{"skipped": ...}` or
+  `{"errored": true, "reason": ...}`.
 - **`insights`**: `{"text", "cost_usd"}`, `{"skipped": "budget", "state": ...}`,
   `{"skipped": "window" | "--no-insights" | "dry-run"}` or `{"error": code}`,
   where the code is one of `not_found`, `timeout`, `spawn_failed`,
@@ -135,6 +140,24 @@ no-mistakes numbers come from `~/.no-mistakes/state.sqlite`, opened read-only
 failed and cancelled split, and the first-pass rate, which is completed runs
 with no `auto_fix` round over finished runs. Runs still going are counted
 separately and left out of the rate.
+
+## Models
+
+Every window runs `agent-eval report --window <window> --end <window end>
+--format json` and renders a `## Models` section: a pace line (used, pace
+line, gap, multiplier), dispatches by lane and by class against the previous
+window, completion and quality per lane, the keep, probation, drop-for-class
+and promotion verdicts, cooldown events and the one-line observations. The
+daily report shows only pace and cooldowns. An empty ledger renders one line
+saying so. `agent-eval` reports daily, weekly, biweekly and monthly windows;
+quarterly and yearly are marked `{"skipped": ...}` rather than answered with
+a different window's days. A failed call, a timeout, a missing tool, invalid
+JSON or a reply for another window is `{"errored": true, "reason": ...}` with
+`reason` one of `eval_exit`, `timeout`, `not_installed`, `bad_output`, never
+zero, and the rest of the report still builds; the tool's own text goes to
+stderr only. No model is called. `AGENT_REPORT_EVAL` names the executable
+(default: `agent-eval` on `PATH`, else `~/.local/bin/agent-eval`) and
+`AGENT_REPORT_EVAL_TIMEOUT` caps the call (default 60 seconds).
 
 ## Flags and thresholds
 

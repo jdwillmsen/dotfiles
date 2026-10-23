@@ -16,6 +16,13 @@ max_merges_per_hour = 6
 review_timeout_s = 300
 max_diff_bytes = 150000
 
+[reviewers]
+# Providers a review may run on. A lane on any other provider is excluded from
+# the lane choice, so a review is never assigned to a lane it cannot run. The
+# free opencode models refuse the tool-less invocation a diff review needs, so
+# only claudeAgent is listed.
+providers = ["claudeAgent"]
+
 [checks]
 # Names of checks whose failure is tolerated. Every other failing check blocks
 # the merge, required or not.

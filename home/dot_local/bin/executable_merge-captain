@@ -48,6 +48,8 @@ TIERS = ("R0", "R1", "R2", "R3")
 MODES = ("live", "dry-run", "off")
 # R3 is never mergeable here, so it is not a legal ceiling.
 CEILINGS = ("R0", "R1", "R2")
+# Providers this tool can run headless. Which of them a review may use is the [reviewers] config.
+PROVIDERS = ("claudeAgent", "opencode")
 LIMIT_DEFAULTS = {"max_prs_per_run": 6, "max_reviews_per_run": 2, "max_merges_per_hour": 6,
                   "review_timeout_s": 300, "max_diff_bytes": 150000}
 SKIP_LABELS = ("hold", "no-agent-merge")
@@ -232,6 +234,9 @@ def load_config():
         if not positive_int(v):
             die(EXIT_FAIL, f"limit {k} must be a positive integer, got {v!r}")
         limits[k] = v
+    providers = (cfg.get("reviewers") or {}).get("providers", ["claudeAgent"])
+    if not isinstance(providers, list) or not providers or not all(p in PROVIDERS for p in providers):
+        die(EXIT_FAIL, f"[reviewers] providers must be a non-empty list drawn from {','.join(PROVIDERS)}")
     allow = (cfg.get("authors") or {}).get("allow")
     if not isinstance(allow, list) or not all(isinstance(a, str) and a.strip() for a in allow):
         die(EXIT_FAIL, "[authors] allow must be a list of login names")
@@ -257,7 +262,7 @@ def load_config():
         if not isinstance(no_checks, bool):
             die(EXIT_FAIL, f"repo {name}: allow_no_checks must be true or false, got {no_checks!r}")
         repos.append({"name": name, "mode": mode, "max_tier": ceiling, "allow_no_checks": no_checks})
-    return {"limits": limits, "allow": allow, "ignore": ignore, "repos": repos}
+    return {"limits": limits, "allow": allow, "ignore": ignore, "providers": providers, "repos": repos}
 
 
 # ── External tools ───────────────────────────────────────────────────────────
@@ -308,10 +313,12 @@ def child_env(strip):
     return {k: v for k, v in os.environ.items() if not strip.search(k)}
 
 
-# Reviewer processes get no GitHub or cloud credentials. claude needs none;
-# opencode keeps the provider key its lane is configured with.
+# Reviewer processes get no GitHub or cloud credentials. claude needs none; opencode gets back only the key
+# its own model's provider reads, so a free-tier model never sees the paid provider's key.
 CLAUDE_STRIP = re.compile(r"TOKEN|SECRET|PASSW|API_KEY|PRIVATE_KEY|CREDENTIAL", re.I)
-OPENCODE_STRIP = re.compile(r"^(GH_|GITHUB_|GITLAB_|SSH_|AWS_|GOOGLE_APPLICATION|T3_)|TOKEN$|^ANTHROPIC_|^CLAUDE", re.I)
+OPENCODE_STRIP = re.compile(r"^(GH_|GITHUB_|GITLAB_|SSH_|AWS_|GOOGLE_APPLICATION|T3_|ANTHROPIC_|CLAUDE)"
+                            r"|TOKEN|SECRET|PASSW|API_KEY|PRIVATE_KEY|CREDENTIAL", re.I)
+OPENCODE_PROVIDER_ENV = {"nvidia": ("PLATFORMCTL_JDWLABS_NVIDIA_API_KEY",)}
 # Tools off in the headless opencode run, so text in a diff cannot make it act.
 OPENCODE_LOCKDOWN = json.dumps({
     "permission": {"edit": "deny", "bash": "deny", "webfetch": "deny", "external_directory": "deny"},
@@ -410,10 +417,11 @@ def parse_verdict(text):
     return verdict, rows
 
 
-def review_comment(head, tier, verdict, lane, findings):
+def review_comment(head, tier, verdict, lane, findings, same_family=False):
     # The marker line is for people reading the thread; nothing reads it back.
     head_lines = [f"<!-- merge-captain:review sha={head} tier={tier} verdict={verdict} -->",
-                  f"merge-captain review: **{verdict}** (tier {tier}, lane {md_safe(lane, 60)}, "
+                  f"merge-captain review: **{verdict}** (tier {tier}, lane {md_safe(lane, 60)}"
+                  f"{', same-family reviewer' if same_family else ''}, "
                   f"{len(findings)} finding{'s' if len(findings) != 1 else ''})"]
     body = "\n".join(head_lines)
     rows = ["", "| severity | where | issue |", "|---|---|---|"]
@@ -814,12 +822,27 @@ class Captain:
 
     # -- review --------------------------------------------------------------
 
-    def assign(self, tier, ticket, exclude):
+    def barred_lanes(self):
+        """Lanes whose provider this run may not use, so agent-pace never hands out a lane that cannot run."""
+        path = Path(os.environ.get("AGENT_PACE_LANES")
+                    or Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "agents/lanes.toml")
+        try:
+            lanes = tomllib.loads(path.read_text()).get("lane") or []
+        except (OSError, tomllib.TOMLDecodeError):
+            log("lane policy unreadable; reviewer providers are checked at run time instead")
+            return []
+        return sorted(x["id"] for x in lanes if isinstance(x, dict) and isinstance(x.get("id"), str)
+                      and x.get("provider") not in self.cfg["providers"])
+
+    def assign(self, tier, ticket, exclude, same_family=False):
         args = [self.pace_bin, "assign", "--class", "review", "--risk", tier, "--json"]
         if ticket:
             args += ["--ticket", ticket]
-        if exclude:
-            args += ["--exclude", ",".join(exclude)]
+        barred = sorted({*exclude, *self.barred_lanes()})
+        if barred:
+            args += ["--exclude", ",".join(barred)]
+        if same_family:
+            args += ["--allow-same-family"]
         r = run_cmd(args, timeout=TOOL_TIMEOUT_S, cwd=self.scratch)
         try:
             j = json.loads(r.out)
@@ -834,13 +857,16 @@ class Captain:
                      "--no-session-persistence", "--output-format", "json"], child_env(CLAUDE_STRIP))
         if provider == "opencode":
             env = child_env(OPENCODE_STRIP)
+            for key in OPENCODE_PROVIDER_ENV.get(model.split("/")[0], ()):
+                if key in os.environ:
+                    env[key] = os.environ[key]
             env["OPENCODE_CONFIG_CONTENT"] = OPENCODE_LOCKDOWN
             return ([self.opencode_bin, "run", "-m", model, "Follow the instructions in the input."], env)
         return None, None
 
     def run_reviewer(self, provider, model, prompt):
         """(verdict, findings), or a failure label. The prompt travels on stdin only."""
-        argv, env = self.reviewer_argv(provider, model)
+        argv, env = self.reviewer_argv(provider, model) if provider in self.cfg["providers"] else (None, None)
         if argv is None:
             return "unsupported"
         with tempfile.TemporaryDirectory(prefix="merge-captain-review-") as cwd:
@@ -911,10 +937,15 @@ class Captain:
                                "diff-too-large")
         prompt = build_prompt(tier, tags, reasons, details.get("title"), dr.out)
 
-        tried = []
+        tried, same_family = [], False
         for _ in range(MAX_REVIEW_TRIES):
             self.review_budget(repo, n, head)
             res = self.assign(tier, ticket, tried)
+            if tier == "R1" and (res or {}).get("result") == "none":
+                # Nothing of another family can run; a same-family review beats waiting on an idle lane.
+                retry = self.assign(tier, ticket, tried, same_family=True)
+                if retry and retry.get("result") == "assigned":
+                    res, same_family = retry, True
             if not res or res.get("result") != "assigned":
                 if tried:
                     break
@@ -940,7 +971,7 @@ class Captain:
             verdict, findings = outcome
             self.record_eval(aid, tier, findings=len(findings), pr_url=f"https://github.com/{repo}/pull/{n}")
             self.record_review(repo, n, head, tier, verdict, lane)
-            self.comment(repo, n, review_comment(head, tier, verdict, lane, findings))
+            self.comment(repo, n, review_comment(head, tier, verdict, lane, findings, same_family))
             if verdict == "changes":
                 self.ensure_labels(repo, ["agent-changes-requested"])
                 self.edit_labels(repo, n, ["agent-changes-requested"], [])
@@ -1200,7 +1231,8 @@ def cmd_status(args):
     out.update({"mode_live": live, "mode_dry": dry, "mode_off": sum(1 for r in cfg["repos"] if r["mode"] == "off"),
                 "merges_last_hour": merges_since(now_epoch()),
                 "max_merges_per_hour": cfg["limits"]["max_merges_per_hour"],
-                "limits": cfg["limits"], "authors": cfg["allow"]})
+                "limits": cfg["limits"], "authors": cfg["allow"], "reviewers": cfg["providers"],
+                "checks_ignored": cfg["ignore"]})
     out["repos"] = [{"name": r["name"], "mode": r["mode"], "max_tier": r["max_tier"]} for r in cfg["repos"]]
     runs = [r for r in read_log() if r.get("action") == "run"][-5:]
     out["last_runs"] = [{"at": r.get("at"), "result": r.get("reason")} for r in reversed(runs)]

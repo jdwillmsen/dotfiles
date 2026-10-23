@@ -221,7 +221,7 @@ open(f"{S}/{name}.stdin.{k}", "w").write(stdin)
 with open(f"{S}/{name}.calls", "a") as f:
     f.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd(), "listing": os.listdir("."),
                         "gh_token": "GH_TOKEN" in os.environ, "api_key": "SOME_API_KEY" in os.environ,
-                        "provider_key": "NVIDIA_PROVIDER_KEY" in os.environ,
+                        "provider_key": "PLATFORMCTL_JDWLABS_NVIDIA_API_KEY" in os.environ,
                         "lockdown": os.environ.get("OPENCODE_CONFIG_CONTENT", "")}) + "\n")
 if os.path.exists(f"{S}/rev_{name}_{k}.nap"):
     time.sleep(float(open(f"{S}/rev_{name}_{k}.nap").read()))
@@ -322,6 +322,13 @@ elif cmd == "rev":
         open(f"{S}/rev_{name}_{k}.nap", "w").write(kv["nap"])
 PY
 fx() { python3 "$tmp/fx.py" "$@"; }
+# The lane policy agent-pace reads, cut to the lanes these tests hand out.
+python3 - "$tmp/lanes.toml" <<'PY'
+import sys
+lanes = [("claude-sonnet", "claudeAgent"), ("claude-opus", "claudeAgent"), ("opencode-glm", "opencode"),
+         ("opencode-nim", "opencode"), ("codex-luna", "codex")]
+open(sys.argv[1], "w").write("".join(f'[[lane]]\nid = "{i}"\nprovider = "{p}"\n\n' for i, p in lanes))
+PY
 
 # ── Harness ──
 cfg() {  # limit overrides as key=value; LIVE_MAX sets the live repo's ceiling
@@ -330,6 +337,7 @@ cfg() {  # limit overrides as key=value; LIVE_MAX sets the live repo's ceiling
         local kv
         for kv in "$@"; do echo "$kv"; done
         printf '[checks]\nignore = [%s]\n' "${CHECK_IGNORE:-}"
+        printf '[reviewers]\nproviders = [%s]\n' "${PROVIDERS:-\"claudeAgent\"}"
         echo '[authors]'
         echo 'allow = ["jdwillmsen", "jdwlabs-agent-bot", "renovate[bot]", "dependabot[bot]"]'
         printf '[[repo]]\nname = "acme/live"\nmode = "live"\nmax_tier = "%s"\n' "${LIVE_MAX:-R2}"
@@ -351,8 +359,9 @@ mc() {
     env MERGE_CAPTAIN_CONFIG="$CFG" MERGE_CAPTAIN_STATE="$STATE" MERGE_CAPTAIN_NOW="$NOW" \
         MERGE_CAPTAIN_GH="$bin/gh" MERGE_CAPTAIN_CLASS="$bin/change-class" MERGE_CAPTAIN_PACE="$bin/agent-pace" \
         MERGE_CAPTAIN_EVAL="$bin/agent-eval" MERGE_CAPTAIN_CLAUDE="$bin/claude" MERGE_CAPTAIN_OPENCODE="$bin/opencode" \
-        STUB_DIR="$S" HOME="$tmp/home" GH_TOKEN=ghp_testsecretvalue0000000000000 SOME_API_KEY=sk-testtesttesttesttest \
-        NVIDIA_PROVIDER_KEY=nv-keep-me PATH="/usr/bin:/bin" "$tool" "$@" >"$out" 2>"$err" || rc=$?
+        AGENT_PACE_LANES="$tmp/lanes.toml" STUB_DIR="$S" HOME="$tmp/home" GH_TOKEN=ghp_testsecretvalue0000000000000 \
+        SOME_API_KEY=sk-testtesttesttesttest PLATFORMCTL_JDWLABS_NVIDIA_API_KEY=nv-keep-me PATH="/usr/bin:/bin" \
+        "$tool" "$@" >"$out" 2>"$err" || rc=$?
 }
 want() {  # $1 expected exit code, rest = merge-captain args
     local w="$1"
@@ -515,7 +524,7 @@ for kind in conflict prose; do
 done
 
 # ── A failed review is never an approval ──
-newcase review_timeout_s=1
+PROVIDERS='"claudeAgent","opencode"' newcase review_timeout_s=1
 fx pr 6
 fx class 6 R1
 fx pace 1 lane=claude-sonnet provider=claudeAgent model=claude-sonnet-5-5
@@ -552,7 +561,7 @@ expect 6 waiting review-unavailable
 [ "$(count '^pr merge' "$S/gh.log")" = 0 ] || fail "a non-zero exit was treated as approval"
 
 # First lane fails, second lane approves: the opencode call is fixed, tool-less and key-scoped.
-newcase
+PROVIDERS='"claudeAgent","opencode"' newcase
 fx pr 7
 fx class 7 R1
 fx pace 1 lane=claude-sonnet provider=claudeAgent model=claude-sonnet-5-5
@@ -567,7 +576,7 @@ call = json.loads(open(sys.argv[1] + "/opencode.calls").readline())
 assert call["argv"] == ["run", "-m", "opencode/glm-5.3-flash-free", "Follow the instructions in the input."], call["argv"]
 assert call["listing"] == []
 assert not call["gh_token"], "opencode saw the GitHub token"
-assert call["provider_key"], "opencode needs its provider key"
+assert not call["provider_key"], "a free-tier model must not see the paid provider's key"
 lock = json.loads(call["lockdown"])
 assert lock["permission"]["bash"] == "deny" and lock["tools"]["bash"] is False
 PY
@@ -599,6 +608,92 @@ for result in defer none; do
     if [ "$result" = defer ]; then expect 9 waiting quota; else expect 9 waiting no-review-lane; fi
     [ ! -e "$S/claude.calls" ] || fail "reviewer ran with no lane"
 done
+
+# ── Reviewer providers: lanes the captain cannot run are never asked for ──
+newcase
+fx pr 160
+fx class 160 R1
+fx pace 1 lane=claude-sonnet provider=claudeAgent model=claude-sonnet-5-5
+fx pace 2 lane=claude-opus provider=claudeAgent model=claude-opus-5-5
+fx rev claude 1 garbage
+fx rev claude 2 approve
+want 0 run
+expect 160 merged
+[ "$(sed -n 1p "$S/pace.log" | grep -o -- '--exclude .*')" = "--exclude codex-luna,opencode-glm,opencode-nim" ] ||
+    fail "the first assign must exclude every lane on another provider" "$(cat "$S/pace.log")"
+[ "$(sed -n 2p "$S/pace.log" | grep -o -- '--exclude .*')" = "--exclude claude-sonnet,codex-luna,opencode-glm,opencode-nim" ] ||
+    fail "a retry must keep the barred lanes and add the failed one" "$(cat "$S/pace.log")"
+PROVIDERS='"claudeAgent","opencode"' newcase
+fx pr 160
+fx class 160 R1
+fx pace 1 lane=claude-sonnet provider=claudeAgent model=claude-sonnet-5-5
+fx rev claude 1 approve
+want 0 run
+[ "$(sed -n 1p "$S/pace.log" | grep -o -- '--exclude .*')" = "--exclude codex-luna" ] ||
+    fail "a listed provider must not be excluded" "$(cat "$S/pace.log")"
+# A lane on a barred provider that gets through anyway is still not run.
+newcase
+fx pr 161
+fx class 161 R1
+fx pace 1 lane=opencode-glm provider=opencode model=opencode/glm-5.3-flash-free
+fx pace 2 lane=claude-sonnet provider=claudeAgent model=claude-sonnet-5-5
+fx rev claude 1 approve
+want 0 run
+expect 161 merged "review approve by claude-sonnet"
+[ ! -e "$S/opencode.calls" ] || fail "opencode ran although [reviewers] providers leaves it out"
+grep -q 'record --id a-1 --status interrupted' "$S/eval.log" || fail "a barred lane's assignment was not released" "$(cat "$S/eval.log")"
+# Provider keys go only to the provider that reads them.
+PROVIDERS='"claudeAgent","opencode"' newcase
+fx pr 162
+fx class 162 R1
+fx pace 1 lane=opencode-nim provider=opencode model=nvidia/z-ai/glm-5.3
+fx rev opencode 1 prose
+want 0 run
+expect 162 merged "review approve by opencode-nim"
+python3 -I - "$S" <<'PY' || fail "provider key scoping" "$(cat "$S/opencode.calls")"
+import json, sys
+call = json.loads(open(sys.argv[1] + "/opencode.calls").readline())
+assert call["provider_key"], "the nvidia model needs its key"
+assert not call["gh_token"] and not call["api_key"], "opencode saw an unrelated credential"
+PY
+newcase
+approve_setup 163 R1
+want 0 run
+python3 -I - "$S" <<'PY' || fail "claude must not see the provider key" "$(cat "$S/claude.calls")"
+import json, sys
+call = json.loads(open(sys.argv[1] + "/claude.calls").readline())
+assert not call["provider_key"] and not call["api_key"] and not call["gh_token"], call
+PY
+# With no other-family lane, R1 asks again once with --allow-same-family and says so in the comment.
+newcase
+fx pr 164
+fx class 164 R1
+fx pace 1 result=none
+fx pace 2 lane=claude-sonnet provider=claudeAgent model=claude-sonnet-5-5
+fx rev claude 1 approve
+want 0 run
+expect 164 merged "review approve by claude-sonnet"
+[ "$(wc -l <"$S/pace.log")" = 2 ] && ! sed -n 1p "$S/pace.log" | grep -q -- '--allow-same-family' &&
+    sed -n 2p "$S/pace.log" | grep -q -- '--allow-same-family' || fail "R1 should retry once, with --allow-same-family" "$(cat "$S/pace.log")"
+grep -q 'same-family reviewer' "$S/posted_164.txt" || fail "same-family review not noted in the comment" "$(cat "$S/posted_164.txt")"
+newcase
+approve_setup 165 R1
+want 0 run
+grep -q 'same-family' "$S/posted_165.txt" && fail "an ordinary review claimed to be same-family"
+grep -q -- '--allow-same-family' "$S/pace.log" && fail "--allow-same-family used without need"
+newcase
+fx pr 166
+fx class 166 R2
+fx pace 1 result=none
+want 0 run
+expect 166 waiting no-review-lane
+[ "$(wc -l <"$S/pace.log")" = 1 ] && ! grep -q -- '--allow-same-family' "$S/pace.log" ||
+    fail "R2 must not retry with --allow-same-family" "$(cat "$S/pace.log")"
+# The config rejects a provider the captain cannot run.
+newcase
+PROVIDERS='"codex"' cfg
+want 1 status
+grep -q '^error: .*providers' "$out" || fail "an unsupported provider in the config" "$(cat "$out")"
 
 # ── Review budget: reviewer CALLS are counted, the run has a deadline, a head gets two failed tries ──
 newcase

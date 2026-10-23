@@ -44,6 +44,7 @@ skipped='
 55-enable-agent-notify.sh
 56-enable-agent-label.sh
 57-enable-agent-propose.sh
+58-enable-agent-delivery.sh
 54-set-no-mistakes-agent.sh
 55-set-no-mistakes-commit-trailers.sh
 56-generate-claude-jira.sh

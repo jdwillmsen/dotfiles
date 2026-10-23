@@ -1,0 +1,1094 @@
+#!/usr/bin/env python3
+"""agent-eval — evaluation ledger and scoreboard for the work lanes.
+
+Turns every dispatch into a data point: T3 delegated-task history and explicit
+outcome records go into append-only ledgers, and the scoreboard, weights,
+verdicts and reports are arithmetic over them. Calls no model. Agent-facing:
+stdout is TOON (JSON or Markdown where a flag says so), diagnostics go to stderr.
+"""
+# T3 schema facts `collect` depends on (statev2.sqlite, read-only, checked 2026-10-23):
+#
+# - A delegated task is a row of orchestration_v2_projection_threads whose
+#   thread_id contains `delegate-task`; the id ends `...delegate-task:<slug>`
+#   (percent-encoded in places) and the title is the task title. The legacy
+#   projection_threads table holds none of them, so it is not read.
+# - Provider, model and run times live on the run, not the thread. A thread
+#   normally has one run; a follow-up message adds another, and the last
+#   (highest ordinal) run carries the outcome. orchestration_v2_projection_runs
+#   has provider, status (completed | failed | interrupted | cancelled |
+#   running), requested_at and completed_at; its payload_json adds
+#   modelSelection.model and startedAt. provider_sessions.model is the fallback
+#   when the run payload names no model.
+# - Run duration is completed_at minus the payload's startedAt (requested_at
+#   when absent): requested_at includes queueing, which is not the model's time.
+# - The item count is the run's orchestration_v2_projection_turn_items except
+#   the user prompt and the error marker, which are not work the model did.
+# - Logged error text lives in a turn item of type `error` whose payload_json
+#   has failure.{class,code,message}; there is no error column on the run.
+# - Delegated threads carry no pull request or branch, so "a commit or PR
+#   exists" is read from completed command_execution items whose `input` ran
+#   `git commit` or `gh pr create`, plus any projection_thread_pull_requests
+#   row. The command text is matched in memory and never stored.
+# - `running` has no outcome yet, so it is skipped until it finishes.
+import argparse
+import datetime as dt
+import fcntl
+import json
+import math
+import os
+import re
+import shutil
+import sqlite3
+import statistics
+import subprocess
+import sys
+import tempfile
+import tomllib
+from pathlib import Path
+
+VERSION = "1.0.0"
+
+if __name__ == "__main__" and len(sys.argv) == 2 and sys.argv[1] in ("-v", "-V", "--version"):
+    print(VERSION)
+    sys.exit(0)
+
+EXIT_FAIL, EXIT_USAGE = 1, 2
+
+HOME = Path.home()
+STATE = Path(os.environ.get("AGENT_EVAL_STATE",
+                            Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "agent-eval"))
+LANES_PATH = Path(os.environ.get("AGENT_EVAL_LANES",
+                                 Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "agents/lanes.toml"))
+T3_DB = Path(os.environ.get("AGENT_EVAL_T3_DB", HOME / ".t3/userdata/statev2.sqlite"))
+GH = os.environ.get("AGENT_EVAL_GH", "gh")
+
+USAGE_SHORT = "agent-eval {record|collect|enrich|scoreboard|weights|verdicts|report} [--help]"
+
+DEFAULT_DAYS = 90
+COLLECT_DAYS = 30
+WILSON_Z = 1.96
+# A lane that is not in lanes.toml has no prior to lean on; half is "no opinion".
+UNMAPPED_PRIOR = 0.5
+UNAVAILABLE = ("infra", "quota", "timeout")
+STATUSES = ("completed", "failed", "interrupted")
+FAILURE_KINDS = ("none", "infra", "quota", "timeout", "quality")
+WINDOWS = ("daily", "weekly", "biweekly", "monthly")
+NOTE_MAX = 200
+GH_TIMEOUT_S = 60
+# Only for keys lanes.toml leaves out; the file's values always win.
+EVAL_DEFAULTS = {"prior_weight": 6, "min_samples": 8, "explore_fraction": 0.15, "cooldown_failures": 3,
+                 "cooldown_hours": 2, "keep_lb": 0.60, "probation_lb": 0.40, "promote_lb": 0.75,
+                 "promote_min_n": 15}
+
+# Order matters: a 429 is a quota whatever else the message says.
+QUOTA_RE = re.compile(r"\b429\b|\brate\b|usage[ _-]?limit")
+TIMEOUT_RE = re.compile(r"timed out|timeout")
+INFRA_RE = re.compile(r"\b410\b|context")
+WORK_RE = re.compile(r"\bgit\b[^|;&\n]*\bcommit\b|\bgh\s+pr\s+create\b")
+TICKET_RE = re.compile(r"\b[A-Z][A-Z0-9]*-[0-9]+\b")
+RETRY_RE = re.compile(r"-r([0-9]+)$")
+LANE_ID_RE = re.compile(r"[A-Za-z0-9:_./-]{1,100}")
+# First match wins; the more specific shapes sit above the broad ones.
+CLASS_RULES = (
+    ("review-fix", re.compile(r"review[- ]?fix|\bfix\b.*\b(review|finding|comment|thread|coderabbit)|"
+                              r"address.*\b(review|finding)")),
+    ("review", re.compile(r"\breview\b|\baudit\b")),
+    ("test", re.compile(r"\btests?\b|\bcoverage\b")),
+    ("docs", re.compile(r"\bdocs?\b|\bdocument|\breadme\b|\bwrite-?up\b")),
+    ("summarize", re.compile(r"summar")),
+    ("research", re.compile(r"research|investigat|\bsurvey\b")),
+    ("spike", re.compile(r"\bspike\b|prototype")),
+    ("plan", re.compile(r"\bplan\b|\bdesign\b|decompos")),
+    ("ops", re.compile(r"\bops\b|deploy|rollout|\brotate\b|\brestart\b")),
+    ("impl-large", re.compile(r"impl-large|multi-file|\blarge\b")),
+)
+FORTNIGHT_ANCHOR = dt.date(1970, 1, 5)
+
+
+def log(msg):
+    print(f"agent-eval: {msg}", file=sys.stderr)
+
+
+def now():
+    fixed = os.environ.get("AGENT_EVAL_NOW")
+    if fixed:
+        t = dt.datetime.fromisoformat(fixed.replace("Z", "+00:00"))
+        return (t if t.tzinfo else t.replace(tzinfo=dt.timezone.utc)).astimezone(dt.timezone.utc)
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def tilde(p):
+    return str(p).replace(str(HOME), "~", 1)
+
+
+def iso(t):
+    return t.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_ts(s):
+    if not s:
+        return None
+    try:
+        t = dt.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (t if t.tzinfo else t.replace(tzinfo=dt.timezone.utc)).astimezone(dt.timezone.utc)
+
+
+# ── TOON output ──────────────────────────────────────────────────────────────
+
+def toon_scalar(v):
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    s = str(v)
+    if s == "" or s != s.strip() or re.search(r'[,:"\\\n\[\]{}]', s) or s in ("true", "false", "null") \
+            or re.fullmatch(r"-?\d+(\.\d+)?", s):
+        return json.dumps(s, ensure_ascii=False)
+    return s
+
+
+def toon(obj, indent=0):
+    pad = "  " * indent
+    out = []
+    for k, v in obj.items():
+        if isinstance(v, dict):
+            out.append(f"{pad}{k}:")
+            out.append(toon(v, indent + 1))
+        elif isinstance(v, list) and v and all(isinstance(x, dict) for x in v):
+            keys = list(v[0].keys())
+            out.append(f"{pad}{k}[{len(v)}]{{{','.join(keys)}}}:")
+            for row in v:
+                out.append(pad + "  " + ",".join(toon_scalar(row.get(c)) for c in keys))
+        elif isinstance(v, list):
+            out.append(f"{pad}{k}[{len(v)}]:")
+            for x in v:
+                out.append(pad + "  " + toon_scalar(x))
+        else:
+            out.append(f"{pad}{k}: {toon_scalar(v)}")
+    return "\n".join(out)
+
+
+def emit(obj):
+    print(toon(obj))
+
+
+def emit_json(obj):
+    print(json.dumps(obj, ensure_ascii=False, indent=2))
+
+
+def emit_rows(name, rows, extra=None):
+    """A table, or the definitive empty state; never nothing."""
+    out = dict(extra or {})
+    out["count"] = len(rows)
+    if rows:
+        out[name] = rows
+    else:
+        out[name] = "0 results"
+    emit(out)
+
+
+def die(code, msg, help_line=None, **extra):
+    out = {"error": msg, "code": "usage" if code == EXIT_USAGE else "failure"}
+    out.update(extra)
+    if help_line:
+        out["help"] = help_line
+    emit(out)
+    sys.exit(code)
+
+
+def usage_error(msg, help_line=None):
+    die(EXIT_USAGE, msg, help_line or USAGE_SHORT)
+
+
+# ── Config ───────────────────────────────────────────────────────────────────
+
+_lanes = None
+
+
+def load_lanes():
+    """Lane table and thresholds. Unreadable policy stops the run rather than
+    falling back to defaults that would grade lanes against made-up bars."""
+    global _lanes
+    if _lanes is not None:
+        return _lanes
+    try:
+        with open(LANES_PATH, "rb") as f:
+            data = tomllib.load(f)
+    except OSError as e:
+        die(EXIT_FAIL, f"cannot read {tilde(LANES_PATH)}: {e.strerror}",
+            "Run `chezmoi apply` to deploy the policy, or set AGENT_EVAL_LANES")
+    except tomllib.TOMLDecodeError as e:
+        die(EXIT_FAIL, f"{tilde(LANES_PATH)} is not valid TOML: {e}")
+    lanes = {}
+    for lane in data.get("lane", []):
+        if isinstance(lane, dict) and isinstance(lane.get("id"), str):
+            lanes[lane["id"]] = lane
+    ev = {**EVAL_DEFAULTS, **(data.get("evaluation") or {})}
+    classes = list((data.get("classes") or {}).get("all", []))
+    by_model = {(lane.get("provider"), lane.get("model")): lid for lid, lane in lanes.items()}
+    _lanes = {"lanes": lanes, "eval": ev, "classes": classes, "by_model": by_model}
+    return _lanes
+
+
+def lane_for(provider, model):
+    """Exact (provider, model) match; anything else is reported as such rather
+    than guessed, so a renamed model shows up on the scoreboard as unmapped."""
+    found = load_lanes()["by_model"].get((provider, model))
+    return found or f"unmapped:{provider}/{model}"
+
+
+def lane_prior(lane_id):
+    lane = load_lanes()["lanes"].get(lane_id)
+    return float(lane["prior"]) if lane and "prior" in lane else UNMAPPED_PRIOR
+
+
+# ── Ledgers ──────────────────────────────────────────────────────────────────
+
+def ledger_path(name):
+    return STATE / name
+
+
+def read_jsonl(name):
+    path = ledger_path(name)
+    rows = []
+    try:
+        fh = open(path, encoding="utf-8")
+    except FileNotFoundError:
+        return rows
+    except OSError as e:
+        die(EXIT_FAIL, f"cannot read {tilde(path)}: {e.strerror}")
+    bad = 0
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                bad += 1
+                continue
+            if isinstance(obj, dict) and obj.get("id"):
+                rows.append(obj)
+            else:
+                bad += 1
+    if bad:
+        log(f"{tilde(path)}: skipped {bad} unreadable line(s)")
+    return rows
+
+
+def latest_by_id(rows):
+    out = {}
+    for r in rows:
+        out[r["id"]] = r
+    return out
+
+
+def read_outcomes():
+    return latest_by_id(read_jsonl("outcomes.jsonl"))
+
+
+def read_assignments():
+    return latest_by_id(read_jsonl("assignments.jsonl"))
+
+
+def append_jsonl(name, records):
+    if not records:
+        return
+    path = ledger_path(name)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            fh.write("".join(json.dumps(r, ensure_ascii=False, sort_keys=False) + "\n" for r in records))
+    except OSError as e:
+        die(EXIT_FAIL, f"cannot write {tilde(path)}: {e.strerror}")
+
+
+OUTCOME_FIELDS = ("id", "at", "lane", "provider", "model", "class", "class_source", "risk", "ticket", "status",
+                  "failure_kind", "duration_s", "items", "attempt", "escalated_from", "pr", "ci_first_pass",
+                  "review_findings", "merged", "reverted", "human_touch", "cost_usd", "source")
+
+
+def blank_outcome(oid):
+    rec = dict.fromkeys(OUTCOME_FIELDS)
+    rec.update(id=oid, attempt=1, status="completed", failure_kind="none", class_source="heuristic")
+    return rec
+
+
+# ── Statistics ───────────────────────────────────────────────────────────────
+
+def wilson_lb(successes, n, z=WILSON_Z):
+    if n <= 0:
+        return 0.0
+    p = successes / n
+    denom = 1 + z * z / n
+    centre = p + z * z / (2 * n)
+    margin = z * math.sqrt((p * (1 - p) + z * z / (4 * n)) / n)
+    return max(0.0, (centre - margin) / denom)
+
+
+def unavailable(o):
+    return o.get("failure_kind") in UNAVAILABLE
+
+
+def is_success(o):
+    return (o.get("status") == "completed" and o.get("failure_kind", "none") == "none"
+            and o.get("reverted") is not True and o.get("ci_first_pass") is not False
+            and o.get("human_touch") is not True)
+
+
+def stats(outs, prior):
+    """Numbers for one group of outcomes. Unknown (null) fields count for
+    nothing against a lane, and availability failures stay out of quality."""
+    ev = load_lanes()["eval"]
+    judged = [o for o in outs if not unavailable(o)]
+    succ = sum(1 for o in judged if is_success(o))
+    n = len(judged)
+    attempts = len(outs)
+    durations = [o["duration_s"] for o in outs if isinstance(o.get("duration_s"), (int, float))]
+    pw = ev["prior_weight"]
+    return {
+        "attempts": attempts,
+        "n": n,
+        "success": succ,
+        "quality_mean": round((pw * prior + succ) / (pw + n), 4),
+        "quality_lb": round(wilson_lb(succ, n), 4),
+        "availability": (round(sum(1 for o in outs if o.get("status") == "completed") / attempts, 4)
+                         if attempts else None),
+        "infra_rate": round(sum(1 for o in outs if unavailable(o)) / attempts, 4) if attempts else 0.0,
+        "median_s": round(statistics.median(durations), 1) if durations else None,
+    }
+
+
+def by_lane_class(outs):
+    groups = {}
+    for o in outs:
+        groups.setdefault((o.get("lane") or "unknown", o.get("class") or "unknown"), []).append(o)
+    return groups
+
+
+def attempts_sorted(outs):
+    return sorted(outs, key=lambda o: (o.get("at") or "", o["id"]))
+
+
+def cooldown_until(lane_outs, at):
+    """Cooldown end if the lane is cooling down at `at`, else None."""
+    ev = load_lanes()["eval"]
+    n = ev["cooldown_failures"]
+    seq = attempts_sorted([o for o in lane_outs if parse_ts(o.get("at")) and parse_ts(o["at"]) <= at])
+    if len(seq) < n or not all(unavailable(o) for o in seq[-n:]):
+        return None
+    until = parse_ts(seq[-1]["at"]) + dt.timedelta(hours=ev["cooldown_hours"])
+    return until if until > at else None
+
+
+def cooldown_events(lane_outs, lane):
+    """Each streak of `cooldown_failures` availability failures, once, at the
+    attempt that completed it."""
+    ev = load_lanes()["eval"]
+    run, out = 0, []
+    for o in attempts_sorted(in_range(lane_outs, None, None)):
+        run = run + 1 if unavailable(o) else 0
+        if run == ev["cooldown_failures"]:
+            t = parse_ts(o["at"])
+            out.append({"lane": lane, "at": o["at"],
+                        "until": iso(t + dt.timedelta(hours=ev["cooldown_hours"])) if t else None})
+    return out
+
+
+def in_range(outs, start, end):
+    res = []
+    for o in outs:
+        t = parse_ts(o.get("at"))
+        if t and (start is None or t >= start) and (end is None or t < end):
+            res.append(o)
+    return res
+
+
+def lookback(outs, at, days):
+    return in_range(outs, at - dt.timedelta(days=days), at + dt.timedelta(microseconds=1))
+
+
+def group_by_lane(outs):
+    lanes = {}
+    for o in outs:
+        lanes.setdefault(o.get("lane") or "unknown", []).append(o)
+    return lanes
+
+
+def verdict_rows(outs, at):
+    """One row per (lane, class) seen. `outs` must already be limited to the
+    evidence window; `at` is when the cooldown is judged."""
+    cfg = load_lanes()
+    ev, lanes = cfg["eval"], cfg["lanes"]
+    rows = []
+    by_lane = group_by_lane(outs)
+    for (lane, cls), group in sorted(by_lane_class(outs).items()):
+        st = stats(group, lane_prior(lane))
+        if st["n"] < ev["min_samples"]:
+            verdict = "insufficient data"
+        elif st["quality_lb"] >= ev["keep_lb"]:
+            verdict = "keep"
+        elif st["quality_lb"] >= ev["probation_lb"]:
+            verdict = "probation"
+        else:
+            verdict = "drop-for-class"
+        advise = None
+        spec = lanes.get(lane)
+        if spec and spec.get("max_risk") == "R1":
+            r1 = [o for o in by_lane[lane] if o.get("risk") == "R1" and not unavailable(o)]
+            r1_ok = sum(1 for o in r1 if is_success(o))
+            if len(r1) >= ev["promote_min_n"] and wilson_lb(r1_ok, len(r1)) >= ev["promote_lb"]:
+                advise = "allow R2"
+        rows.append({"lane": lane, "class": cls, "n": st["n"], "quality_lb": st["quality_lb"],
+                     "verdict": verdict, "advise": advise})
+    return rows
+
+
+# ── record ───────────────────────────────────────────────────────────────────
+
+def tri(s):
+    low = str(s).strip().lower()
+    if low in ("true", "yes", "1", "y"):
+        return True
+    if low in ("false", "no", "0", "n"):
+        return False
+    raise argparse.ArgumentTypeError(f"expected true or false, got {s!r}")
+
+
+def cmd_record(args):
+    cfg = load_lanes()
+    outcomes = read_outcomes()
+    existing = outcomes.get(args.id)
+    assignment = read_assignments().get(args.id)
+    t = now()
+    if existing:
+        rec = {**blank_outcome(args.id), **existing}
+    else:
+        rec = blank_outcome(args.id)
+        rec.update(at=iso(t), source="record")
+        if assignment:
+            rec.update(lane=assignment.get("lane"), provider=assignment.get("provider"),
+                       model=assignment.get("model"), risk=assignment.get("risk"),
+                       ticket=assignment.get("ticket"), **{"class": assignment.get("class"),
+                                                           "class_source": "assigned"})
+        elif not args.lane:
+            die(EXIT_FAIL, f"no assignment or outcome with id {args.id}",
+                "Pass --lane, or record against an id from `agent-pace assign`")
+    if args.lane:
+        if not LANE_ID_RE.fullmatch(args.lane):
+            usage_error(f"invalid lane id {args.lane!r}")
+        spec = cfg["lanes"].get(args.lane)
+        rec.update(lane=args.lane, provider=spec.get("provider") if spec else None,
+                   model=spec.get("model") if spec else None)
+    if args.cls:
+        if cfg["classes"] and args.cls not in cfg["classes"]:
+            usage_error(f"unknown class {args.cls!r}", f"Classes: {','.join(cfg['classes'])}")
+        rec.update(**{"class": args.cls, "class_source": "assigned"})
+    if rec.get("class") is None:
+        rec["class"] = "unknown"
+    verdict_given = args.status is not None or args.failure_kind is not None
+    if args.status:
+        rec["status"] = args.status
+    if args.failure_kind:
+        rec["failure_kind"] = args.failure_kind
+    elif args.status == "failed" and rec["failure_kind"] == "none":
+        rec["failure_kind"] = "quality"
+    elif args.status in ("completed", "interrupted"):
+        rec["failure_kind"] = "none"
+    for flag, field in (("pr", "pr"), ("ci_first_pass", "ci_first_pass"), ("review_findings", "review_findings"),
+                        ("merged", "merged"), ("reverted", "reverted"), ("human_touch", "human_touch"),
+                        ("escalated_from", "escalated_from"), ("attempt", "attempt"), ("risk", "risk"),
+                        ("ticket", "ticket"), ("duration_s", "duration_s"), ("items", "items"),
+                        ("cost_usd", "cost_usd")):
+        val = getattr(args, flag)
+        if val is not None:
+            rec[field] = val
+    if args.note is not None:
+        rec["note"] = args.note[:NOTE_MAX]
+    if verdict_given:
+        # An explicit verdict outranks what collect infers from T3 history.
+        rec["source"] = "record"
+    append_jsonl("outcomes.jsonl", [rec])
+    emit({"recorded": args.id, "lane": rec["lane"], "class": rec["class"], "status": rec["status"],
+          "failure_kind": rec["failure_kind"], "replaced": existing is not None})
+    return 0
+
+
+# ── collect ──────────────────────────────────────────────────────────────────
+
+def open_t3():
+    """Read-only handle on the T3 database. A direct read-only open sees the
+    write-ahead log; only when that is refused (locked) is a copy taken."""
+    if not T3_DB.is_file():
+        die(EXIT_FAIL, f"T3 database not found at {tilde(T3_DB)}", "Set AGENT_EVAL_T3_DB if T3 keeps it elsewhere")
+    uri = f"file:{T3_DB}?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True, timeout=10)
+        conn.execute("select 1 from sqlite_master limit 1").fetchall()
+        return conn, None
+    except sqlite3.Error:
+        pass
+    tmp = tempfile.mkdtemp(prefix="agent-eval-")
+    try:
+        for suffix in ("", "-wal", "-shm"):
+            src = Path(str(T3_DB) + suffix)
+            if src.exists():
+                shutil.copy2(src, Path(tmp) / (T3_DB.name + suffix))
+        conn = sqlite3.connect(f"file:{Path(tmp) / T3_DB.name}?mode=ro", uri=True)
+        conn.execute("select 1 from sqlite_master limit 1").fetchall()
+        return conn, tmp
+    except (sqlite3.Error, OSError) as e:
+        shutil.rmtree(tmp, ignore_errors=True)
+        die(EXIT_FAIL, f"cannot read the T3 database: {e}")
+
+
+def json_or_empty(s):
+    try:
+        v = json.loads(s) if s else {}
+    except ValueError:
+        return {}
+    return v if isinstance(v, dict) else {}
+
+
+def classify_class(*texts):
+    hay = " ".join(texts).lower()
+    for cls, rx in CLASS_RULES:
+        if rx.search(hay):
+            return cls
+    return "impl"
+
+
+def failure_kind_for(status, error_text, did_work):
+    if status != "failed":
+        return "none"
+    text = error_text.lower()
+    if QUOTA_RE.search(text):
+        return "quota"
+    if TIMEOUT_RE.search(text):
+        return "timeout"
+    if INFRA_RE.search(text):
+        return "infra"
+    return "quality" if did_work else "infra"
+
+
+def t3_outcomes(conn, cutoff):
+    """Outcome records for every finished delegated task newer than `cutoff`."""
+    conn.row_factory = sqlite3.Row
+    threads = conn.execute("select thread_id, title from orchestration_v2_projection_threads "
+                           "where thread_id like '%delegate-task%'").fetchall()
+    out, running = [], 0
+    for th in threads:
+        tid = th["thread_id"]
+        run = conn.execute("select * from orchestration_v2_projection_runs where thread_id=? "
+                           "order by ordinal desc limit 1", (tid,)).fetchone()
+        if run is None:
+            continue
+        status = {"completed": "completed", "failed": "failed", "interrupted": "interrupted",
+                  "cancelled": "interrupted"}.get(run["status"])
+        if status is None:
+            running += 1
+            continue
+        payload = json_or_empty(run["payload_json"])
+        end = parse_ts(run["completed_at"])
+        if end is None or end < cutoff:
+            continue
+        start = parse_ts(payload.get("startedAt")) or parse_ts(run["requested_at"])
+        model = (payload.get("modelSelection") or {}).get("model")
+        if not model:
+            sess = conn.execute("select model from orchestration_v2_projection_provider_sessions "
+                                "where thread_id=? limit 1", (tid,)).fetchone()
+            model = sess["model"] if sess else None
+        provider = run["provider"]
+        errors, items = [], 0
+        for it in conn.execute("select type, payload_json from orchestration_v2_projection_turn_items "
+                               "where thread_id=? and run_id=?", (tid, run["run_id"])):
+            if it["type"] == "error":
+                f = json_or_empty(it["payload_json"]).get("failure") or {}
+                errors.append(" ".join(str(f.get(k) or "") for k in ("class", "code", "message")))
+            elif it["type"] != "user_message":
+                items += 1
+        did_work = False
+        if status == "failed":
+            did_work = conn.execute("select 1 from projection_thread_pull_requests where thread_id=? limit 1",
+                                    (tid,)).fetchone() is not None
+            if not did_work:
+                for it in conn.execute("select payload_json from orchestration_v2_projection_turn_items "
+                                       "where thread_id=? and type='command_execution' and status='completed'",
+                                       (tid,)):
+                    if WORK_RE.search(str(json_or_empty(it["payload_json"]).get("input") or "")):
+                        did_work = True
+                        break
+        title = th["title"] or ""
+        slug = re.split(r"delegate-task(?:%3A|:)", tid)[-1]
+        retry = RETRY_RE.search(tid)
+        ticket = TICKET_RE.search(title)
+        rec = blank_outcome(f"t3:{tid}")
+        rec.update(at=iso(end), lane=lane_for(provider, model), provider=provider, model=model,
+                   status=status, failure_kind=failure_kind_for(status, " ".join(errors), did_work),
+                   duration_s=round((end - start).total_seconds()) if start else None, items=items,
+                   attempt=int(retry.group(1)) if retry else 1, ticket=ticket.group(0) if ticket else None,
+                   source="t3", **{"class": classify_class(title, slug), "class_source": "heuristic"})
+        out.append(rec)
+    return out, running
+
+
+COLLECT_OWNED = ("at", "lane", "provider", "model", "status", "failure_kind", "duration_s", "items", "attempt")
+
+
+def merge_collected(old, new):
+    """What `collect` may change on a record it saw before: the T3-derived
+    fields, and nothing a later record or enrich added. An explicit record
+    stands untouched."""
+    if old.get("source") == "record":
+        return old
+    merged = {**blank_outcome(old["id"]), **old}
+    for k in COLLECT_OWNED:
+        merged[k] = new[k]
+    if not merged.get("ticket"):
+        merged["ticket"] = new["ticket"]
+    if merged.get("class_source") == "heuristic":
+        merged["class"] = new["class"]
+    return merged
+
+
+def cmd_collect(args):
+    load_lanes()
+    cutoff = now() - dt.timedelta(days=args.since)
+    conn, tmp = open_t3()
+    try:
+        try:
+            found, running = t3_outcomes(conn, cutoff)
+        except sqlite3.Error as e:
+            die(EXIT_FAIL, f"unexpected T3 schema: {e}", "The table and column facts are at the top of agent-eval")
+    finally:
+        conn.close()
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+    existing = read_outcomes()
+    new_rows, added, updated, unchanged = [], 0, 0, 0
+    for rec in found:
+        old = existing.get(rec["id"])
+        if old is None:
+            new_rows.append(rec)
+            added += 1
+            continue
+        merged = merge_collected(old, rec)
+        if merged == old:
+            unchanged += 1
+        else:
+            new_rows.append(merged)
+            updated += 1
+    if not args.dry_run:
+        append_jsonl("outcomes.jsonl", new_rows)
+    emit({"scanned": len(found), "added": added, "updated": updated, "unchanged": unchanged,
+          "skipped_running": running, "since_days": args.since, "dry_run": args.dry_run,
+          "state": tilde(STATE)})
+    return 0
+
+
+# ── enrich ───────────────────────────────────────────────────────────────────
+
+def gh_search(key, merged):
+    cmd = [GH, "search", "prs", "--match", "title,body", "--limit", "50", "--json", "number,title,url,state"]
+    if merged:
+        cmd.append("--merged")
+    cmd += ["--", key]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=GH_TIMEOUT_S, check=False)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise RuntimeError(type(e).__name__)
+    if res.returncode != 0:
+        raise RuntimeError(f"gh exited {res.returncode}")
+    try:
+        data = json.loads(res.stdout or "[]")
+    except ValueError:
+        raise RuntimeError("gh printed invalid JSON")
+    return [p for p in data if isinstance(p, dict)] if isinstance(data, list) else []
+
+
+def is_revert(pr):
+    return bool(re.match(r"\s*revert\b", str(pr.get("title") or ""), re.I))
+
+
+def cmd_enrich(args):
+    cutoff = now() - dt.timedelta(days=args.since)
+    outs = [o for o in read_outcomes().values()
+            if o.get("ticket") and (parse_ts(o.get("at")) or cutoff) >= cutoff]
+    by_ticket = {}
+    for o in outs:
+        by_ticket.setdefault(o["ticket"], []).append(o)
+    updates, errors = [], 0
+    for key, group in sorted(by_ticket.items()):
+        try:
+            everything = gh_search(key, False)
+            merged_prs = gh_search(key, True)
+        except RuntimeError as e:
+            log(f"{key}: {e}")
+            errors += 1
+            continue
+        landed = [p for p in merged_prs if not is_revert(p)]
+        reverts = [p for p in merged_prs if is_revert(p)]
+        work = [p for p in everything if not is_revert(p)]
+        for o in group:
+            new = dict(o)
+            if landed:
+                new["merged"] = True
+                new["reverted"] = bool(reverts)
+            elif work and not any(p.get("state") == "open" for p in work):
+                new["merged"] = False
+            if not new.get("pr") and work:
+                new["pr"] = (landed or work)[0].get("url")
+            if new != o:
+                updates.append(new)
+    append_jsonl("outcomes.jsonl", updates)
+    emit({"tickets": len(by_ticket), "outcomes_checked": len(outs), "updated": len(updates), "errors": errors,
+          "since_days": args.since})
+    return EXIT_FAIL if by_ticket and errors == len(by_ticket) else 0
+
+
+# ── scoreboard, weights, verdicts ────────────────────────────────────────────
+
+def window_outcomes(days, lane=None, cls=None):
+    t = now()
+    outs = lookback(list(read_outcomes().values()), t, days)
+    if lane:
+        outs = [o for o in outs if o.get("lane") == lane]
+    if cls:
+        outs = [o for o in outs if o.get("class") == cls]
+    return outs, t
+
+
+def cmd_scoreboard(args):
+    load_lanes()
+    outs, t = window_outcomes(args.since, args.lane, args.cls)
+    lane_outs = group_by_lane(outs)
+    rows = []
+    for (lane, cls), group in sorted(by_lane_class(outs).items()):
+        st = stats(group, lane_prior(lane))
+        cd = cooldown_until(lane_outs[lane], t)
+        rows.append({"lane": lane, "class": cls, "attempts": st["attempts"], "judged": st["n"],
+                     "success": st["success"], "quality_mean": st["quality_mean"], "quality_lb": st["quality_lb"],
+                     "availability": st["availability"], "infra_rate": st["infra_rate"],
+                     "median_s": st["median_s"], "cooldown_until": iso(cd) if cd else None})
+    if args.json:
+        emit_json({"since_days": args.since, "rows": rows})
+    else:
+        emit_rows("scoreboard", rows, {"since_days": args.since})
+    return 0
+
+
+def weights_table(cls=None):
+    outs, t = window_outcomes(DEFAULT_DAYS, None, cls)
+    lane_outs = group_by_lane(outs)
+    lanes = {}
+    for (lane, c), group in sorted(by_lane_class(outs).items()):
+        st = stats(group, lane_prior(lane))
+        cd = cooldown_until(lane_outs[lane], t)
+        lanes.setdefault(lane, {})[c] = {"n": st["n"], "quality_mean": st["quality_mean"],
+                                         "quality_lb": st["quality_lb"], "infra_rate": st["infra_rate"],
+                                         "median_s": st["median_s"], "cooldown_until": iso(cd) if cd else None}
+    return {"lanes": lanes}
+
+
+def cmd_weights(args):
+    load_lanes()
+    emit_json(weights_table(args.cls))
+    return 0
+
+
+def cmd_verdicts(args):
+    load_lanes()
+    outs, t = window_outcomes(args.since)
+    rows = verdict_rows(outs, t)
+    emit_rows("verdicts", rows, {"since_days": args.since})
+    return 0
+
+
+# ── report ───────────────────────────────────────────────────────────────────
+
+def add_months(d, n):
+    m = d.year * 12 + d.month - 1 + n
+    return dt.date(m // 12, m % 12 + 1, 1)
+
+
+def compute_windows(window, end):
+    """((start, end), (prev_start, prev_end)) as dates, end exclusive; the
+    last complete window before `end`. Same arithmetic as agent-report so the
+    two reports cover the same days."""
+    one = dt.timedelta
+    if window in ("daily", "weekly", "biweekly"):
+        monday = end - one(days=end.weekday())
+        if window == "daily":
+            e, span = end, one(days=1)
+        elif window == "weekly":
+            e, span = monday, one(days=7)
+        else:
+            e = monday - one(days=7 * (((monday - FORTNIGHT_ANCHOR).days // 7) % 2))
+            span = one(days=14)
+        return (e - span, e), (e - 2 * span, e - span)
+    first = dt.date(end.year, end.month, 1)
+    return (add_months(first, -1), first), (add_months(first, -2), add_months(first, -1))
+
+
+def day_start(d):
+    return dt.datetime(d.year, d.month, d.day, tzinfo=dt.timezone.utc)
+
+
+def pace_summary(assigns):
+    seen = [a["pace"] for a in assigns if isinstance(a.get("pace"), dict)]
+    if not seen:
+        return None
+    mults = [p["multiplier"] for p in seen if isinstance(p.get("multiplier"), (int, float))]
+    last = seen[-1]
+    return {"assignments": len(seen), "used_last": last.get("used"), "line_last": last.get("line"),
+            "multiplier_mean": round(sum(mults) / len(mults), 3) if mults else None,
+            "multiplier_min": round(min(mults), 3) if mults else None,
+            "multiplier_max": round(max(mults), 3) if mults else None}
+
+
+def counts(items, key):
+    out = {}
+    for x in items:
+        k = x.get(key) or "unknown"
+        out[k] = out.get(k, 0) + 1
+    return dict(sorted(out.items()))
+
+
+def window_block(start, end, assigns, outs, all_outs):
+    s, e = day_start(start), day_start(end)
+    a_in = sorted(in_range(assigns, s, e), key=lambda a: a.get("at") or "")
+    o_in = in_range(outs, s, e)
+    lanes = {}
+    for lane, group in sorted(group_by_lane(o_in).items()):
+        st = stats(group, lane_prior(lane))
+        lanes[lane] = {"attempts": st["attempts"], "completed": sum(1 for o in group if o.get("status") == "completed"),
+                       "completion": st["availability"], "judged": st["n"], "success": st["success"],
+                       "quality": round(st["success"] / st["n"], 4) if st["n"] else None,
+                       "quality_lb": st["quality_lb"]}
+    events = []
+    for lane, group in sorted(group_by_lane(all_outs).items()):
+        events += [ev for ev in cooldown_events(group, lane) if s <= parse_ts(ev["at"]) < e]
+    return {"start": start.isoformat(), "end": end.isoformat(),
+            "dispatches": {"total": len(a_in), "by_lane": counts(a_in, "lane"), "by_class": counts(a_in, "class")},
+            "outcomes": {"total": len(o_in), "by_lane": lanes},
+            "pace": pace_summary(a_in), "cooldowns": events,
+            "verdicts": verdict_rows(in_range(all_outs, e - dt.timedelta(days=DEFAULT_DAYS), e), e)}
+
+
+def observations(cur, prev, empty_ledger):
+    if empty_ledger:
+        return ["The evaluation ledger is empty: no dispatches or outcomes recorded yet."]
+    out = []
+    d, o = cur["dispatches"], cur["outcomes"]
+    if not d["total"] and not o["total"]:
+        out.append("No dispatches or outcomes in this window.")
+    if d["total"] or prev["dispatches"]["total"]:
+        out.append(f"{d['total']} dispatches against {prev['dispatches']['total']} in the previous window.")
+    if d["by_lane"]:
+        lane, n = max(d["by_lane"].items(), key=lambda kv: kv[1])
+        out.append(f"Most dispatches went to {lane} ({n} of {d['total']}).")
+    for lane, v in o["by_lane"].items():
+        if v["attempts"] >= 3 and v["completion"] is not None and v["completion"] < 0.7:
+            out.append(f"{lane} completed {v['completed']} of {v['attempts']} attempts.")
+    for ev in cur["cooldowns"]:
+        out.append(f"{ev['lane']} entered cooldown at {ev['at']} after consecutive availability failures.")
+    for v in cur["verdicts"]:
+        if v["verdict"] == "drop-for-class":
+            out.append(f"{v['lane']} is below the probation bar for {v['class']} (lower bound {v['quality_lb']}).")
+        if v["advise"]:
+            out.append(f"{v['lane']} meets the promotion bar: {v['advise']}.")
+    unmapped = sorted({v["lane"] for v in cur["verdicts"] if v["lane"].startswith("unmapped:")})
+    if unmapped:
+        out.append(f"{len(unmapped)} lane(s) match no entry in lanes.toml: {', '.join(unmapped)}.")
+    return out
+
+
+def build_report(window, end):
+    load_lanes()
+    (s, e), (ps, pe) = compute_windows(window, end)
+    assigns = list(read_assignments().values())
+    outs = list(read_outcomes().values())
+    empty_ledger = not assigns and not outs
+    cur = window_block(s, e, assigns, outs, outs)
+    prev = window_block(ps, pe, assigns, outs, outs)
+    rep = {"window": window, "empty": empty_ledger, **cur, "previous": prev}
+    rep["observations"] = observations(cur, prev, empty_ledger)
+    return rep
+
+
+def cell(x):
+    if x is None:
+        return "–"
+    return str(x).replace("|", "\\|").replace("\n", " ")
+
+
+def md_table(headers, rows):
+    lines = ["| " + " | ".join(headers) + " |", "|" + "|".join("---" for _ in headers) + "|"]
+    lines += ["| " + " | ".join(cell(c) for c in r) + " |" for r in rows]
+    return lines
+
+
+def render_md(rep):
+    cur, prev = rep, rep["previous"]
+    lines = [f"## Models — {rep['window']} {rep['start']} to {rep['end']}", ""]
+    if rep["empty"]:
+        lines += ["The evaluation ledger is empty: no dispatches or outcomes recorded yet.", ""]
+        return "\n".join(lines)
+    lines += [f"Previous window: {prev['start']} to {prev['end']}. End dates are exclusive.", ""]
+    lanes = sorted(set(cur["dispatches"]["by_lane"]) | set(prev["dispatches"]["by_lane"]))
+    lines += ["### Dispatches by lane", ""]
+    if lanes:
+        lines += md_table(["Lane", "This window", "Previous"],
+                          [[la, cur["dispatches"]["by_lane"].get(la, 0), prev["dispatches"]["by_lane"].get(la, 0)]
+                           for la in lanes] + [["**Total**", cur["dispatches"]["total"], prev["dispatches"]["total"]]])
+    else:
+        lines.append("No dispatches in either window.")
+    classes = sorted(set(cur["dispatches"]["by_class"]) | set(prev["dispatches"]["by_class"]))
+    lines += ["", "### Dispatches by class", ""]
+    if classes:
+        lines += md_table(["Class", "This window", "Previous"],
+                          [[c, cur["dispatches"]["by_class"].get(c, 0), prev["dispatches"]["by_class"].get(c, 0)]
+                           for c in classes])
+    else:
+        lines.append("No dispatches in either window.")
+    lines += ["", "### Completion and quality by lane", ""]
+    if cur["outcomes"]["by_lane"]:
+        lines += md_table(["Lane", "Attempts", "Completed", "Completion", "Judged", "Quality", "Quality lower bound"],
+                          [[la, v["attempts"], v["completed"], v["completion"], v["judged"], v["quality"],
+                            v["quality_lb"]] for la, v in cur["outcomes"]["by_lane"].items()])
+    else:
+        lines.append("No outcomes in this window.")
+    lines += ["", "### Pace", ""]
+    p = cur["pace"]
+    if p:
+        lines += md_table(["Assignments", "Used % (last)", "Pace line % (last)", "Multiplier mean", "Min", "Max"],
+                          [[p["assignments"], p["used_last"], p["line_last"], p["multiplier_mean"],
+                            p["multiplier_min"], p["multiplier_max"]]])
+    else:
+        lines.append("No pace readings in this window.")
+    lines += ["", "### Cooldowns", ""]
+    if cur["cooldowns"]:
+        lines += md_table(["Lane", "At", "Until"], [[c["lane"], c["at"], c["until"]] for c in cur["cooldowns"]])
+    else:
+        lines.append("No cooldowns in this window.")
+    lines += ["", "### Verdicts", ""]
+    if cur["verdicts"]:
+        lines += md_table(["Lane", "Class", "Judged", "Quality lower bound", "Verdict", "Advice"],
+                          [[v["lane"], v["class"], v["n"], v["quality_lb"], v["verdict"], v["advise"]]
+                           for v in cur["verdicts"]])
+    else:
+        lines.append("No verdicts: no outcomes in the last 90 days.")
+    lines += ["", "### Observations", ""]
+    lines += [f"- {o}" for o in rep["observations"]] or ["- Nothing to note."]
+    return "\n".join(lines) + "\n"
+
+
+def cmd_report(args):
+    try:
+        end = dt.date.fromisoformat(args.end) if args.end else now().date()
+    except ValueError:
+        usage_error(f"--end must be YYYY-MM-DD, got {args.end!r}")
+    rep = build_report(args.window, end)
+    if args.format == "json":
+        emit_json(rep)
+    else:
+        print(render_md(rep), end="")
+    return 0
+
+
+# ── CLI ──────────────────────────────────────────────────────────────────────
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        usage_error(message, f"Run `{self.prog} --help`")
+
+
+def days_arg(default):
+    return {"type": int, "default": default, "metavar": "DAYS", "help": f"look back this many days (default {default})"}
+
+
+def build_parser():
+    p = Parser(prog="agent-eval", description=__doc__.split("\n\n")[0],
+               formatter_class=argparse.RawDescriptionHelpFormatter,
+               epilog="examples:\n  agent-eval collect --since 7\n  agent-eval scoreboard --class impl\n"
+                      "  agent-eval report --window weekly --format md")
+    sub = p.add_subparsers(dest="cmd", parser_class=Parser)
+
+    r = sub.add_parser("record", help="record or amend one outcome")
+    r.add_argument("--id", required=True)
+    r.add_argument("--status", choices=STATUSES)
+    r.add_argument("--failure-kind", choices=FAILURE_KINDS)
+    r.add_argument("--class", dest="cls")
+    r.add_argument("--pr")
+    r.add_argument("--ci-first-pass", type=tri)
+    r.add_argument("--review-findings", type=int)
+    r.add_argument("--merged", type=tri)
+    r.add_argument("--reverted", type=tri)
+    r.add_argument("--human-touch", type=tri)
+    r.add_argument("--escalated-from")
+    r.add_argument("--attempt", type=int)
+    r.add_argument("--note")
+    r.add_argument("--lane", help="lane id, when the id has no assignment")
+    r.add_argument("--risk", choices=("R0", "R1", "R2", "R3"))
+    r.add_argument("--ticket")
+    r.add_argument("--duration-s", type=float)
+    r.add_argument("--items", type=int)
+    r.add_argument("--cost-usd", type=float)
+
+    c = sub.add_parser("collect", help="T3 delegated-task history into outcomes (idempotent)")
+    c.add_argument("--since", **days_arg(COLLECT_DAYS))
+    c.add_argument("--dry-run", action="store_true")
+
+    e = sub.add_parser("enrich", help="join outcomes to pull requests by ticket key")
+    e.add_argument("--since", **days_arg(COLLECT_DAYS))
+
+    s = sub.add_parser("scoreboard", help="per lane and class results")
+    s.add_argument("--since", **days_arg(DEFAULT_DAYS))
+    s.add_argument("--lane")
+    s.add_argument("--class", dest="cls")
+    s.add_argument("--json", action="store_true")
+
+    w = sub.add_parser("weights", help="evidence for agent-pace")
+    w.add_argument("--json", action="store_true", help="accepted for symmetry; the output is always JSON")
+    w.add_argument("--class", dest="cls")
+
+    v = sub.add_parser("verdicts", help="keep, probation, drop-for-class and promotion advice")
+    v.add_argument("--since", **days_arg(DEFAULT_DAYS))
+
+    rp = sub.add_parser("report", help="window report with the previous window alongside")
+    rp.add_argument("--window", required=True, choices=WINDOWS)
+    rp.add_argument("--end", metavar="YYYY-MM-DD",
+                    help="report the last complete window before this date (default today, UTC)")
+    rp.add_argument("--format", choices=("md", "json"), default="json")
+    return p
+
+
+COMMANDS = {"record": cmd_record, "collect": cmd_collect, "enrich": cmd_enrich, "scoreboard": cmd_scoreboard,
+            "weights": cmd_weights, "verdicts": cmd_verdicts, "report": cmd_report}
+
+
+def main(argv):
+    parser = build_parser()
+    if not argv:
+        emit({"tool": "agent-eval", "state": tilde(STATE), "commands": list(COMMANDS), "help": USAGE_SHORT})
+        return 0
+    args = parser.parse_args(argv)
+    if args.cmd is None:
+        usage_error("a command is required")
+    try:
+        return COMMANDS[args.cmd](args)
+    except (KeyError, TypeError, ValueError, AttributeError) as e:
+        die(EXIT_FAIL, f"unexpected data ({type(e).__name__}: {e})", "Inspect the ledger files in " + tilde(STATE))
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)

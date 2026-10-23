@@ -48,6 +48,7 @@ run_once_49-install-dev-tools.sh.tmpl
 56-enable-agent-label.sh
 56-generate-claude-jira.sh
 57-enable-agent-propose.sh
+58-enable-agent-delivery.sh
 .config/git/work-identity
 .tmux.conf
 .tmux/**
@@ -64,6 +65,7 @@ run_once_49-install-dev-tools.sh.tmpl
 .local/bin/check-openrouter-freshness
 .local/bin/refresh-openrouter-free
 .local/bin/devbox-health
+.local/bin/merge-captain
 .local/bin/stream
 .local/bin/t3-session-expiry
 .local/bin/tmux-cheat

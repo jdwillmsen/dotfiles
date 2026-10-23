@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily agent evaluation collect
+
+[Timer]
+# After the 06:30 metrics collect and ahead of the 08:00 reports.
+OnCalendar=*-*-* 06:45:00
+Unit=agent-eval-collect.service
+# A box that was off at the scheduled time collects at next boot; collect is
+# idempotent, so one catch-up run covers any number of missed days.
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

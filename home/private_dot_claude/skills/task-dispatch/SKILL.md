@@ -11,7 +11,7 @@ Orchestrate, do not hand-build: classify, assign by rule, brief, verify, record.
 ## 1. Classify the work
 
 ```
-change-class --plan <file-or-ticket-text>      # before any work starts
+change-class --plan -                           # plan or ticket text on stdin, before any work starts
 change-class --pr <N> --repo <owner/repo>      # before merging
 ```
 
@@ -42,8 +42,8 @@ dispatch only when you will actually run the task.
   all the worker has: ticket key, goal, repo and worktree path, files and
   constraints, the exact commands that prove it works, the commit trailers for
   that model, "no push, no PR, use /usr/bin/git inside the worktree".
-- Read the rules file pattern in `/tmp/delivery-build-rules.md` if one exists for
-  the current effort; do not paste a long rulebook into every brief.
+- Keep the brief short: a long rulebook pasted into every brief costs tokens and
+  is skimmed. Put shared rules in a file inside the worktree and name it.
 - Several workers at once: each gets its own worktree and branch. Respect each
   lane's concurrency; NIM GLM breaks above about three.
 

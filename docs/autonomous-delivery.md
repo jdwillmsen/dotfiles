@@ -14,6 +14,7 @@ the options considered and the data behind them are in
 | `change-class` | Classifies a plan, ticket, diff or PR as R0–R3 with tags. No model call. | `~/.local/bin/change-class`, policy `~/.config/agents/change-risk.toml` |
 | `agent-pace` | Reads the plan-quota log, works out where the week should be, and picks a lane for each task. | `~/.local/bin/agent-pace`, lanes `~/.config/agents/lanes.toml` |
 | `agent-eval` | Keeps the assignment and outcome ledgers, collects T3 delegated-task history, scores each lane per task class, advises keep, probation or promote. | `~/.local/bin/agent-eval`, ledgers `~/.local/state/agent-eval/` |
+| `merge-captain` | Reviews and rebase-merges R0–R2 pull requests by tier, labels R3 for the owner; dotfiles live, other repos dry-run. See [`merge-captain.md`](merge-captain.md). | `~/.local/bin/merge-captain`, config `~/.config/agents/merge-captain.toml`, log `~/.local/state/merge-captain/` |
 | `models` report section | Puts the scoreboard and pace in the daily to yearly agent reports. | `agent-report` |
 | Rules and skills | Risk tiers, stuck protocol, ticket-per-thread, dispatch. | shared `AGENTS.md`, skills `jira-followup`, `task-dispatch` |
 
@@ -78,8 +79,6 @@ a low share. It receives only R0 work. When the scoreboard has enough samples,
 
 ## Not built yet
 
-- The merge captain: a loop that classifies open PRs, runs the tier's reviewer
-  lane, and merges R0–R2 when the gate is met.
 - GitHub labels and rulesets keyed to the risk tier, and a Jira field for it.
 - Mirroring the ledgers into the metrics store.
 - A weekday-weighted pace curve; the line is linear for now.

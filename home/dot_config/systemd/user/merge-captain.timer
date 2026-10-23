@@ -1,0 +1,12 @@
+[Unit]
+Description=Merge captain every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+Unit=merge-captain.service
+# A missed slot is not worth catching up: the next one sees the same pull requests.
+Persistent=false
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

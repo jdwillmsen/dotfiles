@@ -30,6 +30,9 @@ export AGENT_EVAL_LANES="$lanes_real"
 export AGENT_EVAL_NOW="2026-10-23T12:00:00+00:00"
 export AGENT_EVAL_T3_DB="$tmp/missing.sqlite"
 export AGENT_EVAL_GH="$tmp/no-gh"
+export AGENT_EVAL_STREAMS="$tmp/streams.json"
+printf '%s\n' '{"jiraSite":"https://x.invalid","streams":{"jdwillmsen":{"jira":"JDW"},"jdwlabs":{"jira":"JDWLABS"}}}' \
+    >"$AGENT_EVAL_STREAMS"
 
 out="$tmp/out"
 err="$tmp/err"
@@ -100,6 +103,41 @@ assert last["risk"] == "R0" and last["ticket"] == "JDW-9" and last["merged"] is 
 PY
 run 2 record --id a-1 --merged maybe
 run 2 record --id a-1 --status exploded
+
+# A new row needs a verdict: without --status it would silently become a success.
+run 2 record --id brand-new --lane claude-sonnet --class impl
+grep -q "^code: usage" "$out" && grep -q "status" "$out" || fail "a new row without --status is not a usage error" "$(cat "$out")"
+run 2 record --id a-1 --ticket jdw-1
+run 2 record --id a-1 --ticket JDW
+run 2 record --id a-1 --pr http://github.com/o/r/pull/5
+run 2 record --id a-1 --pr https://example.com/o/r/pull/5
+run 2 record --id a-1 --pr https://github.com/o/r/issues/5
+before="$(wc -l <"$AGENT_EVAL_STATE/outcomes.jsonl")"
+run 0 record --id a-1 --pr https://github.com/o/r/pull/5 --ticket JDW-2
+[ "$(wc -l <"$AGENT_EVAL_STATE/outcomes.jsonl")" = $((before + 1)) ] || fail "a valid amendment was not written"
+# Notes are capped and scrubbed before they are stored.
+long="$(python3 -I -c "print('word ' * 80)")"
+run 0 record --id a-1 --note "$long"
+note_len="$(python3 -I -c "import json,sys; print(len([json.loads(l) for l in open(sys.argv[1])][-1]['note']))" \
+    "$AGENT_EVAL_STATE/outcomes.jsonl")"
+[ "$note_len" = 200 ] || fail "a long note was not capped at 200" "$note_len"
+run 0 record --id a-1 --note "retry failed, login used password=hunter2 and then gave up"
+grep -q "hunter2" "$AGENT_EVAL_STATE/outcomes.jsonl" && fail "a password reached the ledger"
+python3 - "$AGENT_EVAL_STATE/outcomes.jsonl" <<'PY' || fail "a note with a password was not redacted in place"
+import json, sys
+note = [json.loads(l) for l in open(sys.argv[1])][-1]["note"]
+assert note == "retry failed, login used [redacted] and then gave up", note
+PY
+for secret in 'token: abc123def' 'API_KEY=zzz' 'ghp_abcdefghijklmnopqrstuvwxyz0123456789' \
+    'sk-proj-abcdefghijklmnopqrstuvwxyz' 'Bearer eyJhbGciOi' 'blob QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVowMTIzNDU2Nzg5 end'; do
+    run 0 record --id a-1 --note "see $secret now"
+    python3 - "$AGENT_EVAL_STATE/outcomes.jsonl" "$secret" <<'PY' || fail "credential shape '$secret' was stored"
+import json, sys
+note = [json.loads(l) for l in open(sys.argv[1])][-1]["note"]
+assert "[redacted]" in note and note.startswith("see "), note
+assert max(sys.argv[2].split(), key=len) not in note, note
+PY
+done
 
 # ── collect: fixture T3 database ──
 mkdb() {
@@ -200,13 +238,21 @@ lines="$(wc -l <"$AGENT_EVAL_STATE/outcomes.jsonl")"
 [ "$lines" = 12 ] || fail "expected 12 ledger lines, got $lines"
 grep -q "SECRET PROMPT TEXT" "$AGENT_EVAL_STATE/outcomes.jsonl" && fail "prompt text reached the ledger"
 python3 - "$AGENT_EVAL_STATE/outcomes.jsonl" <<'PY' || fail "collected outcomes are wrong"
-import json, sys
-rows = {}
+import hashlib, json, re, sys
+def t3id(slug):
+    tid = "thread:delegated-task:command%3Amcp%3Aabc%3Adelegate-task%3A" + slug
+    return "t3:" + hashlib.sha256(tid.encode()).hexdigest()[:16]
+by_id = {}
 for line in open(sys.argv[1]):
     r = json.loads(line)
-    rows[r["id"].split("%3A")[-1]] = r
+    by_id[r["id"]] = r
+slugs = ("build-thing-r2 quota-429 timeout gone-410 context mystery-error mystery-with-commit usage-limit "
+         "unknown-model interrupted cancelled no-model-in-run").split()
+rows = {slug: by_id[t3id(slug)] for slug in slugs}
+assert len(by_id) == len(slugs)
+for i in by_id:
+    assert re.fullmatch(r"t3:[0-9a-f]{16}", i), ("an id embeds the thread or its title slug", i)
 a = rows["build-thing-r2"]
-assert a["id"].startswith("t3:thread:delegated-task:"), a["id"]
 assert a["lane"] == "opencode-nim-glm" and a["provider"] == "opencode" and a["model"] == "nvidia/z-ai/glm-5.3", a
 assert a["status"] == "completed" and a["failure_kind"] == "none", a
 assert a["duration_s"] == 600 and a["items"] == 3 and a["attempt"] == 2 and a["ticket"] == "JDW-12", a
@@ -243,18 +289,15 @@ grep -q "^added: 0$" "$out" && grep -q "^updated: 0$" "$out" && grep -q "^unchan
     || fail "second collect was not a no-op" "$(cat "$out")"
 [ "$before" = "$(cat "$AGENT_EVAL_STATE/outcomes.jsonl")" ] || fail "second collect changed the ledger"
 # An outcome added by record or enrich survives a re-collect.
-# The id of the first collected task whose slug ends with $1.
+# The ledger id of the collected task with slug $1 (the fixture thread id is hashed, never stored).
 id_ending() {
     python3 -I -c "
-import json, sys
-for l in open(sys.argv[1]):
-    r = json.loads(l)
-    if r['id'].endswith(sys.argv[2]):
-        print(r['id'])
-        break" "$AGENT_EVAL_STATE/outcomes.jsonl" "$1"
+import hashlib, sys
+tid = 'thread:delegated-task:command%3Amcp%3Aabc%3Adelegate-task%3A' + sys.argv[1]
+print('t3:' + hashlib.sha256(tid.encode()).hexdigest()[:16])" "$1"
 }
 quota_id="$(id_ending build-thing-r2)"
-run 0 record --id "$quota_id" --merged true --ci-first-pass true --pr https://example.invalid/o/r/pull/5
+run 0 record --id "$quota_id" --merged true --ci-first-pass true --pr https://github.com/o/r/pull/5
 run 0 collect
 grep -q "^updated: 0$" "$out" || fail "collect touched a record it only enriched" "$(cat "$out")"
 python3 - "$AGENT_EVAL_STATE/outcomes.jsonl" "$quota_id" <<'PY' || fail "collect lost recorded fields"
@@ -276,23 +319,113 @@ PY
 run 0 collect
 grep -q "^added: 1$" "$out" && grep -q "^updated: 1$" "$out" && grep -q "^skipped_running: 0$" "$out" \
     || fail "a changed status was not picked up" "$(cat "$out")"
-python3 - "$AGENT_EVAL_STATE/outcomes.jsonl" <<'PY' || fail "changed status did not replace the old record"
+python3 - "$AGENT_EVAL_STATE/outcomes.jsonl" "$(id_ending quota-429)" <<'PY' || fail "changed status did not replace the old record"
 import json, sys
 rows = {}
 for line in open(sys.argv[1]):
     r = json.loads(line)
     rows[r["id"]] = r
 assert len(rows) == 13, len(rows)
-q = next(v for k, v in rows.items() if k.endswith("quota-429"))
+q = rows[sys.argv[2]]
 assert q["status"] == "completed" and q["failure_kind"] == "none", q
 PY
 # An explicit verdict from record outranks history.
 run 0 record --id "$(id_ending quota-429)" --status failed --failure-kind quality
 run 0 collect
 grep -q "^updated: 0$" "$out" || fail "collect overwrote an explicit record" "$(cat "$out")"
+# A lane chosen with record on a collected row survives the next collect.
+unknown_id="$(id_ending unknown-model)"
+run 0 record --id "$unknown_id" --lane claude-sonnet
+run 0 collect
+grep -q "^updated: 0$" "$out" || fail "collect overwrote a lane set by record" "$(cat "$out")"
+python3 - "$AGENT_EVAL_STATE/outcomes.jsonl" "$unknown_id" <<'PY' || fail "record --lane on a collected row did not stick"
+import json, sys
+last = [r for r in map(json.loads, open(sys.argv[1])) if r["id"] == sys.argv[2]][-1]
+assert last["lane"] == "claude-sonnet" and last["source"] == "record", last
+PY
 # Missing database is a structured failure, not an empty success.
 AGENT_EVAL_T3_DB="$tmp/missing.sqlite" run 1 collect
 grep -q "^error:" "$out" || fail "a missing T3 database is not a structured error" "$(cat "$out")"
+
+# Ids written by early collects embedded the thread id: a re-collect finds them by thread and adds no second row.
+fresh legacy
+python3 -I - "$AGENT_EVAL_STATE/outcomes.jsonl" <<'PY'
+import json, sys
+tid = "thread:delegated-task:command%3Amcp%3Aabc%3Adelegate-task%3Aquota-429"
+rec = dict.fromkeys(("at", "lane", "provider", "model", "risk", "ticket", "duration_s", "items", "escalated_from",
+                     "pr", "ci_first_pass", "review_findings", "merged", "reverted", "human_touch", "cost_usd"))
+rec.update(id="t3:" + tid, at="2026-10-23T10:00:05Z", lane="opencode-glm-flash-free", status="failed",
+           failure_kind="quota", **{"class": "docs", "class_source": "heuristic"}, attempt=1, source="t3")
+open(sys.argv[1], "w").write(json.dumps(rec) + "\n")
+PY
+run 0 collect
+grep -q "^added: 12$" "$out" && grep -q "^updated: 1$" "$out" || fail "a legacy-id row was added a second time" "$(cat "$out")"
+python3 - "$AGENT_EVAL_STATE/outcomes.jsonl" <<'PY' || fail "legacy id was duplicated or rewritten"
+import json, sys
+latest = {}
+for line in open(sys.argv[1]):
+    r = json.loads(line)
+    latest[r["id"]] = r
+assert len(latest) == 13, len(latest)
+assert sum("quota-429" in i for i in latest) == 1, list(latest)
+assert latest["t3:thread:delegated-task:command%3Amcp%3Aabc%3Adelegate-task%3Aquota-429"]["duration_s"] == 5
+PY
+
+# A run that ends before it starts has a duration of zero, never a negative one.
+fresh negative
+cp "$AGENT_EVAL_T3_DB" "$tmp/t3-neg.sqlite"
+python3 -I - "$tmp/t3-neg.sqlite" <<'PY'
+import json, sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+t = "thread:delegated-task:command%3Amcp%3Aabc%3Adelegate-task%3Aclock-skew"
+db.execute("insert into orchestration_v2_projection_threads values (?,?)", (t, "Implement skew"))
+payload = {"modelSelection": {"model": "opencode/glm-5.3-flash-free"}, "startedAt": "2026-10-23T10:05:00.000Z"}
+db.execute("insert into orchestration_v2_projection_runs values (?,?,?,?,?,?,?,?)",
+           ("run:skew", t, 1, "opencode", "completed", "2026-10-23T10:00:00.000Z", "2026-10-23T10:00:00.000Z",
+            json.dumps(payload)))
+db.commit()
+PY
+AGENT_EVAL_T3_DB="$tmp/t3-neg.sqlite" run 0 collect
+python3 - "$AGENT_EVAL_STATE/outcomes.jsonl" <<'PY' || fail "a negative duration reached the ledger"
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1])]
+assert min(r["duration_s"] for r in rows if r["duration_s"] is not None) == 0, rows
+assert sum(1 for r in rows if r["duration_s"] == 0) == 1
+PY
+run 0 record --id a-neg --lane claude-sonnet --status completed --duration-s -30
+python3 - "$AGENT_EVAL_STATE/outcomes.jsonl" <<'PY' || fail "record kept a negative duration"
+import json, sys
+assert [json.loads(l) for l in open(sys.argv[1])][-1]["duration_s"] == 0
+PY
+
+# A T3 database that is locked for writing is read from a copy; the copy is removed afterwards.
+fresh locked
+cp "$AGENT_EVAL_T3_DB" "$tmp/t3-locked.sqlite"
+rm -f "$tmp/lock.ready" "$tmp/lock.release"
+python3 -I - "$tmp/t3-locked.sqlite" "$tmp/lock.ready" "$tmp/lock.release" <<'PY' &
+import os, sqlite3, sys, time
+db = sqlite3.connect(sys.argv[1], isolation_level=None)
+db.execute("begin exclusive")
+probe = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True, timeout=0.2)
+try:
+    probe.execute("select 1 from sqlite_master limit 1").fetchall()
+except sqlite3.OperationalError:
+    open(sys.argv[2], "w").close()
+for _ in range(600):
+    if os.path.exists(sys.argv[3]):
+        break
+    time.sleep(0.1)
+db.execute("rollback")
+PY
+locker=$!
+for _ in $(seq 100); do [ -e "$tmp/lock.ready" ] && break; sleep 0.1; done
+[ -e "$tmp/lock.ready" ] || { touch "$tmp/lock.release"; fail "the fixture could not lock the T3 database"; }
+mkdir -p "$tmp/tmpdir"
+TMPDIR="$tmp/tmpdir" AGENT_EVAL_T3_TIMEOUT_S=0.3 AGENT_EVAL_T3_DB="$tmp/t3-locked.sqlite" run 0 collect
+touch "$tmp/lock.release"
+wait "$locker"
+grep -q "^added: 13$" "$out" || fail "a locked database was not read through a copy" "$(cat "$out")"
+[ -z "$(ls -A "$tmp/tmpdir")" ] || fail "the database copy was left behind" "$(ls -A "$tmp/tmpdir")"
 
 # ── Ledger builder for statistics scenarios ──
 # Each spec: lane,class,risk,status,failure_kind,ci,touch,count,at-start (minutes after 2026-10-22T00:00Z).
@@ -343,8 +476,9 @@ import json, math, sys
 d = json.load(open(sys.argv[1]))
 assert list(d) == ["lanes"], list(d)
 cell = d["lanes"]["claude-sonnet"]["impl"]
-assert sorted(cell) == ["cooldown_until", "infra_rate", "median_s", "n", "quality_lb", "quality_mean"], sorted(cell)
-assert cell["n"] == 10, cell
+assert sorted(cell) == ["cooldown_until", "infra_rate", "median_s", "n", "quality_lb", "quality_mean", "success"], \
+    sorted(cell)
+assert cell["n"] == 10 and cell["success"] == 8, cell
 # Wilson 8/10 at z=1.96, worked by hand: (0.8 + 1.9208 - 1.96*sqrt((0.16 + 0.09604)/10)) / 1.38416
 s, n, z = 8, 10, 1.96
 lb = (s / n + z * z / (2 * n) - z * math.sqrt((s / n * (1 - s / n) + z * z / (4 * n)) / n)) / (1 + z * z / n)
@@ -394,6 +528,54 @@ AGENT_EVAL_NOW="2026-10-22T12:30:00+00:00" run 0 weights --json
 [ "$(json_get "$out" lanes claude-haiku docs n)" = 1 ] || fail "infra failures counted as judged"
 AGENT_EVAL_NOW="2026-10-22T11:00:00+00:00" run 0 scoreboard
 grep -q "2026-10-22T12:20:00Z" "$out" || fail "scoreboard does not show the cooldown" "$(cat "$out")"
+
+# --since is bounded to 1..3650 days.
+fresh since
+for bad in 0 -3 3651 99999 abc; do
+    run 2 scoreboard --since "$bad"
+    grep -q "^code: usage" "$out" || fail "--since $bad is not a usage error" "$(cat "$out")"
+done
+run 2 collect --since 0
+run 2 enrich --since 3651
+run 2 verdicts --since -1
+run 0 scoreboard --since 3650
+run 0 scoreboard --since 1
+
+# ── Interrupted runs are neither a success nor a quality failure ──
+fresh interrupted
+ledger "claude-haiku,docs,R0,completed,none,t,f,4,0" \
+    "claude-haiku,docs,R0,interrupted,none,-,-,3,100"
+run 0 scoreboard --json
+python3 - "$out" <<'PY' || fail "interrupted runs were judged"
+import json, sys
+r = json.load(open(sys.argv[1]))["rows"][0]
+assert r["attempts"] == 7 and r["judged"] == 4 and r["success"] == 4, r
+PY
+run 0 weights --json
+[ "$(json_get "$out" lanes claude-haiku docs n)" = 4 ] || fail "weights judged interrupted runs" "$(cat "$out")"
+
+# A negative duration already in a ledger is read as zero.
+fresh negative-ledger
+ledger "claude-haiku,docs,R0,completed,none,t,f,1,0"
+sed -i 's/"duration_s": 100/"duration_s": -50/' "$AGENT_EVAL_STATE/outcomes.jsonl"
+run 0 scoreboard --json
+python3 -I -c "import json,sys; assert json.load(open(sys.argv[1]))['rows'][0]['median_s'] == 0" "$out" 2>/dev/null || fail "a negative duration reached the median" "$(cat "$out")"
+
+# ── Cooldown belongs to the lane: --class must not hide failures from other classes ──
+fresh lane-cooldown
+ledger "claude-haiku,docs,R0,completed,none,-,-,1,0" \
+    "claude-haiku,impl,R1,failed,infra,-,-,1,600" \
+    "claude-haiku,impl,R1,failed,quota,-,-,1,610" \
+    "claude-haiku,test,R0,failed,timeout,-,-,1,620"
+AGENT_EVAL_NOW="2026-10-22T11:00:00+00:00" run 0 weights --json --class docs
+[ "$(json_get "$out" lanes claude-haiku docs cooldown_until)" = "2026-10-22T12:20:00Z" ] \
+    || fail "a class filter dropped the lane's failures from its cooldown" "$(cat "$out")"
+AGENT_EVAL_NOW="2026-10-22T11:00:00+00:00" run 0 scoreboard --json --class docs
+python3 - "$out" <<'PY' || fail "scoreboard --class dropped the lane's cooldown"
+import json, sys
+rows = json.load(open(sys.argv[1]))["rows"]
+assert len(rows) == 1 and rows[0]["cooldown_until"] == "2026-10-22T12:20:00Z", rows
+PY
 
 # ── Verdicts at the lanes.toml thresholds ──
 fresh verdicts
@@ -483,6 +665,75 @@ assert r["attempts"] == 6 and r["success"] == 5, r
 PY
 AGENT_EVAL_GH="$tmp/no-gh" run 1 enrich
 grep -q "^error:\|^errors: 5$" "$out" || fail "a missing gh was not reported" "$(cat "$out")"
+
+# Searches are scoped to the owners in the streams map, one call per owner, and only one attempt per ticket is marked.
+cat >"$tmp/gh-scoped" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "$*" >>"$GH_LOG"
+owner=""
+for ((i = 1; i <= $#; i++)); do
+    if [ "${!i}" = --owner ]; then j=$((i + 1)); owner="${!j}"; fi
+done
+[ -n "$owner" ] || { echo "unscoped gh search: $*" >&2; exit 9; }
+[ "$owner" = jdwlabs ] || { echo '[]'; exit 0; }
+case "${*: -1}" in
+JDW-20) echo '[{"number":30,"title":"feat: JDW-20","url":"https://github.com/jdwlabs/r/pull/30","state":"closed"}]' ;;
+JDW-21) echo '[{"number":31,"title":"feat: JDW-21","url":"https://github.com/jdwlabs/r/pull/31","state":"closed"}]' ;;
+JDW-22) echo '[{"number":32,"title":"feat: JDW-22","url":"https://github.com/jdwlabs/r/pull/32","state":"closed"}]' ;;
+*) echo '[]' ;;
+esac
+STUB
+chmod +x "$tmp/gh-scoped"
+export GH_LOG="$tmp/gh.log"
+rec_at() { # time args... : record with the clock at $1
+    local when="$1"
+    shift
+    AGENT_EVAL_NOW="$when" "$ae" record "$@" >/dev/null
+}
+fresh enrich-scoped
+# JDW-20: an abandoned failed lane, an older completed retry, and the newest completed attempt.
+rec_at 2026-10-20T10:00:00+00:00 --id s20-abandoned --lane opencode-mimo-free --class impl --status failed --ticket JDW-20
+rec_at 2026-10-20T11:00:00+00:00 --id s20-older --lane claude-haiku --class impl --status completed --ticket JDW-20
+rec_at 2026-10-20T12:00:00+00:00 --id s20-newest --lane claude-sonnet --class impl --status completed --ticket JDW-20
+# JDW-21: the older attempt is already tied to the PR; the newer, completed one is not.
+rec_at 2026-10-20T10:00:00+00:00 --id s21-tied --lane claude-haiku --class impl --status completed --ticket JDW-21 \
+    --pr https://github.com/jdwlabs/r/pull/31
+rec_at 2026-10-20T12:00:00+00:00 --id s21-later --lane claude-sonnet --class impl --status completed --ticket JDW-21
+# JDW-22: nothing completed, so nothing to mark.
+rec_at 2026-10-20T10:00:00+00:00 --id s22-failed --lane claude-haiku --class impl --status failed --ticket JDW-22
+rm -f "$GH_LOG"
+AGENT_EVAL_GH="$tmp/gh-scoped" run 0 enrich
+grep -q "^owners: 2$" "$out" || fail "enrich did not read two owners" "$(cat "$out")"
+[ "$(wc -l <"$GH_LOG")" = 12 ] || fail "enrich did not make one call per owner and ticket and state" "$(cat "$GH_LOG")"
+grep -vq -- "--owner" "$GH_LOG" && fail "an unscoped gh search was made" "$(cat "$GH_LOG")"
+for o in jdwillmsen jdwlabs; do
+    grep -q -- "--owner $o " "$GH_LOG" || fail "no search for owner $o" "$(cat "$GH_LOG")"
+done
+python3 - "$AGENT_EVAL_STATE/outcomes.jsonl" <<'PY' || fail "enrich marked the wrong attempts"
+import json, sys
+rows = {}
+for line in open(sys.argv[1]):
+    r = json.loads(line)
+    rows[r["id"]] = r
+def state(i):
+    return (rows[i]["merged"], rows[i]["pr"])
+assert state("s20-newest") == (True, "https://github.com/jdwlabs/r/pull/30"), state("s20-newest")
+assert state("s20-older") == (None, None), state("s20-older")
+assert state("s20-abandoned") == (None, None), state("s20-abandoned")
+assert state("s21-tied") == (True, "https://github.com/jdwlabs/r/pull/31"), state("s21-tied")
+assert state("s21-later") == (None, None), state("s21-later")
+assert state("s22-failed") == (None, None), state("s22-failed")
+PY
+# Without a readable streams map enrich stops: it never falls back to a search over all of GitHub.
+rm -f "$GH_LOG"
+for bad in "$tmp/no-streams.json" "$tmp/bad-streams.json" "$tmp/empty-streams.json"; do
+    printf '%s' 'not json' >"$tmp/bad-streams.json"
+    printf '%s' '{"streams":{}}' >"$tmp/empty-streams.json"
+    AGENT_EVAL_STREAMS="$bad" AGENT_EVAL_GH="$tmp/gh-scoped" run 1 enrich
+    grep -q "^error:" "$out" || fail "enrich with $bad printed no structured error" "$(cat "$out")"
+done
+[ ! -e "$GH_LOG" ] || fail "enrich searched without a usable streams map" "$(cat "$GH_LOG")"
 
 # ── report ──
 # Window arithmetic is the same as agent-report's compute_windows, across a month of anchor dates.
@@ -609,6 +860,34 @@ for heading in ("Dispatches by lane", "Completion and quality by lane", "Cooldow
 assert "opencode-nim-glm" in text and "claude-sonnet" in text
 PY
 run 2 report --window weekly --end 2026-13-45
+
+# ── A damaged ledger is reported, never read as a quiet window ──
+fresh damaged
+python3 -I - "$AGENT_EVAL_STATE" <<'PY'
+import json, sys
+d = sys.argv[1]
+good = {"id": "g1", "at": "2026-10-13T10:00:00Z", "lane": "claude-sonnet", "class": "impl", "status": "completed",
+        "failure_kind": "none"}
+open(d + "/outcomes.jsonl", "w").write(json.dumps(good) + "\n{not json\n\n[1, 2]\n{\"no_id\": true}\n")
+open(d + "/assignments.jsonl", "w").write("garbage\n" + json.dumps({"id": "a1", "at": "2026-10-13T09:00:00Z",
+                                                                  "lane": "claude-sonnet", "class": "impl"}) + "\n")
+PY
+run 0 report --window weekly --end 2026-10-23 --format json
+[ "$(json_get "$out" skipped_lines)" = 4 ] || fail "the report did not count unreadable lines over both ledgers" "$(cat "$out")"
+[ "$(json_get "$out" dispatches total)" = 1 ] || fail "the readable lines were not used" "$(cat "$out")"
+grep -q "unreadable" "$err" || fail "no stderr message for unreadable lines" "$(cat "$err")"
+run 0 report --window weekly --end 2026-10-23 --format md
+grep -qF "Partial: 4 unreadable ledger lines." "$out" || fail "the Markdown report hides the damaged lines" "$(cat "$out")"
+run 0 scoreboard --json
+[ "$(json_get "$out" skipped_lines)" = 4 ] || fail "scoreboard --json did not count unreadable lines" "$(cat "$out")"
+run 0 scoreboard
+grep -q "^skipped_lines: 4$" "$out" || fail "scoreboard does not show unreadable lines" "$(cat "$out")"
+fresh undamaged
+ledger "claude-sonnet,impl,R1,completed,none,t,f,1,0"
+run 0 scoreboard --json
+[ "$(json_get "$out" skipped_lines)" = 0 ] || fail "a clean ledger reports skipped lines" "$(cat "$out")"
+run 0 report --window weekly --end 2026-10-23 --format md
+grep -q "Partial" "$out" && fail "a clean ledger reports a partial result"
 
 # ── No secret or prompt text is ever written ──
 if grep -rqi "secret prompt\|token\|api_key" "$tmp"/state-* 2>/dev/null; then

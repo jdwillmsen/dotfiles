@@ -130,7 +130,8 @@ fi
 if [ -z "$blocker" ]; then
     for tty in "$root"/dev/pts/[0-9]*; do
         [ "$(stat -c %U "$tty" 2>/dev/null)" = "$user" ] || continue
-        if [ $((now - $(stat -c %X "$tty"))) -lt $((idle_minutes * 60)) ]; then
+        atime="$(stat -c %X "$tty" 2>/dev/null)" || continue
+        if [ $((now - atime)) -lt $((idle_minutes * 60)) ]; then
             blocker="terminal input in the last ${idle_minutes}m"
             break
         fi

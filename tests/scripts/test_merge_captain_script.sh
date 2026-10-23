@@ -327,9 +327,14 @@ fx() { python3 "$tmp/fx.py" "$@"; }
 # The lane policy agent-pace reads, cut to the lanes these tests hand out.
 python3 - "$tmp/lanes.toml" <<'PY'
 import sys
-lanes = [("claude-sonnet", "claudeAgent"), ("claude-opus", "claudeAgent"), ("opencode-glm", "opencode"),
-         ("opencode-nim", "opencode"), ("codex-luna", "codex")]
-open(sys.argv[1], "w").write("".join(f'[[lane]]\nid = "{i}"\nprovider = "{p}"\n\n' for i, p in lanes))
+lanes = [("claude-sonnet", "claudeAgent", "claude-sonnet-5-5", "anthropic", "R3"),
+         ("claude-opus", "claudeAgent", "claude-opus-5-5", "anthropic", "R3"),
+         ("opencode-glm", "opencode", "opencode/glm-5.3-flash-free", "glm", "R1"),
+         ("opencode-nim", "opencode", "nvidia/z-ai/glm-5.3", "glm", "R1"),
+         ("codex-luna", "codex", "gpt-6-luna", "openai", "R2")]
+open(sys.argv[1], "w").write("".join(
+    f'[[lane]]\nid = "{i}"\nprovider = "{p}"\nmodel = "{m}"\nfamily = "{f}"\nmax_risk = "{r}"\n\n'
+    for i, p, m, f, r in lanes))
 PY
 
 # ── Harness ──
@@ -855,6 +860,70 @@ fx pace 3 lane=claude-sonnet provider=claudeAgent model=claude-sonnet-5-5
 fx rev claude 3 approve
 want 0 run
 expect 151 merged "review approve by"
+
+# ── The implementer comes from the commit trailers; the reviewer is never that lane ──
+trailers() {  # one commit per argument: the trailer lines it carries
+    python3 -I - "$@" <<'PY'
+import json, sys
+print(json.dumps([{"messageHeadline": "feat: x", "messageBody": "Why.\n\n" + t} for t in sys.argv[1:]]))
+PY
+}
+SONNET_T=$'Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>\nAssisted-by: Claude Code:claude-sonnet-5-5'
+LUNA_T=$'Co-Authored-By: Codex <codex@openai.com>\nAssisted-by: Codex:gpt-6-luna'
+# A Sonnet-written R2 pull request is never reviewed by claude-sonnet, even if agent-pace offered it.
+newcase
+fx pr 30 "commits=$(trailers "$SONNET_T")"
+fx class 30 R2
+fx pace 1 lane=claude-sonnet provider=claudeAgent model=claude-sonnet-5-5
+fx pace 2 lane=claude-opus provider=claudeAgent model=claude-opus-5-5
+fx rev claude 1 approve
+want 0 run
+expect 30 merged "review approve by claude-opus"
+sed -n 1p "$S/pace.log" | grep -q -- '--implementer claude-sonnet' || fail "implementer not passed" "$(cat "$S/pace.log")"
+sed -n 1p "$S/pace.log" | grep -- '--exclude' | grep -q 'claude-sonnet' || fail "implementer not excluded" "$(cat "$S/pace.log")"
+[ "$(cat "$S/claude.n")" = 1 ] && grep -q '"claude-opus-5-5"' "$S/claude.calls" || fail "the implementer lane ran the review" "$(cat "$S/claude.calls")"
+grep -q 'record --id a-1 --status interrupted' "$S/eval.log" || fail "the refused lane's assignment was not released" "$(cat "$S/eval.log")"
+grep -q 'implementer claude-sonnet' "$S/posted_30.txt" || fail "the comment must name the implementer" "$(cat "$S/posted_30.txt")"
+# Mixed trailers: the strongest lane is the implementer, every other one is excluded, and so is its whole family at R1.
+newcase
+fx pr 31 "commits=$(trailers "$SONNET_T" "$LUNA_T")"
+fx class 31 R2
+fx pace 1 result=none
+want 0 run
+expect 31 waiting no-review-lane
+sed -n 1p "$S/pace.log" | grep -q -- '--implementer claude-sonnet' || fail "strongest implementer first" "$(cat "$S/pace.log")"
+[ "$(sed -n 1p "$S/pace.log" | grep -o -- '--exclude .*')" = "--exclude claude-sonnet,codex-luna,opencode-glm,opencode-nim" ] ||
+    fail "mixed trailers must exclude every implementer lane" "$(cat "$S/pace.log")"
+newcase
+fx pr 32 "commits=$(trailers "$SONNET_T" "$LUNA_T")"
+fx class 32 R1
+fx pace 1 result=none
+fx pace 2 result=none
+want 0 run
+[ "$(sed -n 1p "$S/pace.log" | grep -o -- '--exclude .*')" = "--exclude claude-opus,claude-sonnet,codex-luna,opencode-glm,opencode-nim" ] ||
+    fail "at R1 the implementers' families are closed too" "$(cat "$S/pace.log")"
+sed -n 2p "$S/pace.log" | grep -q -- '--allow-same-family' &&
+    [ "$(sed -n 2p "$S/pace.log" | grep -o -- '--exclude .*')" = "--exclude claude-sonnet,codex-luna,opencode-glm,opencode-nim --allow-same-family" ] ||
+    fail "the same-family retry still excludes the implementer lanes" "$(cat "$S/pace.log")"
+# A provider-prefixed model id and a lane id both map.
+newcase
+fx pr 33 "commits=$(trailers 'Assisted-by: OpenCode:glm-5.3-flash-free [bash]')"
+fx class 33 R1
+fx pace 1 result=none
+want 0 run
+sed -n 1p "$S/pace.log" | grep -q -- '--implementer opencode-glm' || fail "prefixed model id not mapped" "$(cat "$S/pace.log")"
+# No usable trailer, or none at all: the implementer is unknown and the call is as before.
+for commits in '[]' "$(trailers 'Co-Authored-By: Josh <josh@example.com>' 'Assisted-by: Mystery:model-x')"; do
+    newcase
+    fx pr 34 "commits=$commits"
+    fx class 34 R1
+    fx pace 1 lane=claude-sonnet provider=claudeAgent model=claude-sonnet-5-5
+    fx rev claude 1 approve
+    want 0 run
+    expect 34 merged
+    grep -q -- '--implementer' "$S/pace.log" && fail "unknown implementer must not be passed" "$(cat "$S/pace.log")"
+    grep -q 'implementer unknown' "$S/posted_34.txt" || fail "the comment must say the implementer is unknown" "$(cat "$S/posted_34.txt")"
+done
 
 # ── Prior reviews: only this tool's own record, for this PR and head, at this tier or higher ──
 # A comment proves nothing: the owner's login authors every agent comment as well.

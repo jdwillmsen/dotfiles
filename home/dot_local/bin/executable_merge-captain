@@ -74,6 +74,9 @@ REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 TICKET = re.compile(r"[A-Z][A-Z0-9]*-[0-9]+")
 MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@-]*")
 IDENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9:_.-]{0,63}")
+# Trailers that name who wrote a commit: `Assisted-by: <agent>:<model-id> [tools]` and `Co-Authored-By: <name> <mail>`.
+ASSISTED_BY = re.compile(r"^\s*assisted-by:\s*[^:\[\]]+?:\s*([A-Za-z0-9][A-Za-z0-9._/@-]*)", re.I)
+CO_AUTHORED_BY = re.compile(r"^\s*co-authored-by:\s*(.+?)\s*(?:<[^>]*>)?\s*$", re.I)
 GOOD_CONCLUSIONS = ("SUCCESS", "NEUTRAL", "SKIPPED")
 LABEL_COLOURS = {"risk/R0": "0e8a16", "risk/R1": "fbca04", "risk/R2": "d93f0b", "risk/R3": "b60205",
                  "needs-human": "b60205", "agent-changes-requested": "d93f0b"}
@@ -479,10 +482,36 @@ def parse_verdict(text):
     return verdict, rows
 
 
-def review_comment(head, tier, verdict, lane, findings, same_family=False):
+def model_forms(text):
+    """Spellings of a model id that count as the same model: case and punctuation folded, a provider prefix
+    dropped, and a trailing version (`-5-5`) optional, so a trailer naming `claude-sonnet-5-5` and a lane whose
+    model is `claude-sonnet` meet. Looser than exact on purpose: matching too much only excludes more reviewers."""
+    folded = re.sub(r"[^a-z0-9/]+", "-", str(text).lower()).strip("-/")
+    forms = set()
+    for base in {folded, folded.rsplit("/", 1)[-1]}:
+        if base:
+            forms |= {base, re.sub(r"(?:-\d+)+$", "", base) or base}
+    return forms
+
+
+def commit_trailer_models(commits):
+    """Model ids and names the commits' trailers claim wrote them. Self-reported by whoever authored the commit."""
+    found = set()
+    for c in commits if isinstance(commits, list) else []:
+        if not isinstance(c, dict):
+            continue
+        for line in f"{c.get('messageHeadline') or ''}\n{c.get('messageBody') or ''}".splitlines():
+            m = ASSISTED_BY.match(line) or CO_AUTHORED_BY.match(line)
+            if m:
+                found.add(m.group(1))
+    return found
+
+
+def review_comment(head, tier, verdict, lane, findings, same_family=False, implementers=()):
     # The marker line is for people reading the thread; nothing reads it back.
+    who = ",".join(md_safe(x, 60) for x in implementers) or "unknown"
     head_lines = [f"<!-- merge-captain:review sha={head} tier={tier} verdict={verdict} -->",
-                  f"merge-captain review: **{verdict}** (tier {tier}, lane {md_safe(lane, 60)}"
+                  f"merge-captain review: **{verdict}** (tier {tier}, lane {md_safe(lane, 60)}, implementer {who}"
                   f"{', same-family reviewer' if same_family else ''}, "
                   f"{len(findings)} finding{'s' if len(findings) != 1 else ''})"]
     body = "\n".join(head_lines)
@@ -590,6 +619,7 @@ class Captain:
         self.deadline_s = deadline_from_env("MERGE_CAPTAIN_DEADLINE_S", RUN_DEADLINE_S)
         self.hard_deadline_s = deadline_from_env("MERGE_CAPTAIN_HARD_DEADLINE_S", HARD_DEADLINE_S)
         self.pending = None
+        self.lanes = None
         self.deadline_logged = False
         self.default_branch = {}
         self.label_cache = {}
@@ -906,23 +936,47 @@ class Captain:
 
     # -- review --------------------------------------------------------------
 
+    def lane_table(self):
+        """Lanes from the policy agent-pace reads, strongest first; empty when it cannot be read."""
+        if self.lanes is None:
+            path = Path(os.environ.get("AGENT_PACE_LANES")
+                        or Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "agents/lanes.toml")
+            try:
+                rows = tomllib.loads(path.read_text()).get("lane") or []
+            except (OSError, tomllib.TOMLDecodeError):
+                log("lane policy unreadable; reviewer providers are checked at run time instead")
+                rows = []
+            lanes = [x for x in rows if isinstance(x, dict) and isinstance(x.get("id"), str)
+                     and IDENT.fullmatch(x["id"])]
+            risk = {t: i for i, t in enumerate(TIERS)}
+            self.lanes = sorted(lanes, key=lambda x: -risk.get(x.get("max_risk"), 0))
+        return self.lanes
+
     def barred_lanes(self):
         """Lanes whose provider this run may not use, so agent-pace never hands out a lane that cannot run."""
-        path = Path(os.environ.get("AGENT_PACE_LANES")
-                    or Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "agents/lanes.toml")
-        try:
-            lanes = tomllib.loads(path.read_text()).get("lane") or []
-        except (OSError, tomllib.TOMLDecodeError):
-            log("lane policy unreadable; reviewer providers are checked at run time instead")
-            return []
-        return sorted(x["id"] for x in lanes if isinstance(x, dict) and isinstance(x.get("id"), str)
-                      and x.get("provider") not in self.cfg["providers"])
+        return sorted(x["id"] for x in self.lane_table() if x.get("provider") not in self.cfg["providers"])
 
-    def assign(self, tier, ticket, exclude, same_family=False):
+    def implementer_lanes(self, details):
+        """Lanes the commit trailers say wrote this change, strongest first. Empty when none can be told."""
+        claimed = set()
+        for token in commit_trailer_models(details.get("commits")):
+            claimed |= model_forms(token)
+        return [x for x in self.lane_table()
+                if claimed & (model_forms(x.get("model") or "") | model_forms(x["id"]))]
+
+    def assign(self, tier, ticket, exclude, same_family=False, implementers=()):
         args = [self.pace_bin, "assign", "--class", "review", "--risk", tier, "--json"]
         if ticket:
             args += ["--ticket", ticket]
-        barred = sorted({*exclude, *self.barred_lanes()})
+        barred = {*exclude, *self.barred_lanes(), *(x["id"] for x in implementers)}
+        if implementers:
+            args += ["--implementer", implementers[0]["id"]]
+            if tier == "R1" and not same_family:
+                # agent-pace applies the family rule to the one implementer it is told about; the rest of the
+                # authors' families are closed here so mixed authorship never loosens independence.
+                families = {x.get("family") for x in implementers}
+                barred |= {x["id"] for x in self.lane_table() if x.get("family") in families}
+        barred = sorted(barred)
         if barred:
             args += ["--exclude", ",".join(barred)]
         if same_family:
@@ -1021,13 +1075,16 @@ class Captain:
                                "diff-too-large")
         prompt = build_prompt(tier, tags, reasons, details.get("title"), dr.out)
 
+        implementers = self.implementer_lanes(details)
+        implementer_ids = [x["id"] for x in implementers]
+        self.step("implementer", ",".join(implementer_ids) or "unknown")
         tried, same_family = [], False
         for _ in range(MAX_REVIEW_TRIES):
             self.review_budget(repo, n, head)
-            res = self.assign(tier, ticket, tried)
+            res = self.assign(tier, ticket, tried, implementers=implementers)
             if tier == "R1" and (res or {}).get("result") == "none":
                 # Nothing of another family can run; a same-family review beats waiting on an idle lane.
-                retry = self.assign(tier, ticket, tried, same_family=True)
+                retry = self.assign(tier, ticket, tried, same_family=True, implementers=implementers)
                 if retry and retry.get("result") == "assigned":
                     res, same_family = retry, True
             if not res or res.get("result") != "assigned":
@@ -1041,6 +1098,10 @@ class Captain:
             if PAUSED.exists():
                 raise Stop("skipped", "paused")
             tried.append(lane)
+            if lane in implementer_ids:
+                # agent-pace was told, but a reviewer must never be the lane that wrote the change.
+                self.record_eval(aid, tier, status="interrupted", note="lane wrote the change")
+                continue
             if provider not in self.cfg["providers"]:
                 # Nothing was run, so it takes no call from the cap, and it is not the lane's fault, so it must
                 # not count toward its cooldown either.
@@ -1057,7 +1118,7 @@ class Captain:
             # The comment goes first: a review nobody can read on the pull request is not recorded, so it is not
             # merged on and the next run reviews again.
             try:
-                self.comment(repo, n, review_comment(head, tier, verdict, lane, findings, same_family))
+                self.comment(repo, n, review_comment(head, tier, verdict, lane, findings, same_family, implementer_ids))
             except Stop as s:
                 self.record_eval(aid, tier, status="interrupted", note="review comment not posted")
                 if s.action != "error":
@@ -1147,7 +1208,7 @@ class Captain:
 
         details = self.gh_json(["pr", "view", str(n), "--repo", repo, "--json",
                                 "number,title,state,isDraft,labels,author,baseRefName,headRefName,headRefOid,updatedAt,"
-                                "mergeable,mergeStateStatus,reviewDecision,reviews,statusCheckRollup"],
+                                "mergeable,mergeStateStatus,reviewDecision,reviews,statusCheckRollup,commits"],
                                "pull request")
         head = details.get("headRefOid") if isinstance(details, dict) else None
         if not isinstance(head, str) or not SHA.fullmatch(head):

@@ -75,6 +75,12 @@ DEFAULTS='{
 # settings files. A deny here stops only Claude Code loading the connector;
 # it stays connected on claude.ai.
 #
+# The PreToolUse entry that guards the merge-captain's approval state is enforced,
+# not defaulted: a defaulted hooks list is replaced wholesale by whatever is on
+# disk, and a guard that one local hook can switch off guards nothing. Lists are
+# unioned, so the rtk hook and any hook added by hand stay. $HOME is left for
+# the hook's shell to expand, so the entry is the same on every machine.
+#
 # CLAUDE_CODE_PLUGIN_DIRS loads the skill-trim mod in every session, including
 # ones started by apps that take no --plugin-dir flag. It is enforced because
 # the path is owned here: a stale on-disk value would silently drop the mod.
@@ -104,6 +110,16 @@ ENFORCED='{
   },
   "skillOverrides": {
     "lavish": "off"
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|Bash",
+        "hooks": [
+          { "type": "command", "command": "$HOME/.claude/hooks/guard-delivery-state.sh" }
+        ]
+      }
+    ]
   }
 }'
 # REMOVED entries are deleted from the merged result, since the merge otherwise

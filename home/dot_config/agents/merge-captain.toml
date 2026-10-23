@@ -1,0 +1,79 @@
+# Repositories merge-captain looks after, read by `merge-captain`. A repository
+# that is not listed is ignored. Flipping one to live is a one-line edit here.
+#
+# mode: live    comment, label, review and merge, up to max_tier
+#       dry-run classify and log what would happen; writes nothing, runs no reviewer
+#       off     ignored
+# max_tier: highest risk tier it may merge on its own (R0, R1 or R2). R3 is never
+# merged, whatever is written here.
+
+[limits]
+max_prs_per_run = 6
+max_reviews_per_run = 3
+max_merges_per_hour = 6
+review_timeout_s = 600
+max_diff_bytes = 150000
+
+[authors]
+# Only pull requests opened by these logins are touched.
+allow = ["jdwillmsen", "jdwlabs-agent-bot", "renovate[bot]", "dependabot[bot]"]
+
+[[repo]]
+name = "jdwillmsen/dotfiles"
+mode = "live"
+max_tier = "R2"
+
+[[repo]]
+name = "jdwillmsen/gameops"
+mode = "dry-run"
+max_tier = "R2"
+
+[[repo]]
+name = "jdwillmsen/jdw-deployments"
+mode = "dry-run"
+max_tier = "R2"
+
+[[repo]]
+name = "jdwillmsen/fwb-minecraft"
+mode = "dry-run"
+max_tier = "R2"
+
+[[repo]]
+name = "jdwillmsen/career"
+mode = "dry-run"
+max_tier = "R2"
+
+[[repo]]
+name = "jdwillmsen/countdown-app"
+mode = "dry-run"
+max_tier = "R2"
+
+[[repo]]
+name = "jdwlabs/apps"
+mode = "dry-run"
+max_tier = "R2"
+
+[[repo]]
+name = "jdwlabs/deployments"
+mode = "dry-run"
+max_tier = "R2"
+
+[[repo]]
+name = "jdwlabs/infrastructure"
+mode = "dry-run"
+max_tier = "R2"
+
+[[repo]]
+name = "jdwlabs/platform"
+mode = "dry-run"
+max_tier = "R2"
+
+[[repo]]
+name = "dotablaze-tech/apps"
+mode = "dry-run"
+max_tier = "R2"
+
+[[repo]]
+name = "dotablaze-tech/deployments"
+mode = "dry-run"
+max_tier = "R2"

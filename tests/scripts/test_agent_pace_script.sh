@@ -254,7 +254,7 @@ good_line() {
     echo '{"at": NaN, "seven_day_pct": 50}'
     echo "{\"at\": $((now_epoch - 30)), \"seven_day_pct\": NaN, \"seven_day_resets_at\": $((now_epoch + 302400))}"
     echo "{\"at\": $((now_epoch - 30)), \"seven_day_pct\": Infinity}"
-    echo "{\"at\": $((now_epoch - 30)), \"seven_day_pct\": 140, \"seven_day_resets_at\": $((now_epoch + 302400))}"
+    echo "{\"at\": $((now_epoch - 30)), \"seven_day_pct\": 250, \"seven_day_resets_at\": $((now_epoch + 302400))}"
     echo "{\"at\": $((now_epoch - 30)), \"five_hour_pct\": -5}"
     echo "{\"at\": $((now_epoch - 30)), \"seven_day_pct\": 50, \"seven_day_resets_at\": 1e20}"
     echo "{\"at\": $((now_epoch - 30)), \"seven_day_pct\": 50, \"seven_day_resets_at\": \"nan\"}"
@@ -266,6 +266,11 @@ check "j['quota_skipped'] == 12" "skipped quota lines are miscounted"
 check "j['state'] == 'under' and j['used_pct'] == 27.5 and j['claude_multiplier'] == 1.632" "a bad line displaced the good reading"
 run 0 status
 grep -q "^quota_skipped: 12" "$out" || fail "status TOON has no quota_skipped" "$(cat "$out")"
+# A reading past the limit is real data: 102% on the five-hour window pauses Claude lanes.
+printf '{"at": %s, "five_hour_pct": 102, "five_hour_resets_at": %s, "seven_day_pct": 46, "seven_day_resets_at": %s}\n' \
+    "$((now_epoch - 60))" "$((now_epoch + 7200))" "$((now_epoch + 302400))" >"$AGENT_PACE_QUOTA"
+run 0 status --json
+check "j['quota_skipped'] == 0 and j['five_hour_paused'] is True" "a reading over 100 percent was discarded instead of pausing"
 # Invalid UTF-8 beside a good line is survivable; the lone bad line is counted.
 { printf '\xff\xfe\n'; good_line; } >"$AGENT_PACE_QUOTA"
 run 0 status --json

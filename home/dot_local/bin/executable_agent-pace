@@ -41,6 +41,7 @@ WINDOW_S = 7 * 86400
 # Epochs outside these bounds are corrupt, not merely old or far off.
 EPOCH_MIN = dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc).timestamp()
 EPOCH_MAX = dt.datetime(2100, 1, 1, tzinfo=dt.timezone.utc).timestamp()
+PCT_MAX = 200
 # A reading older than this no longer says where the quota is now.
 STALE_S = 30 * 60
 CONCURRENCY_WINDOW_S = 4 * 3600
@@ -228,7 +229,9 @@ def sane_reading(r):
         if r.get(key) is None:
             continue
         v = number(r[key])
-        if v is None or not (math.isfinite(v) and 0 <= v <= 100):
+        # The plan reports usage past its limit (102 has been logged), and that
+        # is exactly the reading the five-hour pause exists for.
+        if v is None or not (math.isfinite(v) and 0 <= v <= PCT_MAX):
             return False
     return True
 

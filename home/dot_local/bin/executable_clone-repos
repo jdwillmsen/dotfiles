@@ -34,10 +34,13 @@ EOF
 }
 
 # TOON scalar: quoted only when bare text would be misread.
+# The class lives in a variable because an inline one gets its backslashes
+# reinterpreted by [[ =~ ]] and silently matches nothing; `]` must lead it.
+TOON_SPECIAL='[],:"\[{}]'
 q() {
     local s="${1//$'\n'/ }"
     s="${s//$'\r'/}"
-    if [ -z "$s" ] || [[ "$s" =~ [,:\"\\\[\]{}] ]] || [[ "$s" == -* ]] ||
+    if [ -z "$s" ] || [[ "$s" =~ $TOON_SPECIAL ]] || [[ "$s" == -* ]] ||
         [[ "$s" == " "* ]] || [[ "$s" == *" " ]] || [[ "$s" =~ ^(true|false|null)$ ]]; then
         s="${s//\\/\\\\}"
         printf '"%s"' "${s//\"/\\\"}"
@@ -230,10 +233,8 @@ if [ "${#errors[@]}" -gt 0 ]; then
     hints=()
     [ "$n_failed" -eq 0 ] || hints+=("gh auth status" "gh repo view <slug>")
     [ "$n_conflict" -eq 0 ] || hints+=("mv <path> <path>.old, then clone-repos --group $(IFS=,; echo "${groups[*]}")")
-    printf 'help[%d]:
-' "${#hints[@]}"
-    printf '  %s
-' "${hints[@]}"
+    printf 'help[%d]:\n' "${#hints[@]}"
+    printf '  %s\n' "${hints[@]}"
     exit 1
 fi
 if [ "$dry_run" = true ] && [ "$n_would" -gt 0 ]; then

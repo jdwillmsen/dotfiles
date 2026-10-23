@@ -76,6 +76,11 @@ change-class --fail-at R3             # exit 3 when the tier is at or above this
 change-class --explain                # every matched rule, not just the deciding ones
 ```
 
+The classifier fails closed: renames contribute both paths, untracked files
+count as added, a path that is not valid UTF-8 is R3, and without a merge base
+(no `origin/main`, more than one commit) it exits 1 asking for `--base` rather
+than guessing one. An unknown repo prints `warnings[1]: repo unknown, floors skipped`.
+
 Inputs combine: a diff plus a plan classifies as the higher of the two.
 Output fields (TOON, field names fixed):
 

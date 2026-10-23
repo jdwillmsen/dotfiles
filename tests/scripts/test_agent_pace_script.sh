@@ -359,9 +359,9 @@ done
 
 # ── Evidence: ladder order, factor, floor ──
 weights '{"lanes": {
-  "opencode-deepseek-flash-free": {"impl": {"n": 200, "quality_mean": 0.0, "quality_lb": 0.0, "infra_rate": 0.0, "median_s": 90, "cooldown_until": null}},
-  "opencode-mimo-free": {"impl": {"n": 40, "quality_mean": 0.95, "quality_lb": 0.9, "infra_rate": 0.0, "median_s": 90, "cooldown_until": null}},
-  "opencode-glm-flash-free": {"impl": {"n": 40, "quality_mean": 0.60, "quality_lb": 0.5, "infra_rate": 0.0, "median_s": 90, "cooldown_until": null}}
+  "opencode-deepseek-flash-free": {"impl": {"n": 200, "success": 0, "quality_mean": 0.0, "quality_lb": 0.0, "infra_rate": 0.0, "median_s": 90, "cooldown_until": null}},
+  "opencode-mimo-free": {"impl": {"n": 40, "success": 38, "quality_mean": 0.95, "quality_lb": 0.9, "infra_rate": 0.0, "median_s": 90, "cooldown_until": null}},
+  "opencode-glm-flash-free": {"impl": {"n": 40, "success": 24, "quality_mean": 0.60, "quality_lb": 0.5, "infra_rate": 0.0, "median_s": 90, "cooldown_until": null}}
 }}'
 run 0 ladder --class impl --risk R1 --json
 check "[r['lane'] for r in j['ladder']][:4] == ['opencode-mimo-free', 'opencode-glm-flash-free', 'opencode-nim-glm',
@@ -377,6 +377,26 @@ for s in $(seq 1 200); do
 done
 [ -n "$found" ] || fail "deepseek was never chosen in 200 seeds"
 grep -q "evidence x0.20" "$out" || fail "evidence factor is not floored at 0.2" "$(cat "$out")"
+
+# ── The prior counts once ──
+# glm-flash has prior 0.78 and prior_weight 6: 10 of 10 successes is (6*0.78 + 10) / 16.
+weights '{"lanes": {"opencode-glm-flash-free": {"impl": {"n": 10, "success": 10, "quality_mean": 0.9175,
+  "quality_lb": 0.7, "infra_rate": 0.0, "median_s": 90, "cooldown_until": null}}}}'
+run 0 ladder --class impl --risk R1 --json
+check "abs({r['lane']: r['evidence'] for r in j['ladder']}['opencode-glm-flash-free'] - 0.9175) < 0.001" \
+    "10 of 10 successes did not give 0.9175"
+# Without success, quality_mean is already the posterior and is not shrunk again.
+weights '{"lanes": {"opencode-glm-flash-free": {"impl": {"n": 10, "quality_mean": 0.64,
+  "quality_lb": 0.4, "infra_rate": 0.0, "median_s": 90, "cooldown_until": null}}}}'
+run 0 ladder --class impl --risk R1 --json
+check "abs({r['lane']: r['evidence'] for r in j['ladder']}['opencode-glm-flash-free'] - 0.64) < 0.001" \
+    "quality_mean was shrunk toward the prior a second time"
+# No judged outcomes: the lane's prior.
+weights '{"lanes": {"opencode-glm-flash-free": {"impl": {"n": 0, "success": 0, "quality_mean": 0.5,
+  "quality_lb": 0.0, "infra_rate": 0.0, "median_s": 90, "cooldown_until": null}}}}'
+run 0 ladder --class impl --risk R1 --json
+check "abs({r['lane']: r['evidence'] for r in j['ladder']}['opencode-glm-flash-free'] - 0.78) < 0.001" \
+    "a lane with no outcomes is not at its prior"
 
 # ── Exploration: under-sampled lanes on R0/R1 only ──
 weights '{"lanes": {

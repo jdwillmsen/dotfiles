@@ -11,9 +11,9 @@
 
 [limits]
 max_prs_per_run = 6
-max_reviews_per_run = 3
+max_reviews_per_run = 2
 max_merges_per_hour = 6
-review_timeout_s = 600
+review_timeout_s = 300
 max_diff_bytes = 150000
 
 [checks]

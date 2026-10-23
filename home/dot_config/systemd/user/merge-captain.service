@@ -7,7 +7,8 @@ Type=oneshot
 ExecStart=%h/.local/bin/merge-captain run
 # A user manager starts with a bare PATH; gh, git and the model CLIs live in these.
 Environment=PATH=%h/.local/bin:%h/.local/npm-bin:/usr/local/bin:/usr/bin:/bin
-# Up to six pull requests, each with at most three reviews of ten minutes.
+# The run stops starting reviews and new pull requests after 20 minutes, and a reviewer call begun just
+# before that is killed at review_timeout_s (5 minutes); the rest is room for the gh calls to finish.
 TimeoutStartSec=30min
 NoNewPrivileges=yes
 PrivateTmp=yes

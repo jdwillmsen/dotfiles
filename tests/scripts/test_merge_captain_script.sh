@@ -223,6 +223,8 @@ with open(f"{S}/{name}.calls", "a") as f:
                         "gh_token": "GH_TOKEN" in os.environ, "api_key": "SOME_API_KEY" in os.environ,
                         "provider_key": "NVIDIA_PROVIDER_KEY" in os.environ,
                         "lockdown": os.environ.get("OPENCODE_CONFIG_CONTENT", "")}) + "\n")
+if os.path.exists(f"{S}/rev_{name}_{k}.nap"):
+    time.sleep(float(open(f"{S}/rev_{name}_{k}.nap").read()))
 if os.path.exists(f"{S}/rev_{name}_{k}.sleep"):
     subprocess.Popen(["sleep", "30"])
     time.sleep(30)
@@ -316,6 +318,8 @@ elif cmd == "rev":
         open(f"{S}/rev_{name}_{k}.rc", "w").write(kv["rc"])
     if "sleep" in kv:
         open(f"{S}/rev_{name}_{k}.sleep", "w").write("1")
+    if "nap" in kv:
+        open(f"{S}/rev_{name}_{k}.nap", "w").write(kv["nap"])
 PY
 fx() { python3 "$tmp/fx.py" "$@"; }
 
@@ -523,7 +527,10 @@ want 0 run
 [ $((SECONDS - start)) -lt 15 ] || fail "a hung reviewer was not killed at the timeout"
 expect 6 waiting review-unavailable
 ! writes | grep -vqE '^(label create|pr edit)' || fail "no comment or merge on a failed review" "$(writes)"
-[ "$(count 'status failed --failure-kind infra' "$S/eval.log")" = 2 ] || fail "both attempts should be recorded as infra failures" "$(cat "$S/eval.log")"
+[ "$(count 'status interrupted' "$S/eval.log")" = 2 ] || fail "both attempts should be recorded as interrupted" "$(cat "$S/eval.log")"
+grep -q 'failure-kind\|status failed' "$S/eval.log" && fail "a failed review must not feed the lane cooldown" "$(cat "$S/eval.log")"
+grep -q 'record --id a-1 --status interrupted --class review --risk R1 --note review timeout' "$S/eval.log" ||
+    fail "timeout note" "$(cat "$S/eval.log")"
 grep -q -- '--exclude claude-sonnet' "$S/pace.log" || fail "second try must exclude the failed lane" "$(cat "$S/pace.log")"
 for first in "garbage" "empty" "maybe" "badfindings" "error"; do
     newcase
@@ -565,7 +572,9 @@ lock = json.loads(call["lockdown"])
 assert lock["permission"]["bash"] == "deny" and lock["tools"]["bash"] is False
 PY
 grep -q 'diff --git' "$S/opencode.stdin.1" || fail "opencode got no prompt on stdin"
-grep -q 'record --id a-1 --status failed --failure-kind infra' "$S/eval.log" || fail "first lane failure not recorded"
+grep -q 'record --id a-1 --status interrupted --class review --risk R1 --note review exit' "$S/eval.log" ||
+    fail "first lane failure not recorded as interrupted" "$(cat "$S/eval.log")"
+grep -q 'failure-kind' "$S/eval.log" && fail "a failed review recorded a failure kind"
 grep -q 'record --id a-2 --status completed' "$S/eval.log" || fail "second lane outcome not recorded"
 
 # An unsupported provider is skipped without counting against the lane.
@@ -590,6 +599,98 @@ for result in defer none; do
     if [ "$result" = defer ]; then expect 9 waiting quota; else expect 9 waiting no-review-lane; fi
     [ ! -e "$S/claude.calls" ] || fail "reviewer ran with no lane"
 done
+
+# ── Review budget: reviewer CALLS are counted, the run has a deadline, a head gets two failed tries ──
+newcase
+want 0 status
+grep -q '^  review_timeout_s: 300$' "$out" && grep -q '^  max_reviews_per_run: 2$' "$out" || fail "limit defaults" "$(cat "$out")"
+for n in 140 141; do
+    fx pr $n
+    fx class $n R1
+done
+fx pace 1 lane=claude-sonnet provider=claudeAgent model=claude-sonnet-5-5
+fx pace 2 lane=claude-opus provider=claudeAgent model=claude-opus-5-5
+fx rev claude 1 garbage
+fx rev claude 2 garbage
+want 0 run
+expect 140 waiting review-unavailable
+expect 141 waiting review-cap
+[ "$(cat "$S/claude.n")" = 2 ] || fail "two calls on one pull request should spend the whole cap of two" "$(cat "$S/claude.n")"
+newcase max_reviews_per_run=1
+fx pr 142
+fx class 142 R1
+fx pace 1 lane=claude-sonnet provider=claudeAgent model=claude-sonnet-5-5
+fx pace 2 lane=claude-opus provider=claudeAgent model=claude-opus-5-5
+fx rev claude 1 garbage
+fx rev claude 2 approve
+want 0 run
+expect 142 waiting review-cap
+[ "$(cat "$S/claude.n")" = 1 ] || fail "a failed call must count against the cap" "$(cat "$S/claude.n")"
+# Past the deadline no reviewer call starts: a pull request that fails its first try waits.
+newcase
+fx pr 143
+fx class 143 R1
+fx pace 1 lane=claude-sonnet provider=claudeAgent model=claude-sonnet-5-5
+fx pace 2 lane=claude-opus provider=claudeAgent model=claude-opus-5-5
+fx rev claude 1 approve rc=1 nap=5
+fx rev claude 2 approve
+MERGE_CAPTAIN_DEADLINE_S=4 want 0 run
+expect 143 waiting deadline
+[ "$(cat "$S/claude.n")" = 1 ] || fail "a reviewer call started after the deadline" "$(cat "$S/claude.n")"
+grep -q 'merge-captain: deadline' "$err" || fail "the deadline was not logged" "$(cat "$err")"
+# ...and nor does a new pull request.
+newcase
+fx pr 144
+fx class 144 R1
+fx pace 1 lane=claude-sonnet provider=claudeAgent model=claude-sonnet-5-5
+fx rev claude 1 approve nap=5
+fx pr 145
+fx class 145 R0
+MERGE_CAPTAIN_DEADLINE_S=4 want 0 run
+expect 144 merged "review approve by"
+expect 145 skipped deadline
+# A head that failed twice is left alone for six hours, and only that head.
+newcase
+fx pr 150
+fx class 150 R1
+fx pace 1 lane=claude-sonnet provider=claudeAgent model=claude-sonnet-5-5
+fx pace 2 lane=claude-opus provider=claudeAgent model=claude-opus-5-5
+fx rev claude 1 garbage
+fx rev claude 2 approve rc=3
+want 0 run
+expect 150 waiting review-unavailable
+[ "$(wc -l <"$STATE/attempts.jsonl")" = 2 ] || fail "two failed attempts should be on record" "$(cat "$STATE/attempts.jsonl")"
+fx pace 3 lane=claude-sonnet provider=claudeAgent model=claude-sonnet-5-5
+fx rev claude 3 approve
+want 0 run
+expect 150 waiting review-backoff
+[ "$(cat "$S/claude.n")" = 2 ] && [ "$(cat "$S/pace.n")" = 2 ] ||
+    fail "a backed-off head was reviewed or assigned again" "$(cat "$S/pace.log")"
+saved_now="$NOW"
+NOW="2026-10-24T03:30:00Z"
+want 0 run
+NOW="$saved_now"
+expect 150 merged "review approve by"
+newcase
+fx pr 151
+fx class 151 R1
+fx pace 1 lane=claude-sonnet provider=claudeAgent model=claude-sonnet-5-5
+fx pace 2 lane=claude-opus provider=claudeAgent model=claude-opus-5-5
+fx rev claude 1 garbage
+fx rev claude 2 garbage
+want 0 run
+expect 151 waiting review-unavailable
+python3 - "$S/pr_151.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+pr = json.load(open(p))
+pr["headRefOid"] = "d" * 40
+json.dump(pr, open(p, "w"))
+PY
+fx pace 3 lane=claude-sonnet provider=claudeAgent model=claude-sonnet-5-5
+fx rev claude 3 approve
+want 0 run
+expect 151 merged "review approve by"
 
 # ── Prior reviews: only this tool's own record, for this PR and head, at this tier or higher ──
 # A comment proves nothing: the owner's login authors every agent comment as well.

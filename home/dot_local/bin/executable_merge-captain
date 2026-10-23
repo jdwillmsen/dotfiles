@@ -19,6 +19,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 from pathlib import Path
 
@@ -39,6 +40,7 @@ STATE = Path(os.environ.get("MERGE_CAPTAIN_STATE")
 PAUSED = STATE / "PAUSED"
 LOG = STATE / "log.jsonl"
 REVIEWS = STATE / "reviews.jsonl"
+ATTEMPTS = STATE / "attempts.jsonl"
 HUMAN = STATE / "human.jsonl"
 LOCK = STATE / "lock"
 
@@ -46,14 +48,20 @@ TIERS = ("R0", "R1", "R2", "R3")
 MODES = ("live", "dry-run", "off")
 # R3 is never mergeable here, so it is not a legal ceiling.
 CEILINGS = ("R0", "R1", "R2")
-LIMIT_DEFAULTS = {"max_prs_per_run": 6, "max_reviews_per_run": 3, "max_merges_per_hour": 6,
-                  "review_timeout_s": 600, "max_diff_bytes": 150000}
+LIMIT_DEFAULTS = {"max_prs_per_run": 6, "max_reviews_per_run": 2, "max_merges_per_hour": 6,
+                  "review_timeout_s": 300, "max_diff_bytes": 150000}
 SKIP_LABELS = ("hold", "no-agent-merge")
 SETTLE_S = 120
 GH_TIMEOUT_S = 90
 TOOL_TIMEOUT_S = 120
 HOUR_S = 3600
+# No reviewer call and no new pull request starts after this. With review_timeout_s and the gh calls a
+# pull request already under way can still make, the unit's TimeoutStartSec leaves room to finish.
+RUN_DEADLINE_S = 1200
 MAX_REVIEW_TRIES = 2
+# Failed review calls per head commit before the captain stops asking, and for how long it stays quiet.
+MAX_FAILED_ATTEMPTS = 2
+BACKOFF_S = 6 * HOUR_S
 REVIEW_BUDGET_USD = "1.00"
 SHA = re.compile(r"[0-9a-f]{40}")
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
@@ -466,6 +474,16 @@ def merges_since(now):
 
 # ── Captain ──────────────────────────────────────────────────────────────────
 
+def run_deadline():
+    raw = os.environ.get("MERGE_CAPTAIN_DEADLINE_S")
+    if not raw:
+        return RUN_DEADLINE_S
+    try:
+        return float(raw)
+    except ValueError:
+        die(EXIT_USAGE, f"MERGE_CAPTAIN_DEADLINE_S is not a number: {raw!r}")
+
+
 class Captain:
     def __init__(self, cfg, dry_run=False, explain=False, max_prs=None):
         self.cfg = cfg
@@ -481,7 +499,10 @@ class Captain:
         self.claude_bin = find_tool("MERGE_CAPTAIN_CLAUDE", "claude")
         self.opencode_bin = find_tool("MERGE_CAPTAIN_OPENCODE", "opencode", ".local/npm-bin")
         self.examined = 0
-        self.reviews = 0
+        self.review_calls = 0
+        self.started = time.monotonic()
+        self.deadline_s = run_deadline()
+        self.deadline_logged = False
         self.default_branch = {}
         self.label_cache = {}
         self.trace = []
@@ -668,6 +689,23 @@ class Captain:
             return "changes"
         return "approve" if "approve" in verdicts else None
 
+    def past_deadline(self):
+        if time.monotonic() - self.started < self.deadline_s:
+            return False
+        if not self.deadline_logged:
+            log("deadline")
+            self.deadline_logged = True
+        return True
+
+    def failed_attempts(self, repo, n, head):
+        return sum(1 for row in read_jsonl(ATTEMPTS)
+                   if row.get("repo") == repo and row.get("pr") == n and row.get("head") == head
+                   and (t := parse_time(row.get("at"))) is not None and self.now - BACKOFF_S < t <= self.now)
+
+    def record_attempt(self, repo, n, head, lane, kind):
+        append_jsonl(ATTEMPTS, {"repo": repo, "pr": n, "head": head, "lane": lane, "kind": kind,
+                                "at": iso(self.now)})
+
     def record_review(self, repo, n, head, tier, verdict, lane):
         append_jsonl(REVIEWS, {"repo": repo, "pr": n, "head": head, "tier": tier, "verdict": verdict, "lane": lane,
                                "at": iso(self.now)}, durable=True)
@@ -824,14 +862,10 @@ class Captain:
         return parsed if parsed else "unreadable"
 
     def record_eval(self, aid, tier, *, status="completed", note=None, findings=None, pr_url=None):
-        if status == "failed":
-            args = [self.eval_bin, "record", "--id", aid, "--status", "failed", "--failure-kind", "infra",
-                    "--class", "review", "--risk", tier]
-        elif status == "interrupted":
-            args = [self.eval_bin, "record", "--id", aid, "--status", "interrupted", "--class", "review",
-                    "--risk", tier]
-        else:
-            args = [self.eval_bin, "record", "--id", aid, "--status", "completed", "--class", "review", "--risk", tier]
+        """A review that did not produce a verdict is `interrupted`, never a failure: a failure kind feeds the
+        lane cooldown that every dispatch shares, and a bad pull request is not the lane's fault."""
+        args = [self.eval_bin, "record", "--id", aid, "--status", status, "--class", "review", "--risk", tier]
+        if status == "completed":
             if findings is not None:
                 args += ["--review-findings", str(findings)]
             if pr_url:
@@ -849,13 +883,21 @@ class Captain:
             raise Stop("error", "head unreadable")
         return head, j
 
+    def review_budget(self, repo, n, head):
+        """Stops the pull request when another reviewer call is not allowed right now."""
+        if self.past_deadline():
+            raise Stop("waiting", "deadline")
+        if self.review_calls >= self.limits["max_reviews_per_run"]:
+            raise Stop("waiting", "review-cap")
+        if self.failed_attempts(repo, n, head) >= MAX_FAILED_ATTEMPTS:
+            raise Stop("waiting", "review-backoff")
+
     def review(self, repo, n, head, tier, tags, reasons, details):
         """Run the review and return the approving lane. Stops the pull request on anything that is not a
         usable approval: a failed review is never an approval."""
-        if self.reviews >= self.limits["max_reviews_per_run"]:
-            raise Stop("waiting", "review-cap")
         ticket = self.ticket_of(details.get("headRefName"), details.get("title"))
 
+        self.review_budget(repo, n, head)
         before, _ = self.fetch_head(repo, n)
         dr = self.gh(["pr", "diff", str(n), "--repo", repo])
         if not dr.ok:
@@ -871,6 +913,7 @@ class Captain:
 
         tried = []
         for _ in range(MAX_REVIEW_TRIES):
+            self.review_budget(repo, n, head)
             res = self.assign(tier, ticket, tried)
             if not res or res.get("result") != "assigned":
                 if tried:
@@ -883,7 +926,7 @@ class Captain:
             if PAUSED.exists():
                 raise Stop("skipped", "paused")
             tried.append(lane)
-            self.reviews += 1
+            self.review_calls += 1
             self.step("review", f"lane {lane}")
             outcome = self.run_reviewer(provider, model, prompt)
             if outcome == "unsupported":
@@ -891,7 +934,8 @@ class Captain:
                 self.record_eval(aid, tier, status="interrupted", note="provider not supported by merge-captain")
                 continue
             if isinstance(outcome, str):
-                self.record_eval(aid, tier, status="failed", note=f"review {outcome}")
+                self.record_eval(aid, tier, status="interrupted", note=f"review {outcome}")
+                self.record_attempt(repo, n, head, lane, outcome)
                 continue
             verdict, findings = outcome
             self.record_eval(aid, tier, findings=len(findings), pr_url=f"https://github.com/{repo}/pull/{n}")
@@ -963,6 +1007,8 @@ class Captain:
             raise Stop("skipped", "base-not-default")
         if self.live and self.merges_last_hour() >= self.limits["max_merges_per_hour"]:
             raise Stop("skipped", "hourly-cap")
+        if self.past_deadline():
+            raise Stop("skipped", "deadline")
         if self.examined >= self.max_prs:
             raise Stop("skipped", "run-cap")
         self.examined += 1

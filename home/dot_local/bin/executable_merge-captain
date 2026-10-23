@@ -37,6 +37,10 @@ CONFIG = Path(os.environ.get("MERGE_CAPTAIN_CONFIG")
               or Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "agents/merge-captain.toml")
 STATE = Path(os.environ.get("MERGE_CAPTAIN_STATE")
              or Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "merge-captain")
+# Where agent-pace and agent-eval keep the assignment and outcome ledgers; spelled as they spell it, and read as
+# files, never imported, so an approval is checked against records this tool does not write.
+EVAL_STATE = Path(os.environ.get("AGENT_EVAL_STATE")
+                  or Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "agent-eval")
 PAUSED = STATE / "PAUSED"
 LOG = STATE / "log.jsonl"
 REVIEWS = STATE / "reviews.jsonl"
@@ -801,15 +805,44 @@ class Captain:
         if not self.gh(["pr", "comment", str(n), "--repo", repo, "--body-file", "-"], write=True, stdin=body).ok:
             raise Stop("error", "comment not posted")
 
+    @staticmethod
+    def by_id(rows):
+        return {r["id"]: r for r in rows if isinstance(r.get("id"), str)}
+
+    @staticmethod
+    def approval_trusted(row, tier, assignments, outcomes):
+        """An approval line counts only if the ledgers agree this captain ran that review: the assignment exists,
+        and its latest outcome is a completed review, at this tier or above, on the same lane, recorded through
+        `agent-eval record`. A line someone appended by hand has none of that behind it."""
+        aid, lane = row.get("assignment"), row.get("lane")
+        if not (isinstance(aid, str) and aid and isinstance(lane, str) and lane):
+            return False
+        a, o = assignments.get(aid), outcomes.get(aid)
+        if a is None or o is None or o.get("risk") not in TIERS:
+            return False
+        return (a.get("lane") == lane and a.get("class") == "review"
+                and o.get("lane") == lane and o.get("class") == "review"
+                and TIERS.index(o["risk"]) >= TIERS.index(tier)
+                and o.get("status") == "completed" and o.get("source") == "record")
+
     def review_on_record(self, repo, n, head, tier):
         """"approve", "changes" or None from this tool's own record. Nothing on the pull request is read:
-        the owner's login also authors every agent comment, so a comment proves nothing about who wrote it."""
-        verdicts = {row.get("verdict") for row in read_jsonl(REVIEWS)
-                    if row.get("repo") == repo and row.get("pr") == n and row.get("head") == head
-                    and row.get("tier") in TIERS and TIERS.index(row["tier"]) >= TIERS.index(tier)}
-        if "changes" in verdicts:
+        the owner's login also authors every agent comment, so a comment proves nothing about who wrote it.
+        A `changes` line blocks whether or not the ledgers back it, because a forged one can only stop a merge."""
+        rows = [row for row in read_jsonl(REVIEWS)
+                if row.get("repo") == repo and row.get("pr") == n and row.get("head") == head
+                and row.get("tier") in TIERS and TIERS.index(row["tier"]) >= TIERS.index(tier)]
+        if any(row.get("verdict") == "changes" for row in rows):
             return "changes"
-        return "approve" if "approve" in verdicts else None
+        approvals = [row for row in rows if row.get("verdict") == "approve"]
+        if not approvals:
+            return None
+        assignments = self.by_id(read_jsonl(EVAL_STATE / "assignments.jsonl"))
+        outcomes = self.by_id(read_jsonl(EVAL_STATE / "outcomes.jsonl"))
+        if any(self.approval_trusted(row, tier, assignments, outcomes) for row in approvals):
+            return "approve"
+        self.step("review", "approve on record not backed by the ledgers")
+        return None
 
     def past_deadline(self):
         if time.monotonic() - self.started < self.deadline_s:
@@ -828,9 +861,9 @@ class Captain:
         append_jsonl(ATTEMPTS, {"repo": repo, "pr": n, "head": head, "lane": lane, "kind": kind,
                                 "at": iso(self.now)})
 
-    def record_review(self, repo, n, head, tier, verdict, lane):
+    def record_review(self, repo, n, head, tier, verdict, lane, assignment):
         append_jsonl(REVIEWS, {"repo": repo, "pr": n, "head": head, "tier": tier, "verdict": verdict, "lane": lane,
-                               "at": iso(self.now)}, durable=True)
+                               "assignment": assignment, "at": iso(self.now)}, durable=True)
 
     def human_noted(self, repo, n, head, kind):
         return any(row.get("repo") == repo and row.get("pr") == n and row.get("head") == head
@@ -1039,6 +1072,7 @@ class Captain:
         r = run_cmd(args, timeout=TOOL_TIMEOUT_S, cwd=self.scratch)
         if not r.ok:
             log(f"agent-eval record failed for {aid}")
+        return r.ok
 
     def fetch_head(self, repo, n):
         j = self.gh_json(["pr", "view", str(n), "--repo", repo, "--json", "headRefOid,state,isDraft,labels"], "head")
@@ -1125,8 +1159,12 @@ class Captain:
                     raise
                 self.record_attempt(repo, n, head, lane, "comment-failed")
                 raise Stop("waiting", "comment-failed", lane) from None
-            self.record_eval(aid, tier, findings=len(findings), pr_url=f"https://github.com/{repo}/pull/{n}")
-            self.record_review(repo, n, head, tier, verdict, lane)
+            # The ledger entry is what makes the review line trustworthy later, so a review it did not take is
+            # not recorded and the head is reviewed again, at most MAX_FAILED_ATTEMPTS times.
+            if not self.record_eval(aid, tier, findings=len(findings), pr_url=f"https://github.com/{repo}/pull/{n}"):
+                self.record_attempt(repo, n, head, lane, "ledger-failed")
+                raise Stop("waiting", "ledger-unavailable", lane)
+            self.record_review(repo, n, head, tier, verdict, lane, aid)
             if verdict == "changes":
                 try:
                     self.ensure_labels(repo, ["agent-changes-requested"])
@@ -1298,8 +1336,14 @@ class Captain:
 # ── Commands ─────────────────────────────────────────────────────────────────
 
 def ensure_state():
+    """State holds the approvals a merge relies on, so only this user may read or write it."""
+    os.umask(0o077)
     try:
-        STATE.mkdir(parents=True, exist_ok=True)
+        STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(STATE, 0o700)
+        for entry in STATE.iterdir():
+            if not entry.is_symlink():
+                os.chmod(entry, 0o700 if entry.is_dir() else 0o600)
     except OSError as e:
         die(EXIT_FAIL, f"cannot create state directory {tilde(STATE)}: {e.strerror}", "Set MERGE_CAPTAIN_STATE")
 

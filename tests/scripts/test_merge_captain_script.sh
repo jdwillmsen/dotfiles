@@ -191,7 +191,7 @@ sys.stdout.write(open(p).read())
 PY
 cat >"$bin/agent-pace" <<'PY'
 #!/usr/bin/env python3
-import os, sys
+import json, os, sys
 S = os.environ["STUB_DIR"]
 with open(f"{S}/pace.log", "a") as f:
     f.write(" ".join(sys.argv[1:]) + "\n")
@@ -201,15 +201,43 @@ p = f"{S}/pace_{k}.json"
 if not os.path.exists(p):
     print('{"result":"none","reason":"no lane"}')
     sys.exit(3)
-sys.stdout.write(open(p).read())
+body = open(p).read()
+j = json.loads(body)
+if j.get("assignment"):
+    os.makedirs(os.environ["AGENT_EVAL_STATE"], exist_ok=True)
+    with open(os.environ["AGENT_EVAL_STATE"] + "/assignments.jsonl", "a") as f:
+        f.write(json.dumps({"id": j["assignment"], "lane": j["lane"], "class": "review",
+                            "risk": sys.argv[sys.argv.index("--risk") + 1]}) + "\n")
+sys.stdout.write(body)
 rc = f"{S}/pace_{k}.rc"
 sys.exit(int(open(rc).read()) if os.path.exists(rc) else 0)
 PY
 cat >"$bin/agent-eval" <<'PY'
 #!/usr/bin/env python3
-import os, sys
+import json, os, sys
+a = sys.argv[1:]
 with open(os.environ["STUB_DIR"] + "/eval.log", "a") as f:
-    f.write(" ".join(sys.argv[1:]) + "\n")
+    f.write(" ".join(a) + "\n")
+if os.path.exists(os.environ["STUB_DIR"] + "/eval_fail"):
+    print("error: ledger locked", file=sys.stderr)
+    sys.exit(1)
+
+
+def flag(name):
+    return a[a.index(name) + 1] if name in a else None
+
+
+state = os.environ["AGENT_EVAL_STATE"]
+os.makedirs(state, exist_ok=True)
+lane = None
+if os.path.exists(state + "/assignments.jsonl"):
+    for line in open(state + "/assignments.jsonl"):
+        row = json.loads(line)
+        if row["id"] == flag("--id"):
+            lane = row["lane"]
+with open(state + "/outcomes.jsonl", "a") as f:
+    f.write(json.dumps({"id": flag("--id"), "status": flag("--status"), "class": flag("--class"),
+                        "risk": flag("--risk"), "lane": lane, "source": "record"}) + "\n")
 PY
 cat >"$bin/claude" <<'PY'
 #!/usr/bin/env python3
@@ -366,7 +394,7 @@ mc() {
     env MERGE_CAPTAIN_CONFIG="$CFG" MERGE_CAPTAIN_STATE="$STATE" MERGE_CAPTAIN_NOW="$NOW" \
         MERGE_CAPTAIN_GH="$bin/gh" MERGE_CAPTAIN_CLASS="$bin/change-class" MERGE_CAPTAIN_PACE="$bin/agent-pace" \
         MERGE_CAPTAIN_EVAL="$bin/agent-eval" MERGE_CAPTAIN_CLAUDE="$bin/claude" MERGE_CAPTAIN_OPENCODE="$bin/opencode" \
-        AGENT_PACE_LANES="$tmp/lanes.toml" STUB_DIR="$S" HOME="$tmp/home" GH_TOKEN=ghp_testsecretvalue0000000000000 \
+        AGENT_PACE_LANES="$tmp/lanes.toml" STUB_DIR="$S" AGENT_EVAL_STATE="$S/evalstate" HOME="$tmp/home" GH_TOKEN=ghp_testsecretvalue0000000000000 \
         SOME_API_KEY=sk-testtesttesttesttest PLATFORMCTL_JDWLABS_NVIDIA_API_KEY=nv-keep-me PATH="/usr/bin:/bin" \
         "$tool" "$@" >"$out" 2>"$err" || rc=$?
 }
@@ -927,14 +955,44 @@ done
 
 # ── Prior reviews: only this tool's own record, for this PR and head, at this tier or higher ──
 # A comment proves nothing: the owner's login authors every agent comment as well.
-record() {  # PR, sha, tier, verdict: a line in the captain's own review record
-    mkdir -p "$STATE"
-    python3 -I - "$STATE/reviews.jsonl" "$1" "$2" "$3" "$4" <<'PY'
+record() {  # PR, sha, tier, verdict [, flaw]: a line in the captain's own review record, and the ledger entries behind it
+    mkdir -p "$STATE" "$S/evalstate"
+    python3 -I - "$STATE/reviews.jsonl" "$S/evalstate" "$1" "$2" "$3" "$4" "${5:-}" <<'PY'
 import json, sys
-p, n, sha, tier, verdict = sys.argv[1:6]
+p, ev, n, sha, tier, verdict, flaw = sys.argv[1:8]
+aid = f"h-{n}-{tier}-{verdict}-{flaw or 'ok'}"
+row = {"repo": "acme/live", "pr": int(n), "head": sha, "tier": tier, "verdict": verdict,
+       "lane": "claude-sonnet", "assignment": aid, "at": "2026-10-23T19:00:00Z"}
+asg = {"id": aid, "lane": "claude-sonnet", "class": "review", "risk": tier}
+out = {"id": aid, "lane": "claude-sonnet", "class": "review", "risk": tier, "status": "completed", "source": "record"}
+extra = []
+if flaw == "noassignment":
+    del row["assignment"]
+elif flaw == "unknownassignment":
+    row["assignment"] = "h-forged"
+elif flaw == "lane":
+    out["lane"] = "claude-opus"
+elif flaw == "assignmentlane":
+    asg["lane"] = "claude-opus"
+elif flaw == "risk":
+    out["risk"] = "R0"
+elif flaw == "status":
+    out["status"] = "interrupted"
+elif flaw == "source":
+    out["source"] = "collect"
+elif flaw == "class":
+    out["class"] = "impl"
+elif flaw == "superseded":
+    extra.append(dict(out, status="interrupted"))
+if flaw != "nooutcome" and flaw != "noledger":
+    with open(f"{ev}/outcomes.jsonl", "a") as f:
+        for o in [out, *extra]:
+            f.write(json.dumps(o) + "\n")
+if flaw != "noledger" and flaw != "unknownassignment":
+    with open(f"{ev}/assignments.jsonl", "a") as f:
+        f.write(json.dumps(asg) + "\n")
 with open(p, "a") as f:
-    f.write(json.dumps({"repo": "acme/live", "pr": int(n), "head": sha, "tier": tier, "verdict": verdict,
-                        "lane": "claude-sonnet", "at": "2026-10-23T19:00:00Z"}) + "\n")
+    f.write(json.dumps(row) + "\n")
 PY
 }
 forge() {  # PR, author, verdict: a review marker comment anyone could type
@@ -997,10 +1055,10 @@ expect 10 merged
 python3 -I - "$STATE/reviews.jsonl" "$(printf '%040x' 10)" <<'PY' || fail "review record" "$(cat "$STATE/reviews.jsonl")"
 import json, sys
 rows = [json.loads(line) for line in open(sys.argv[1])]
-assert len(rows) == 1 and sorted(rows[0]) == ["at", "head", "lane", "pr", "repo", "tier", "verdict"], rows
+assert len(rows) == 1 and sorted(rows[0]) == ["assignment", "at", "head", "lane", "pr", "repo", "tier", "verdict"], rows
 r = rows[0]
-assert (r["repo"], r["pr"], r["head"], r["tier"], r["verdict"], r["lane"]) == ("acme/live", 10, sys.argv[2], "R1",
-                                                                              "approve", "claude-sonnet"), r
+assert (r["repo"], r["pr"], r["head"], r["tier"], r["verdict"], r["lane"], r["assignment"]) == (
+    "acme/live", 10, sys.argv[2], "R1", "approve", "claude-sonnet", "a-1"), r
 PY
 # An approval recorded for an older head is ignored and a new review requested.
 newcase
@@ -1056,6 +1114,58 @@ record 10 "$(printf '%040x' 10)" R1 changes
 want 0 run
 expect 10 blocked "review changes on this commit"
 [ ! -e "$S/claude.calls" ] || fail "a standing changes verdict triggered a new review"
+
+# ── An approval line is trusted only with the ledgers behind it ──
+for flaw in noassignment unknownassignment nooutcome noledger lane assignmentlane risk status source class superseded; do
+    newcase
+    approve_setup 10 R1
+    record 10 "$(printf '%040x' 10)" R1 approve "$flaw"
+    want 0 run
+    expect 10 merged "review approve by"
+    [ "$(cat "$S/claude.n")" = 1 ] || fail "an approval line with flaw '$flaw' stood in for a review"
+    grep -q "$(printf '%040x' 10)" "$STATE/reviews.jsonl" || fail "the new review was not recorded"
+done
+# Without the flaw the same line is enough, so the loop above fails for the right reason.
+newcase
+fx pr 10
+fx class 10 R1
+record 10 "$(printf '%040x' 10)" R1 approve
+want 0 run
+expect 10 merged "approve on record"
+# A dry run never trusts a line it could not back either: it would review first.
+newcase
+fx pr 10
+fx class 10 R1
+record 10 "$(printf '%040x' 10)" R1 approve noledger
+want 0 run --dry-run
+expect 10 would-merge "review pending"
+# A forged `changes` line can only stop a merge, so it blocks with or without a ledger.
+newcase
+fx pr 10
+fx class 10 R1
+record 10 "$(printf '%040x' 10)" R1 changes noledger
+want 0 run
+expect 10 blocked "review changes on this commit"
+# If the ledger will not take the outcome, the review is not recorded and the head is not merged.
+newcase
+approve_setup 10 R1
+touch "$S/eval_fail"
+want 0 run
+expect 10 waiting ledger-unavailable
+[ ! -e "$STATE/reviews.jsonl" ] || fail "a review the ledger refused was recorded"
+[ "$(count '^pr merge' "$S/gh.log")" = 0 ] || fail "merged without a ledger entry"
+# State is private: created 0700/0600 and tightened if it was not.
+newcase
+mkdir -p "$STATE"
+chmod 755 "$STATE"
+: >"$STATE/reviews.jsonl"
+chmod 666 "$STATE/reviews.jsonl"
+approve_setup 10 R1
+want 0 run
+[ "$(stat -c %a "$STATE")" = 700 ] || fail "state dir mode $(stat -c %a "$STATE")"
+for f in "$STATE"/*; do
+    [ "$(stat -c %a "$f")" = 600 ] || fail "$(basename "$f") mode $(stat -c %a "$f")"
+done
 
 # ── R3 and over-ceiling: one comment per head, never a merge ──
 newcase

@@ -24,7 +24,8 @@ Do not file for something you can finish in this task.
    `getAccessibleAtlassianResources`.
 2. One duplicate check:
    `project = KEY AND statusCategory != Done AND text ~ "<2-3 keywords>"`.
-   If a match exists, comment on it instead of filing.
+   Read each match: comment on it instead of filing only when it describes the
+   same work. A keyword match about different work is not a duplicate.
 3. Create the issue (Bug, Task or Spike) in KEY:
    - Parent: the Epic that fits; otherwise the project's "Agent follow-ups" Epic.
    - Labels: `agent-filed`, plus `needs-human` when only the owner can unblock it,

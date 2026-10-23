@@ -52,7 +52,7 @@ EVAL_TIMEOUT_S = 30
 R2_REVIEWERS = ("claude-sonnet", "claude-opus")
 R3_REVIEWER = "claude-opus"
 TICKET = re.compile(r"[A-Z][A-Z0-9]*-[0-9]+")
-LANE_KEYS = ("id", "group", "provider", "model", "status", "share", "max_risk", "concurrency", "classes")
+LANE_KEYS = ("id", "group", "provider", "model", "family", "status", "share", "max_risk", "concurrency", "classes")
 
 USAGE_SHORT = "agent-pace [status | shares | assign | ladder] [--help]"
 

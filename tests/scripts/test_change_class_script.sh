@@ -728,7 +728,7 @@ new_repo "$anon"
 printf 'a\n' >"$anon/app.ts"
 commit_all "$anon" one
 run_in "$anon" 0 --rules "$rules"
-grep -qx 'warnings\[1\]: repo unknown, floors skipped' "$out" || fail "an unknown repo gave no warning" "$(cat "$out")"
+grep -qx 'warnings\[1\]: repo unknown, floors matched on directory name' "$out" || fail "an unknown repo gave no warning" "$(cat "$out")"
 grep -qx 'tier: R2' "$out" || fail "the directory name did not stand in for the repo" "$(cat "$out")"
 run_in "$anon" 0 --rules "$rules" --repo acme/app
 if grep -q '^warnings' "$out"; then fail "a named repo still warned"; fi
@@ -997,7 +997,7 @@ for target in docs/x.md tests/fixtures.env notes.txt; do
 done
 
 # shellcheck disable=SC2016  # the text is classified, never expanded
-for cmd in 'rm -fr --no-preserve-root /' 'rm -rf /tmpfoo/../' 'rm -rf /tmp/x/..'; do
+for cmd in 'rm -fr --no-preserve-root /' 'rm -rf /tmpfoo/../' 'rm -rf /tmp/x/..' 'git push origin main --force' 'git push -u origin main -f' 'git push origin +main'; do
     printf '%s\n' "$cmd" >"$destructive_repo/run.sh"
     got="$( cd "$destructive_repo" && "$cc" --rules "$rules" --base origin/main | sed -n 's/^tier: //p' )"
     [ "$got" = R3 ] || fail "destructive form '$cmd' classified $got, want R3"

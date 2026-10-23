@@ -1,0 +1,648 @@
+#!/usr/bin/env python3
+"""change-class — classify a change as risk R0–R3 from paths, content and plan.
+
+Reads the change-risk policy, matches file paths and changed lines plus any
+plan text, and prints the tier, tags, merge rule and the reasons that decided
+them. Calls no model itself. Agent-facing: stdout is TOON, diagnostics go to
+stderr.
+"""
+import argparse
+import json
+import re
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+VERSION = "1.0.0"
+EXIT_FAIL, EXIT_USAGE, EXIT_DENIED = 1, 2, 3
+TIERS = ("R0", "R1", "R2", "R3")
+TIER_INDEX = {t: i for i, t in enumerate(TIERS)}
+CONTENT_SCAN_CAP = 2 * 1024 * 1024
+
+# Fast path before any real work: harnesses probe --version constantly.
+if __name__ == "__main__" and len(sys.argv) == 2 and sys.argv[1] in ("-v", "-V", "--version"):
+    print(VERSION)
+    sys.exit(0)
+
+
+def fail(msg):
+    print(f"error: {msg}")
+    print("code: 1")
+    sys.exit(EXIT_FAIL)
+
+
+def usage_error(msg):
+    print(f"error: {msg}")
+    print("code: 2")
+    sys.exit(EXIT_USAGE)
+
+
+# ── TOON output ──────────────────────────────────────────────────────────────
+
+def toon_scalar(v):
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    s = str(v)
+    if s == "" or s != s.strip() or re.search(r'[,:"\\\n\[\]{}]', s) or s in ("true", "false", "null") \
+            or re.fullmatch(r"-?\d+(\.\d+)?", s):
+        return json.dumps(s, ensure_ascii=False)
+    return s
+
+
+def emit_result(result):
+    tags = result["tags"]
+    labels = result["labels"]
+    reasons = result["reasons"]
+    out = [
+        f"tier: {result['tier']}",
+        f"tags[{len(tags)}]: {','.join(tags)}" if tags else "tags[0]:",
+        f"merge: {result['merge']}",
+        f"reviewer: {result['reviewer']}",
+        f"human: {toon_scalar(result['human'])}",
+        f"interview: {toon_scalar(result['interview'])}",
+        f"labels[{len(labels)}]: {','.join(labels)}" if labels else "labels[0]:",
+        f"reasons[{len(reasons)}]{{rule,tier,where}}:",
+    ]
+    for row in reasons:
+        out.append("  " + ",".join(toon_scalar(row[k]) for k in ("rule", "tier", "where")))
+    out.append(f"files: {result['files']}")
+    out.append(f"lines: {result['lines']}")
+    if result.get("content_scanned") is False:
+        out.append("content_scanned: false")
+    print("\n".join(out))
+
+
+# ── Glob matching ────────────────────────────────────────────────────────────
+
+def _segment_regex(segment):
+    out = []
+    i = 0
+    while i < len(segment):
+        c = segment[i]
+        if c == "*":
+            out.append("[^/]*")
+        elif c == "?":
+            out.append("[^/]")
+        elif c == "[":
+            end = segment.find("]", i + 1)
+            if end == -1:
+                out.append(re.escape(c))
+            else:
+                cls = segment[i:end + 1]
+                if cls.startswith("[!"):
+                    cls = "[^" + cls[2:]
+                out.append(cls)
+                i = end
+        else:
+            out.append(re.escape(c))
+        i += 1
+    return "".join(out)
+
+
+def glob_regex(pattern):
+    pattern = pattern.replace("\\", "/")
+    parts = pattern.split("/")
+    while len(parts) > 1 and parts[0] == "":
+        parts.pop(0)
+    out = []
+    for i, part in enumerate(parts):
+        last = i == len(parts) - 1
+        if part == "**":
+            out.append(".*" if last else "(?:[^/]+/)*")
+        else:
+            out.append(_segment_regex(part))
+            if not last:
+                out.append("/")
+    try:
+        return re.compile("^" + "".join(out) + "$")
+    except re.error as e:
+        fail(f"invalid glob {pattern!r}: {e}")
+
+
+def glob_list(value, where):
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(p, str) for p in value):
+        fail(f"rules {where}: globs must be a list of strings")
+    return [glob_regex(p) for p in value]
+
+
+def regex_list(value, where):
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(p, str) for p in value):
+        fail(f"rules {where}: expressions must be a list of strings")
+    try:
+        return [re.compile(p) for p in value]
+    except re.error as e:
+        fail(f"rules {where}: invalid expression: {e}")
+
+
+def matches(patterns, path):
+    return any(p.match(path) for p in patterns)
+
+
+def normalize_path(path):
+    path = path.strip().replace("\\", "/")
+    while path.startswith("./"):
+        path = path[2:]
+    return path
+
+
+# ── Policy ───────────────────────────────────────────────────────────────────
+
+def _tier(value, where):
+    if value not in TIER_INDEX:
+        fail(f"rules {where}: tier {value!r} is not one of {', '.join(TIERS)}")
+    return value
+
+
+def _positive_int(value, where):
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        fail(f"rules {where}: must be a positive integer")
+    return value
+
+
+def load_policy(path):
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as e:
+        fail(f"cannot read rules {path}: {e.strerror}")
+    try:
+        data = tomllib.loads(raw)
+    except tomllib.TOMLDecodeError as e:
+        fail(f"rules {path} is not valid TOML: {e}")
+    if not isinstance(data, dict):
+        fail(f"rules {path} must hold a table")
+
+    tiers = data.get("tiers")
+    if not isinstance(tiers, dict):
+        fail(f"rules {path}: missing [tiers]")
+    clean_tiers = {}
+    for tier in TIERS:
+        entry = tiers.get(tier)
+        if not isinstance(entry, dict):
+            fail(f"rules {path}: missing [tiers.{tier}]")
+        for key in ("merge", "reviewer"):
+            if not isinstance(entry.get(key), str):
+                fail(f"rules {path}: [tiers.{tier}] needs a string {key}")
+        for key in ("human", "interview"):
+            if not isinstance(entry.get(key), bool):
+                fail(f"rules {path}: [tiers.{tier}] needs a boolean {key}")
+        clean_tiers[tier] = {
+            "merge": entry["merge"], "reviewer": entry["reviewer"],
+            "human": entry["human"], "interview": entry["interview"],
+        }
+
+    size = data.get("size")
+    if not isinstance(size, dict):
+        fail(f"rules {path}: missing [size]")
+    clean_size = {
+        "files": _positive_int(size.get("files"), f"{path}: [size].files"),
+        "lines": _positive_int(size.get("lines"), f"{path}: [size].lines"),
+        "cap": _tier(size.get("cap"), f"{path}: [size].cap"),
+    }
+
+    default = data.get("default")
+    if not isinstance(default, dict):
+        fail(f"rules {path}: missing [default]")
+    clean_default = {
+        "tier": _tier(default.get("tier"), f"{path}: [default].tier"),
+        "tag": default.get("tag"),
+    }
+    if not isinstance(clean_default["tag"], str):
+        fail(f"rules {path}: [default].tag must be a string")
+
+    floors = []
+    raw_floors = data.get("floor", [])
+    if not isinstance(raw_floors, list):
+        fail(f"rules {path}: [[floor]] must be a list of tables")
+    for i, floor in enumerate(raw_floors):
+        where = f"{path}: floor {i + 1}"
+        if not isinstance(floor, dict):
+            fail(f"rules {where}: must be a table")
+        if not isinstance(floor.get("repo"), str) or not floor["repo"]:
+            fail(f"rules {where}: repo must be a non-empty string")
+        if not isinstance(floor.get("tag"), str):
+            fail(f"rules {where}: tag must be a string")
+        floors.append({"repo": floor["repo"], "tier": _tier(floor.get("tier"), where),
+                       "tag": floor["tag"]})
+
+    rules = []
+    raw_rules = data.get("rule", [])
+    if not isinstance(raw_rules, list):
+        fail(f"rules {path}: [[rule]] must be a list of tables")
+    for i, rule in enumerate(raw_rules):
+        where = f"{path}: rule {i + 1}"
+        if not isinstance(rule, dict):
+            fail(f"rules {where}: must be a table")
+        rid = rule.get("id")
+        if not isinstance(rid, str) or not rid:
+            fail(f"rules {where}: id must be a non-empty string")
+        where = f"{path}: rule {rid}"
+        if not isinstance(rule.get("tag"), str):
+            fail(f"rules {where}: tag must be a string")
+        paths = glob_list(rule.get("paths"), where)
+        exclude = glob_list(rule.get("exclude"), where)
+        content = regex_list(rule.get("content"), where)
+        plan = regex_list(rule.get("plan"), where)
+        if not paths and not content and not plan:
+            fail(f"rules {where}: needs paths, content or plan")
+        rules.append({
+            "id": rid, "tier": _tier(rule.get("tier"), where), "tag": rule["tag"],
+            "paths": paths, "exclude": exclude, "content": content, "plan": plan,
+        })
+
+    return {"tiers": clean_tiers, "size": clean_size, "default": clean_default,
+            "floors": floors, "rules": rules}
+
+
+# ── Repository and diff inputs ───────────────────────────────────────────────
+
+def run(cmd, cwd=None):
+    try:
+        return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    except FileNotFoundError:
+        fail(f"{cmd[0]} is not installed")
+    except OSError as e:
+        fail(f"cannot run {cmd[0]}: {e}")
+
+
+def git(args, cwd=None):
+    return run(["git", *args], cwd)
+
+
+def repo_root():
+    r = git(["rev-parse", "--show-toplevel"])
+    return Path(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip() else None
+
+
+def repo_identity(explicit, root):
+    if explicit:
+        return explicit.strip().rstrip("/")
+    if root is None:
+        return ""
+    r = git(["remote", "get-url", "origin"], cwd=root)
+    if r.returncode != 0 or not r.stdout.strip():
+        return ""
+    url = r.stdout.strip()
+    while url.endswith("/"):
+        url = url[:-1]
+    if url.endswith(".git"):
+        url = url[:-4]
+    if url.startswith("file://"):
+        return url.rsplit("/", 1)[-1]
+    if url.startswith("git@") and ":" in url:
+        path = url.split(":", 1)[1]
+    elif "://" in url:
+        rest = url.split("://", 1)[1]
+        path = rest.split("/", 1)[1] if "/" in rest else rest
+    elif re.fullmatch(r"[^/]+/[^/]+", url):
+        return url
+    else:
+        return url.rsplit("/", 1)[-1]
+    return "/".join(path.split("/")[-2:]) if "/" in path else path
+
+
+def resolve_base(requested, root):
+    if requested:
+        r = git(["rev-parse", "--verify", f"{requested}^{{commit}}"], cwd=root)
+        if r.returncode != 0:
+            fail(f"cannot resolve base {requested!r}")
+        return requested
+    r = git(["merge-base", "HEAD", "origin/main"], cwd=root)
+    if r.returncode == 0 and r.stdout.strip():
+        return r.stdout.strip()
+    r = git(["rev-parse", "--verify", "HEAD~1^{commit}"], cwd=root)
+    if r.returncode == 0:
+        return "HEAD~1"
+    r = git(["rev-parse", "--verify", "HEAD^{commit}"], cwd=root)
+    return "HEAD" if r.returncode == 0 else None
+
+
+def diff_inputs(root, base):
+    name_only = git(["-c", "core.quotePath=false", "diff", "--name-only", base], cwd=root)
+    if name_only.returncode != 0:
+        fail(f"git diff failed: {name_only.stderr.strip()}")
+    paths = [normalize_path(p) for p in name_only.stdout.splitlines() if p.strip()]
+    paths = list(dict.fromkeys(paths))
+
+    numstat = git(["-c", "core.quotePath=false", "diff", "--numstat", base], cwd=root)
+    if numstat.returncode != 0:
+        fail(f"git diff --numstat failed: {numstat.stderr.strip()}")
+    lines = 0
+    for row in numstat.stdout.splitlines():
+        parts = row.split("\t", 2)
+        if len(parts) < 2:
+            continue
+        for value in parts[:2]:
+            if value.isdigit():
+                lines += int(value)
+
+    diff = git(["-c", "core.quotePath=false", "diff", "--unified=0", base], cwd=root)
+    if diff.returncode != 0:
+        fail(f"git diff failed: {diff.stderr.strip()}")
+    return paths, lines, diff.stdout
+
+
+def parse_unified(text):
+    paths = []
+    changed = {}
+    current = None
+    old = None
+    in_hunk = False
+    for line in text.splitlines():
+        if line.startswith("diff --git "):
+            m = re.match(r"diff --git a/(.*) b/(.*)$", line)
+            if m:
+                old, new = m.group(1), m.group(2)
+                current = new
+                if current not in paths:
+                    paths.append(current)
+                changed.setdefault(current, [])
+            in_hunk = False
+            continue
+        if line.startswith("--- "):
+            value = line[4:].strip()
+            if value != "/dev/null":
+                old = value[2:] if value.startswith("a/") else value
+            continue
+        if line.startswith("+++ "):
+            value = line[4:].strip()
+            if value == "/dev/null":
+                current = old
+            else:
+                current = value[2:] if value.startswith("b/") else value
+                if current not in paths:
+                    paths.append(current)
+                changed.setdefault(current, [])
+            in_hunk = False
+            continue
+        if line.startswith("@@ "):
+            in_hunk = True
+            continue
+        if in_hunk and current is not None and line.startswith("+"):
+            changed.setdefault(current, []).append(line[1:])
+        elif in_hunk and current is not None and line.startswith("-"):
+            changed.setdefault(current, []).append(line[1:])
+    return [normalize_path(p) for p in paths], changed
+
+
+def pr_inputs(number, repo):
+    cmd = ["gh", "pr", "diff", str(number)]
+    if repo:
+        cmd += ["--repo", repo]
+    r = run(cmd)
+    if r.returncode != 0:
+        detail = (r.stderr or r.stdout).strip()
+        fail(f"gh pr diff {number} failed: {detail}")
+    paths, changed = parse_unified(r.stdout)
+    lines = sum(len(v) for v in changed.values())
+    return paths, lines, r.stdout
+
+
+def read_paths(value):
+    if value == "-":
+        text = sys.stdin.read()
+    else:
+        try:
+            text = Path(value).read_text(encoding="utf-8")
+        except OSError as e:
+            fail(f"cannot read files {value}: {e.strerror}")
+    return list(dict.fromkeys(normalize_path(line) for line in text.splitlines() if line.strip()))
+
+
+def read_plan(value):
+    if value == "-":
+        return sys.stdin.read()
+    try:
+        return Path(value).read_text(encoding="utf-8")
+    except OSError as e:
+        fail(f"cannot read plan {value}: {e.strerror}")
+
+
+# ── Classification ───────────────────────────────────────────────────────────
+
+def _floor_matches(floor, full, bare):
+    return bool(full) and floor["repo"] in (full, bare)
+
+
+def classify(paths, lines, changed, plan_text, policy, repo, content_scanned, explain):
+    reasons = []
+    tags = set()
+    best = -1
+    all_docs_r0 = bool(paths)
+
+    path_rules = [r for r in policy["rules"] if r["paths"]]
+    content_rules = [r for r in policy["rules"] if r["content"]]
+    plan_rules = [r for r in policy["rules"] if r["plan"]]
+    content_skip = {}
+
+    for path in paths:
+        matched = [r for r in path_rules if matches(r["paths"], path) and not matches(r["exclude"], path)]
+        docs_r0 = any(r["tier"] == "R0" and r["tag"] == "docs" for r in matched)
+        if not docs_r0:
+            all_docs_r0 = False
+        content_skip[path] = any(r["tier"] == "R0" for r in matched)
+        if not matched:
+            default = policy["default"]
+            reasons.append({"rule": "default", "tier": default["tier"], "where": path,
+                            "tag": default["tag"]})
+            tags.add(default["tag"])
+            best = max(best, TIER_INDEX[default["tier"]])
+            continue
+        for rule in matched:
+            reasons.append({"rule": rule["id"], "tier": rule["tier"], "where": path,
+                            "tag": rule["tag"]})
+            tags.add(rule["tag"])
+            best = max(best, TIER_INDEX[rule["tier"]])
+
+    if changed is not None:
+        for rule in content_rules:
+            for path in paths:
+                if content_skip.get(path):
+                    continue
+                if matches(rule["exclude"], path):
+                    continue
+                if any(rx.search(line) for line in changed.get(path, []) for rx in rule["content"]):
+                    reasons.append({"rule": rule["id"], "tier": rule["tier"], "where": path,
+                                    "tag": rule["tag"]})
+                    tags.add(rule["tag"])
+                    best = max(best, TIER_INDEX[rule["tier"]])
+
+    if plan_text:
+        for rule in plan_rules:
+            if any(rx.search(plan_text) for rx in rule["plan"]):
+                reasons.append({"rule": rule["id"], "tier": rule["tier"], "where": "plan",
+                                "tag": rule["tag"]})
+                tags.add(rule["tag"])
+                best = max(best, TIER_INDEX[rule["tier"]])
+
+    base_tier = TIERS[best] if best >= 0 else "R0"
+
+    bare = repo.rsplit("/", 1)[-1] if repo else ""
+    floor_tier = None
+    if paths and not (all_docs_r0 and base_tier == "R0"):
+        for floor in policy["floors"]:
+            if not _floor_matches(floor, repo, bare):
+                continue
+            rule_name = f"{floor['tag']} floor" if floor["tag"] else "repo floor"
+            reasons.append({"rule": rule_name, "tier": floor["tier"],
+                            "where": f"repo {floor['repo']}", "tag": floor["tag"]})
+            tags.add(floor["tag"])
+            if floor_tier is None or TIER_INDEX[floor["tier"]] > TIER_INDEX[floor_tier]:
+                floor_tier = floor["tier"]
+
+    size = policy["size"]
+    final = TIER_INDEX[base_tier]
+    if floor_tier is not None:
+        final = max(final, TIER_INDEX[floor_tier])
+
+    if (len(paths) >= size["files"] or lines >= size["lines"]) \
+            and base_tier in ("R0", "R1") \
+            and TIER_INDEX[size["cap"]] > TIER_INDEX[base_tier]:
+        final = max(final, TIER_INDEX[size["cap"]])
+        reasons.append({"rule": "size", "tier": size["cap"],
+                        "where": f"{len(paths)} files, {lines} lines", "tag": None})
+
+    final_tier = TIERS[final]
+
+    seen = set()
+    kept = []
+    for row in reasons:
+        key = (row["rule"], row["tier"], row["where"])
+        if key in seen:
+            continue
+        seen.add(key)
+        kept.append(row)
+    deciding_tags = sorted({r["tag"] for r in kept
+                            if r["tier"] == final_tier and r["tag"]})
+    if not explain:
+        kept = [r for r in kept if r["tier"] == final_tier]
+    kept.sort(key=lambda r: (-TIER_INDEX[r["tier"]], r["rule"], r["where"]))
+
+    ordered_tags = sorted(tags)
+    info = policy["tiers"][final_tier]
+    return {
+        "tier": final_tier,
+        "tags": ordered_tags,
+        "merge": info["merge"],
+        "reviewer": info["reviewer"],
+        "human": info["human"],
+        "interview": info["interview"],
+        "labels": [f"risk/{final_tier}"] + [f"tag/{t}" for t in deciding_tags],
+        "reasons": kept,
+        "files": len(paths),
+        "lines": lines,
+        "content_scanned": content_scanned,
+    }
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        usage_error(message)
+
+
+def default_rules():
+    return Path.home() / ".config" / "agents" / "change-risk.toml"
+
+
+def build_parser():
+    p = Parser(prog="change-class",
+               description="classify a change as risk R0-R3 from paths, changed lines and plan text",
+               formatter_class=argparse.RawDescriptionHelpFormatter,
+               epilog="examples:\n"
+                      "  change-class                          diff HEAD against merge-base origin/main\n"
+                      "  change-class --pr 42 --repo o/r       classify a pull request's diff\n"
+                      "  change-class --files -                paths on stdin, no content rules\n"
+                      "  change-class --plan -                 plan text on stdin\n"
+                      "  change-class --fail-at R3             exit 3 when the tier is R3")
+    p.add_argument("--rules", metavar="FILE", help="policy file (default ~/.config/agents/change-risk.toml)")
+    p.add_argument("--base", metavar="REF", help="diff against another base")
+    p.add_argument("--pr", type=int, metavar="N", help="use gh pr diff for that pull request")
+    p.add_argument("--repo", metavar="O/R", help="repository name for floors and gh")
+    p.add_argument("--files", metavar="FILE|-", help="newline-separated paths, '-' for stdin")
+    p.add_argument("--plan", action="append", default=[], metavar="FILE|-",
+                   help="plan, ticket or PR text; '-' for stdin")
+    p.add_argument("--fail-at", choices=TIERS, metavar="R0..R3",
+                   help="exit 3 when the tier is at or above this")
+    p.add_argument("--explain", action="store_true", help="show every matched rule")
+    p.add_argument("--version", action="version", version=VERSION)
+    return p
+
+
+def main(argv):
+    args = build_parser().parse_args(argv)
+
+    if args.files is not None and args.pr is not None:
+        usage_error("--files and --pr cannot be combined")
+    if args.base and (args.files is not None or args.pr is not None):
+        usage_error("--base is only for diff mode")
+    if args.files == "-" and "-" in args.plan:
+        usage_error("stdin cannot be both --files - and --plan -")
+
+    rules_path = Path(args.rules).expanduser() if args.rules else default_rules()
+    policy = load_policy(rules_path)
+
+    plan_text = "\n".join(read_plan(p) for p in args.plan)
+    root = repo_root()
+    repo = repo_identity(args.repo, root)
+
+    content_scanned = None
+    if args.files is not None:
+        paths = read_paths(args.files)
+        lines = 0
+        changed = None
+        content_scanned = False
+    elif args.pr is not None:
+        paths, lines, pr_diff = pr_inputs(args.pr, args.repo)
+        if len(pr_diff.encode("utf-8", "replace")) > CONTENT_SCAN_CAP:
+            changed = None
+            content_scanned = False
+        else:
+            parsed_paths, changed = parse_unified(pr_diff)
+            known = set(paths)
+            paths += [p for p in parsed_paths if p not in known]
+            content_scanned = True
+    else:
+        if root is None:
+            if args.plan:
+                paths, lines, changed, content_scanned = [], 0, None, None
+            else:
+                fail("not a git repository")
+        else:
+            head = git(["rev-parse", "--verify", "HEAD^{commit}"], cwd=root)
+            if head.returncode != 0:
+                paths, lines, diff_text = [], 0, ""
+            else:
+                base = resolve_base(args.base, root)
+                if base is None:
+                    paths, lines, diff_text = [], 0, ""
+                else:
+                    paths, lines, diff_text = diff_inputs(root, base)
+            if len(diff_text.encode("utf-8", "replace")) > CONTENT_SCAN_CAP:
+                changed = None
+                content_scanned = False
+            else:
+                parsed_paths, changed = parse_unified(diff_text)
+                known = set(paths)
+                paths += [p for p in parsed_paths if p not in known]
+                content_scanned = True
+
+    result = classify(paths, lines, changed, plan_text, policy, repo, content_scanned, args.explain)
+    emit_result(result)
+
+    if args.fail_at and TIER_INDEX[result["tier"]] >= TIER_INDEX[args.fail_at]:
+        return EXIT_DENIED
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

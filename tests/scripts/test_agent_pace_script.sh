@@ -515,6 +515,23 @@ AGENT_PACE_LANES="$only_anthropic" run 3 assign --class review --risk R1 --imple
 check "j['result'] == 'none' and j['reason']" "R1 review fell back to the implementer's family"
 AGENT_PACE_LANES="$only_anthropic" run 0 assign --class impl --risk R1 --implementer claude-sonnet --no-log --json
 check "j['review_lane'] is None" "R1 review_lane fell back to the implementer's family"
+# --allow-same-family lifts only the R1 family rule: the implementer's own lane stays out.
+AGENT_PACE_LANES="$only_anthropic" run 0 assign --class review --risk R1 --implementer claude-sonnet --allow-same-family \
+    --no-log --json
+check "j['result'] == 'assigned' and j['lane'] == 'claude-opus'" "--allow-same-family did not reach the other same-family lane"
+AGENT_PACE_LANES="$only_anthropic" run 0 assign --class review --risk R1 --allow-same-family --no-log --json
+check "j['result'] == 'assigned'" "--allow-same-family without an implementer"
+AGENT_PACE_LANES="$only_anthropic" run 3 assign --class review --risk R1 --implementer claude-sonnet \
+    --exclude claude-opus --allow-same-family --no-log --json
+check "j['result'] == 'none'" "--allow-same-family overrode --exclude"
+run 3 assign --class review --risk R3 --implementer claude-opus --allow-same-family --no-log --json
+check "j['result'] == 'none' and j['reason'] == 'no independent R3 reviewer'" "--allow-same-family relaxed the R3 rule"
+for s in 1 2 3 4 5 6; do
+    run 0 assign --class review --risk R2 --implementer claude-sonnet --allow-same-family --seed "af$s" --no-log --json
+    check "j['lane'] == 'claude-opus'" "--allow-same-family relaxed the R2 rule (implementer reviewed itself)"
+    run 0 assign --class review --risk R2 --implementer claude-opus --allow-same-family --seed "af$s" --no-log --json
+    check "j['lane'] == 'claude-sonnet'" "--allow-same-family relaxed the R2 rule"
+done
 
 # ── Evidence: ladder order, factor, floor ──
 weights '{"lanes": {

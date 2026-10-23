@@ -33,6 +33,7 @@ stdout is TOON (JSON or Markdown where a flag says so), diagnostics go to stderr
 import argparse
 import datetime as dt
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -61,6 +62,9 @@ LANES_PATH = Path(os.environ.get("AGENT_EVAL_LANES",
                                  Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "agents/lanes.toml"))
 T3_DB = Path(os.environ.get("AGENT_EVAL_T3_DB", HOME / ".t3/userdata/statev2.sqlite"))
 GH = os.environ.get("AGENT_EVAL_GH", "gh")
+STREAMS_PATH = Path(os.environ.get("AGENT_EVAL_STREAMS",
+                                   Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "streams.json"))
+T3_TIMEOUT_S = float(os.environ.get("AGENT_EVAL_T3_TIMEOUT_S", "10"))
 
 USAGE_SHORT = "agent-eval {record|collect|enrich|scoreboard|weights|verdicts|report} [--help]"
 
@@ -75,6 +79,7 @@ FAILURE_KINDS = ("none", "infra", "quota", "timeout", "quality")
 WINDOWS = ("daily", "weekly", "biweekly", "monthly")
 NOTE_MAX = 200
 GH_TIMEOUT_S = 60
+SINCE_MAX_DAYS = 3650
 # Only for keys lanes.toml leaves out; the file's values always win.
 EVAL_DEFAULTS = {"prior_weight": 6, "min_samples": 8, "explore_fraction": 0.15, "cooldown_failures": 3,
                  "cooldown_hours": 2, "keep_lb": 0.60, "probation_lb": 0.40, "promote_lb": 0.75,
@@ -88,6 +93,17 @@ WORK_RE = re.compile(r"\bgit\b[^|;&\n]*\bcommit\b|\bgh\s+pr\s+create\b")
 TICKET_RE = re.compile(r"\b[A-Z][A-Z0-9]*-[0-9]+\b")
 RETRY_RE = re.compile(r"-r([0-9]+)$")
 LANE_ID_RE = re.compile(r"[A-Za-z0-9:_./-]{1,100}")
+TICKET_ARG_RE = re.compile(r"[A-Z][A-Z0-9]+-[0-9]+")
+PR_URL_RE = re.compile(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+")
+OWNER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}")
+# A note is free text an agent typed; these are the shapes a pasted credential takes.
+SECRET_RES = (
+    re.compile(r"(?i)\b[a-z0-9_-]*(?:token|secret|passw(?:or)?d|pwd|api[_-]?key|credential)[a-z0-9_-]*"
+               r"\s*[=:]\s*(?:\"[^\"]*\"|'[^']*'|\S+)"),
+    re.compile(r"(?i)\bbearer\s+\S+"),
+    re.compile(r"\b(?:gh[pousr]_|github_pat_|sk-|xox[abprs]-|AKIA)[A-Za-z0-9_-]{8,}"),
+    re.compile(r"[A-Za-z0-9+/_]{32,}={0,2}"),
+)
 # First match wins; the more specific shapes sit above the broad ones.
 CLASS_RULES = (
     ("review-fix", re.compile(r"review[- ]?fix|\bfix\b.*\b(review|finding|comment|thread|coderabbit)|"
@@ -252,13 +268,14 @@ def ledger_path(name):
     return STATE / name
 
 
-def read_jsonl(name):
+def scan_jsonl(name):
+    """(rows, unreadable line count) for one ledger."""
     path = ledger_path(name)
     rows = []
     try:
         fh = open(path, encoding="utf-8")
     except FileNotFoundError:
-        return rows
+        return rows, 0
     except OSError as e:
         die(EXIT_FAIL, f"cannot read {tilde(path)}: {e.strerror}")
     bad = 0
@@ -276,9 +293,20 @@ def read_jsonl(name):
                 rows.append(obj)
             else:
                 bad += 1
+    return rows, bad
+
+
+def read_jsonl(name):
+    rows, bad = scan_jsonl(name)
     if bad:
-        log(f"{tilde(path)}: skipped {bad} unreadable line(s)")
+        log(f"{tilde(ledger_path(name))}: skipped {bad} unreadable line(s)")
     return rows
+
+
+def skipped_lines():
+    """Unreadable lines over both ledgers, so a damaged file never reads as a
+    quiet window."""
+    return sum(scan_jsonl(n)[1] for n in ("outcomes.jsonl", "assignments.jsonl"))
 
 
 def latest_by_id(rows):
@@ -336,6 +364,11 @@ def unavailable(o):
     return o.get("failure_kind") in UNAVAILABLE
 
 
+def judged_out(o):
+    """Availability failures and interrupted runs say nothing about quality."""
+    return not unavailable(o) and o.get("status") != "interrupted"
+
+
 def is_success(o):
     return (o.get("status") == "completed" and o.get("failure_kind", "none") == "none"
             and o.get("reverted") is not True and o.get("ci_first_pass") is not False
@@ -344,13 +377,14 @@ def is_success(o):
 
 def stats(outs, prior):
     """Numbers for one group of outcomes. Unknown (null) fields count for
-    nothing against a lane, and availability failures stay out of quality."""
+    nothing against a lane, and availability failures and interrupted runs
+    stay out of quality."""
     ev = load_lanes()["eval"]
-    judged = [o for o in outs if not unavailable(o)]
+    judged = [o for o in outs if judged_out(o)]
     succ = sum(1 for o in judged if is_success(o))
     n = len(judged)
     attempts = len(outs)
-    durations = [o["duration_s"] for o in outs if isinstance(o.get("duration_s"), (int, float))]
+    durations = [max(0, o["duration_s"]) for o in outs if isinstance(o.get("duration_s"), (int, float))]
     pw = ev["prior_weight"]
     return {
         "attempts": attempts,
@@ -441,7 +475,7 @@ def verdict_rows(outs, at):
         advise = None
         spec = lanes.get(lane)
         if spec and spec.get("max_risk") == "R1":
-            r1 = [o for o in by_lane[lane] if o.get("risk") == "R1" and not unavailable(o)]
+            r1 = [o for o in by_lane[lane] if o.get("risk") == "R1" and judged_out(o)]
             r1_ok = sum(1 for o in r1 if is_success(o))
             if len(r1) >= ev["promote_min_n"] and wilson_lb(r1_ok, len(r1)) >= ev["promote_lb"]:
                 advise = "allow R2"
@@ -461,10 +495,28 @@ def tri(s):
     raise argparse.ArgumentTypeError(f"expected true or false, got {s!r}")
 
 
+def redact_note(note):
+    for rx in SECRET_RES:
+        note = rx.sub("[redacted]", note)
+    # Redact before capping: a cut could otherwise leave the front of a credential behind.
+    return note[:NOTE_MAX]
+
+
+def validate_record_args(args):
+    if args.ticket is not None and not TICKET_ARG_RE.fullmatch(args.ticket):
+        usage_error(f"invalid ticket {args.ticket!r}", "Ticket keys look like JDW-123")
+    if args.pr is not None and not PR_URL_RE.fullmatch(args.pr):
+        usage_error(f"invalid pull request URL {args.pr!r}", "Use https://github.com/<owner>/<repo>/pull/<number>")
+
+
 def cmd_record(args):
     cfg = load_lanes()
+    validate_record_args(args)
     outcomes = read_outcomes()
     existing = outcomes.get(args.id)
+    if existing is None and args.status is None:
+        usage_error(f"--status is required for a new outcome ({args.id})",
+                    f"Pass --status {{{','.join(STATUSES)}}}")
     assignment = read_assignments().get(args.id)
     t = now()
     if existing:
@@ -486,6 +538,8 @@ def cmd_record(args):
         spec = cfg["lanes"].get(args.lane)
         rec.update(lane=args.lane, provider=spec.get("provider") if spec else None,
                    model=spec.get("model") if spec else None)
+        # A lane chosen by hand must outlive the next collect, which would re-derive it from T3.
+        rec["source"] = "record"
     if args.cls:
         if cfg["classes"] and args.cls not in cfg["classes"]:
             usage_error(f"unknown class {args.cls!r}", f"Classes: {','.join(cfg['classes'])}")
@@ -509,8 +563,10 @@ def cmd_record(args):
         val = getattr(args, flag)
         if val is not None:
             rec[field] = val
+    if rec.get("duration_s") is not None:
+        rec["duration_s"] = max(0, rec["duration_s"])
     if args.note is not None:
-        rec["note"] = args.note[:NOTE_MAX]
+        rec["note"] = redact_note(args.note)
     if verdict_given:
         # An explicit verdict outranks what collect infers from T3 history.
         rec["source"] = "record"
@@ -529,7 +585,7 @@ def open_t3():
         die(EXIT_FAIL, f"T3 database not found at {tilde(T3_DB)}", "Set AGENT_EVAL_T3_DB if T3 keeps it elsewhere")
     uri = f"file:{T3_DB}?mode=ro"
     try:
-        conn = sqlite3.connect(uri, uri=True, timeout=10)
+        conn = sqlite3.connect(uri, uri=True, timeout=T3_TIMEOUT_S)
         conn.execute("select 1 from sqlite_master limit 1").fetchall()
         return conn, None
     except sqlite3.Error:
@@ -577,12 +633,20 @@ def failure_kind_for(status, error_text, did_work):
     return "quality" if did_work else "infra"
 
 
+def t3_id(thread_id):
+    """Ledger id for a collected thread. The thread id ends in a slug of the
+    free-text task title, so it is hashed rather than stored."""
+    return "t3:" + hashlib.sha256(thread_id.encode()).hexdigest()[:16]
+
+
 def t3_outcomes(conn, cutoff):
-    """Outcome records for every finished delegated task newer than `cutoff`."""
+    """(outcome records, running count, legacy ids) for every finished
+    delegated task newer than `cutoff`. Early collects stored `t3:<thread id>`;
+    the legacy map lets those rows be found again by thread."""
     conn.row_factory = sqlite3.Row
     threads = conn.execute("select thread_id, title from orchestration_v2_projection_threads "
                            "where thread_id like '%delegate-task%'").fetchall()
-    out, running = [], 0
+    out, running, legacy = [], 0, {}
     for th in threads:
         tid = th["thread_id"]
         run = conn.execute("select * from orchestration_v2_projection_runs where thread_id=? "
@@ -628,14 +692,15 @@ def t3_outcomes(conn, cutoff):
         slug = re.split(r"delegate-task(?:%3A|:)", tid)[-1]
         retry = RETRY_RE.search(tid)
         ticket = TICKET_RE.search(title)
-        rec = blank_outcome(f"t3:{tid}")
+        rec = blank_outcome(t3_id(tid))
+        legacy[rec["id"]] = f"t3:{tid}"
         rec.update(at=iso(end), lane=lane_for(provider, model), provider=provider, model=model,
                    status=status, failure_kind=failure_kind_for(status, " ".join(errors), did_work),
-                   duration_s=round((end - start).total_seconds()) if start else None, items=items,
+                   duration_s=max(0, round((end - start).total_seconds())) if start else None, items=items,
                    attempt=int(retry.group(1)) if retry else 1, ticket=ticket.group(0) if ticket else None,
                    source="t3", **{"class": classify_class(title, slug), "class_source": "heuristic"})
         out.append(rec)
-    return out, running
+    return out, running, legacy
 
 
 COLLECT_OWNED = ("at", "lane", "provider", "model", "status", "failure_kind", "duration_s", "items", "attempt")
@@ -663,7 +728,7 @@ def cmd_collect(args):
     conn, tmp = open_t3()
     try:
         try:
-            found, running = t3_outcomes(conn, cutoff)
+            found, running, legacy = t3_outcomes(conn, cutoff)
         except sqlite3.Error as e:
             die(EXIT_FAIL, f"unexpected T3 schema: {e}", "The table and column facts are at the top of agent-eval")
     finally:
@@ -673,7 +738,7 @@ def cmd_collect(args):
     existing = read_outcomes()
     new_rows, added, updated, unchanged = [], 0, 0, 0
     for rec in found:
-        old = existing.get(rec["id"])
+        old = existing.get(rec["id"]) or existing.get(legacy[rec["id"]])
         if old is None:
             new_rows.append(rec)
             added += 1
@@ -694,8 +759,28 @@ def cmd_collect(args):
 
 # ── enrich ───────────────────────────────────────────────────────────────────
 
-def gh_search(key, merged):
-    cmd = [GH, "search", "prs", "--match", "title,body", "--limit", "50", "--json", "number,title,url,state"]
+def load_owners():
+    """Owners from the streams map. Searches are scoped to them: an unscoped
+    search would match the same ticket key in strangers' repositories."""
+    try:
+        with open(STREAMS_PATH, "rb") as f:
+            data = json.load(f)
+    except OSError as e:
+        die(EXIT_FAIL, f"cannot read {tilde(STREAMS_PATH)}: {e.strerror}",
+            "Run `chezmoi apply` to deploy the streams map, or set AGENT_EVAL_STREAMS")
+    except ValueError as e:
+        die(EXIT_FAIL, f"{tilde(STREAMS_PATH)} is not valid JSON: {e}")
+    streams = data.get("streams") if isinstance(data, dict) else None
+    owners = list(streams) if isinstance(streams, dict) else []
+    if not owners or not all(OWNER_RE.fullmatch(o) for o in owners):
+        die(EXIT_FAIL, f"{tilde(STREAMS_PATH)} has no usable stream owners",
+            "Expected {\"streams\": {\"<github owner>\": {...}}}")
+    return owners
+
+
+def gh_search(key, merged, owner):
+    cmd = [GH, "search", "prs", "--owner", owner, "--match", "title,body", "--limit", "50",
+           "--json", "number,title,url,state"]
     if merged:
         cmd.append("--merged")
     cmd += ["--", key]
@@ -716,7 +801,33 @@ def is_revert(pr):
     return bool(re.match(r"\s*revert\b", str(pr.get("title") or ""), re.I))
 
 
+def unique_prs(prs):
+    seen, out = set(), []
+    for p in prs:
+        if p.get("url") not in seen:
+            seen.add(p.get("url"))
+            out.append(p)
+    return out
+
+
+def newest(outs):
+    return max(outs, key=lambda o: (o.get("at") or "", o["id"]))
+
+
+def enrich_targets(group, found):
+    """The one attempt a ticket's pull request outcome belongs to: the attempt
+    already tied to a found PR, else the newest completed one. Other attempts
+    of the ticket (abandoned lanes, retries) never merged anything."""
+    urls = {p.get("url") for p in found}
+    known = [o for o in group if o.get("pr") in urls]
+    if known:
+        return [newest(known)]
+    done = [o for o in group if o.get("status") == "completed"]
+    return [newest(done)] if done else []
+
+
 def cmd_enrich(args):
+    owners = load_owners()
     cutoff = now() - dt.timedelta(days=args.since)
     outs = [o for o in read_outcomes().values()
             if o.get("ticket") and (parse_ts(o.get("at")) or cutoff) >= cutoff]
@@ -726,8 +837,8 @@ def cmd_enrich(args):
     updates, errors = [], 0
     for key, group in sorted(by_ticket.items()):
         try:
-            everything = gh_search(key, False)
-            merged_prs = gh_search(key, True)
+            everything = unique_prs([p for owner in owners for p in gh_search(key, False, owner)])
+            merged_prs = unique_prs([p for owner in owners for p in gh_search(key, True, owner)])
         except RuntimeError as e:
             log(f"{key}: {e}")
             errors += 1
@@ -735,20 +846,28 @@ def cmd_enrich(args):
         landed = [p for p in merged_prs if not is_revert(p)]
         reverts = [p for p in merged_prs if is_revert(p)]
         work = [p for p in everything if not is_revert(p)]
-        for o in group:
+        for o in enrich_targets(group, everything):
             new = dict(o)
-            if landed:
-                new["merged"] = True
-                new["reverted"] = bool(reverts)
-            elif work and not any(p.get("state") == "open" for p in work):
-                new["merged"] = False
-            if not new.get("pr") and work:
-                new["pr"] = (landed or work)[0].get("url")
+            own = next((p for p in work if p.get("url") == o.get("pr")), None)
+            if own:
+                if any(p.get("url") == own["url"] for p in landed):
+                    new["merged"] = True
+                    new["reverted"] = bool(reverts)
+                elif own.get("state") != "open":
+                    new["merged"] = False
+            else:
+                if landed:
+                    new["merged"] = True
+                    new["reverted"] = bool(reverts)
+                elif work and not any(p.get("state") == "open" for p in work):
+                    new["merged"] = False
+                if not new.get("pr") and work:
+                    new["pr"] = (landed or work)[0].get("url")
             if new != o:
                 updates.append(new)
     append_jsonl("outcomes.jsonl", updates)
-    emit({"tickets": len(by_ticket), "outcomes_checked": len(outs), "updated": len(updates), "errors": errors,
-          "since_days": args.since})
+    emit({"owners": len(owners), "tickets": len(by_ticket), "outcomes_checked": len(outs), "updated": len(updates),
+          "errors": errors, "since_days": args.since})
     return EXIT_FAIL if by_ticket and errors == len(by_ticket) else 0
 
 
@@ -766,8 +885,11 @@ def window_outcomes(days, lane=None, cls=None):
 
 def cmd_scoreboard(args):
     load_lanes()
-    outs, t = window_outcomes(args.since, args.lane, args.cls)
-    lane_outs = group_by_lane(outs)
+    every, t = window_outcomes(args.since, args.lane)
+    skipped = skipped_lines()
+    # Cooldown is a property of the lane, so a class filter must not hide its failures.
+    lane_outs = group_by_lane(every)
+    outs = [o for o in every if not args.cls or o.get("class") == args.cls]
     rows = []
     for (lane, cls), group in sorted(by_lane_class(outs).items()):
         st = stats(group, lane_prior(lane))
@@ -777,20 +899,21 @@ def cmd_scoreboard(args):
                      "availability": st["availability"], "infra_rate": st["infra_rate"],
                      "median_s": st["median_s"], "cooldown_until": iso(cd) if cd else None})
     if args.json:
-        emit_json({"since_days": args.since, "rows": rows})
+        emit_json({"since_days": args.since, "skipped_lines": skipped, "rows": rows})
     else:
-        emit_rows("scoreboard", rows, {"since_days": args.since})
+        emit_rows("scoreboard", rows, {"since_days": args.since, "skipped_lines": skipped})
     return 0
 
 
 def weights_table(cls=None):
-    outs, t = window_outcomes(DEFAULT_DAYS, None, cls)
-    lane_outs = group_by_lane(outs)
+    every, t = window_outcomes(DEFAULT_DAYS)
+    lane_outs = group_by_lane(every)
+    outs = [o for o in every if not cls or o.get("class") == cls]
     lanes = {}
     for (lane, c), group in sorted(by_lane_class(outs).items()):
         st = stats(group, lane_prior(lane))
         cd = cooldown_until(lane_outs[lane], t)
-        lanes.setdefault(lane, {})[c] = {"n": st["n"], "quality_mean": st["quality_mean"],
+        lanes.setdefault(lane, {})[c] = {"n": st["n"], "success": st["success"], "quality_mean": st["quality_mean"],
                                          "quality_lb": st["quality_lb"], "infra_rate": st["infra_rate"],
                                          "median_s": st["median_s"], "cooldown_until": iso(cd) if cd else None}
     return {"lanes": lanes}
@@ -917,7 +1040,7 @@ def build_report(window, end):
     empty_ledger = not assigns and not outs
     cur = window_block(s, e, assigns, outs, outs)
     prev = window_block(ps, pe, assigns, outs, outs)
-    rep = {"window": window, "empty": empty_ledger, **cur, "previous": prev}
+    rep = {"window": window, "empty": empty_ledger, "skipped_lines": skipped_lines(), **cur, "previous": prev}
     rep["observations"] = observations(cur, prev, empty_ledger)
     return rep
 
@@ -937,6 +1060,8 @@ def md_table(headers, rows):
 def render_md(rep):
     cur, prev = rep, rep["previous"]
     lines = [f"## Models — {rep['window']} {rep['start']} to {rep['end']}", ""]
+    if rep["skipped_lines"]:
+        lines += [f"Partial: {rep['skipped_lines']} unreadable ledger lines.", ""]
     if rep["empty"]:
         lines += ["The evaluation ledger is empty: no dispatches or outcomes recorded yet.", ""]
         return "\n".join(lines)
@@ -1009,8 +1134,19 @@ class Parser(argparse.ArgumentParser):
         usage_error(message, f"Run `{self.prog} --help`")
 
 
+def since_days(s):
+    try:
+        v = int(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a whole number of days, got {s!r}")
+    if not 1 <= v <= SINCE_MAX_DAYS:
+        raise argparse.ArgumentTypeError(f"days must be between 1 and {SINCE_MAX_DAYS}, got {v}")
+    return v
+
+
 def days_arg(default):
-    return {"type": int, "default": default, "metavar": "DAYS", "help": f"look back this many days (default {default})"}
+    return {"type": since_days, "default": default, "metavar": "DAYS",
+            "help": f"look back 1 to {SINCE_MAX_DAYS} days (default {default})"}
 
 
 def build_parser():

@@ -193,8 +193,9 @@ JSON lines, one object per line, no prompt or code text.
 `class`, `risk`, `ticket` (or null), `pace` (used, line, multiplier),
 `implementer` (for reviews).
 
-`outcomes.jsonl`: `id` (assignment id, or `t3:<threadId>` for collected
-history), `at`, `lane`, `provider`, `model`, `class` and `class_source`
+`outcomes.jsonl`: `id` (assignment id, or `t3:<hash of the thread id>` for
+collected history; early collects wrote `t3:<threadId>`, which stays readable
+and is matched by thread, never duplicated), `at`, `lane`, `provider`, `model`, `class` and `class_source`
 (`assigned`, `heuristic`), `risk`, `ticket`, `status` (`completed`, `failed`,
 `interrupted`), `failure_kind` (`none`, `infra`, `quota`, `timeout`,
 `quality`), `duration_s`, `items`, `attempt` (1 for a first try),
@@ -222,14 +223,15 @@ agent-eval report --window daily|weekly|biweekly|monthly [--end YYYY-MM-DD] [--f
 Definitions:
 
 - A judged outcome is one with `failure_kind` other than `infra`, `quota` and
-  `timeout`: those are availability, not capability.
+  `timeout` (availability, not capability) and a status other than
+  `interrupted` (stopped, not graded). Interrupted runs still count as attempts.
 - Quality success = completed and not reverted and, when known,
   `ci_first_pass` is true and `human_touch` is not true. Unknown fields do not
   count against a lane. The quality score is success / judged, with the Wilson
   lower bound for ranking (`z = 1.96`).
 - Availability = completed / all attempts; `infra_rate` = infra, quota and
   timeout failures / all attempts.
-- Cooldown: the last `cooldown_failures` attempts of a lane are all
+- Cooldown is per lane, across all classes: the last `cooldown_failures` attempts of a lane are all
   infrastructure failures → cooldown until the newest of them plus
   `cooldown_hours`.
 - Verdict per lane and class with n ≥ `min_samples`: `keep` if the lower bound
@@ -247,6 +249,18 @@ Definitions:
   `timed out`, `timeout` → `timeout`; `410`, `context` → `infra`; anything
   else on a failed run → `quality` only if a commit or PR exists, else
   `infra`.
+- `record` needs `--status` for an id that has no row yet. `--ticket` must
+  look like `JDW-123`, `--pr` like `https://github.com/<owner>/<repo>/pull/<n>`;
+  `--note` is capped at 200 characters and credential shapes become
+  `[redacted]`. `--lane` on a collected row marks it `source: record`, so the
+  next `collect` keeps it. Durations below zero are stored as 0.
+- `enrich` searches only the owners in `~/.config/streams.json` (override
+  `AGENT_EVAL_STREAMS`), one `gh search prs --owner` call per owner; a missing
+  or unreadable map is an error, never an unscoped search. It marks the one
+  attempt already tied to a found PR, else the newest completed attempt.
+- `--since` takes 1 to 3650 days. Unreadable ledger lines are skipped with a
+  stderr note and counted in `skipped_lines` (report JSON and `scoreboard
+  --json`); the Markdown report says `Partial`.
 - `report` returns, for the window and the previous one: dispatch counts by
   lane and by class, completion and quality by lane, the pace summary, the
   verdicts, cooldown events and one-line observations. Markdown when `--format

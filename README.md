@@ -38,6 +38,8 @@ sh -c "$(curl -fsLS get.chezmoi.io)" -- init --apply jdwillmsen
 
 You'll be prompted for a machine role (see Targets below). Re-running `chezmoi apply` is always safe — templates and scripts are idempotent.
 
+Code itself is not backed up. After the first apply, `clone-repos` re-clones the declared repo set from GitHub into `~/projects/<owner>/<repo>` — only `gaming-rig` and `dotfiles` on a `gaming` machine, everything elsewhere — skipping anything already cloned. See [`docs/shell-helpers.md`](docs/shell-helpers.md#clone-repos--restore-the-repo-set-on-a-fresh-machine).
+
 ## Provisioning
 
 `chezmoi apply` installs everything that can be installed as the logged-in user — CLI tools, Python tooling, cloud CLIs — and never prompts for a password. Machine-level setup that genuinely needs root is a separate, explicit step:

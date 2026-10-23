@@ -136,3 +136,56 @@ noMistakesAgent: "[opencode, claude, codex, grok]"
 noMistakesCommitTrailers:
   - "Co-Authored-By: {{.Model}} via no-mistakes {{.Agent}} <noreply@no-mistakes.invalid>"
   - "Assisted-by: no-mistakes/{{.Agent}}:{{.Model}}"
+# Repos `clone-repos` restores onto a fresh machine — code is not backed up, it
+# is re-cloned from GitHub on demand. `path` is relative to ~/projects and
+# follows the stream layout (<owner>/<repo>, see docs/streams.md), which is
+# what `stream key`, the jlabs/jdw/dota aliases and the T3 projects expect.
+# Dotablaze/dotablaze-tech is the exception: a user account outside the stream
+# map, filed under the DOTA stream folder it belongs to.
+# Not listed, by design: jdwillmsen/experiments-archive (private), which holds
+# retired repos as <repo>/<branch> branches plus git bundles under
+# bundles/2026-10 — clone it by hand when something old is needed.
+repos:
+  - slug: jdwillmsen/gaming-rig
+    path: jdwillmsen/gaming-rig
+    groups: [core, jdwillmsen]
+  - slug: jdwillmsen/dotfiles
+    path: jdwillmsen/dotfiles
+    groups: [core, jdwillmsen]
+  - slug: jdwillmsen/jdwillmsen
+    path: jdwillmsen/jdwillmsen
+    groups: [jdwillmsen]
+  - slug: jdwillmsen/countdown-app
+    path: jdwillmsen/countdown-app
+    groups: [jdwillmsen]
+  - slug: jdwlabs/.github
+    path: jdwlabs/.github
+    groups: [jdwlabs]
+  - slug: jdwlabs/.github-private
+    path: jdwlabs/.github-private
+    groups: [jdwlabs]
+  - slug: jdwlabs/apps
+    path: jdwlabs/apps
+    groups: [jdwlabs]
+  - slug: jdwlabs/deployments
+    path: jdwlabs/deployments
+    groups: [jdwlabs]
+  - slug: jdwlabs/infrastructure
+    path: jdwlabs/infrastructure
+    groups: [jdwlabs]
+  - slug: jdwlabs/platform
+    path: jdwlabs/platform
+    groups: [jdwlabs]
+  - slug: Dotablaze/dotablaze-tech
+    path: dotablaze-tech/dotablaze-tech
+    groups: [dotablaze]
+  - slug: dotablaze-tech/deployments
+    path: dotablaze-tech/deployments
+    groups: [dotablaze]
+  - slug: dotablaze-tech/platform
+    path: dotablaze-tech/platform
+    groups: [dotablaze]
+# What a bare `clone-repos` clones per machineRole; a role not listed gets
+# every repo. A gaming PC only needs its own setup repo and the dotfiles.
+repoDefaultGroups:
+  gaming: [core]

@@ -41,7 +41,8 @@ merge-captain explain O/R#N       # what a run would do for one PR, no side effe
 ```
 
 Env overrides for tests: `MERGE_CAPTAIN_CONFIG`, `MERGE_CAPTAIN_STATE`,
-`MERGE_CAPTAIN_NOW`, `MERGE_CAPTAIN_DEADLINE_S` (run deadline, default 1200),
+`MERGE_CAPTAIN_NOW`, `MERGE_CAPTAIN_DEADLINE_S` (soft run deadline, default 1200),
+`MERGE_CAPTAIN_HARD_DEADLINE_S` (default 1500),
 `MERGE_CAPTAIN_GH`, `MERGE_CAPTAIN_CLASS` (change-class
 executable), `MERGE_CAPTAIN_PACE` (agent-pace), `MERGE_CAPTAIN_EVAL`
 (agent-eval), `MERGE_CAPTAIN_CLAUDE`, `MERGE_CAPTAIN_OPENCODE`.
@@ -87,8 +88,11 @@ what would have happened and why. A repo not listed is ignored.
 
 1. Skip when: draft; label `hold` or `no-agent-merge`; author not allow-listed;
    base is not the default branch; the kill switch exists; a per-run or hourly
-   cap is spent; the 20 minute run deadline has passed. Record the reason in the
-   run output.
+   cap is spent; the 20 minute soft run deadline has passed. Record the reason in
+   the run output. After the soft deadline no reviewer call, label write or merge
+   starts either (`waiting` `deadline`); a comment for a review already paid for
+   is still posted. At 25 minutes an alarm kills whatever is running, writes the
+   final `run` log line and releases the lock (`hard_deadline: true` in the output).
 2. Classify with `change-class --pr N --repo O/R` (the tool in `MERGE_CAPTAIN_CLASS`);
    keep `tier`, `tags`, `reasons`. If classification fails, skip with
    `classify-failed`, never guess a tier. Then read the head again: if it is not
@@ -121,10 +125,17 @@ what would have happened and why. A repo not listed is ignored.
 6. Review (tier R1 and above; R0 needs none):
    - Look in the captain's own `reviews.jsonl` (state dir) for a line with this
      repo, PR number and head SHA and a tier at or above this PR's tier. Found with
-     `approve`: go to 7. Found with `changes`: `blocked` (do not review again until
-     the SHA changes). A PR comment is never read for this: the owner's login also
-     authors every agent comment, so a marker on a PR could be typed or edited by
-     anyone on the box.
+     `changes`: `blocked` (do not review again until the SHA changes). Found with
+     `approve`: it counts only if its `assignment` id is in agent-pace's
+     `assignments.jsonl` and the latest row for that id in agent-eval's
+     `outcomes.jsonl` is class `review`, risk at or above this tier, the same lane,
+     status `completed`, source `record` (both read as files from
+     `AGENT_EVAL_STATE`, default `~/.local/state/agent-eval`). A missing ledger or
+     any mismatch means the line is untrusted and the PR is reviewed again; then go
+     to 7. A `changes` line blocks with or without ledger backing, since forging one
+     can only stop a merge. A PR comment is never read for this: the owner's login
+     also authors every agent comment, so a marker on a PR could be typed or edited
+     by anyone on the box.
    - Otherwise (`live` only, within `max_reviews_per_run` reviewer calls, before
      the run deadline, and with fewer than 2 failed attempts for this head in the
      last 6 hours, else `waiting` `review-cap` / `deadline` / `review-backoff`):
@@ -132,8 +143,15 @@ what would have happened and why. A repo not listed is ignored.
      `agent-pace assign --class review --risk <tier> --ticket <key from branch or title, if any> --exclude <lanes on providers outside [reviewers] providers> --json`.
      `defer`/`none` → `waiting` (quota); for R1, `none` is retried once with
      `--allow-same-family` and a success is noted "same-family reviewer" in the
-     comment. The implementer lane is unknown for a human or bot author; omit
-     `--implementer`. R3 is never reviewed here.
+     comment. The implementer comes from the PR's commits: `Assisted-by:
+     <agent>:<model-id>` and `Co-Authored-By:` trailers are mapped to lanes by the
+     `model` in `lanes.toml` (case and punctuation folded, provider prefix and a
+     trailing `-5-5` version optional). The strongest lane found is passed as
+     `--implementer`, every implementer lane is added to `--exclude` (at R1 also
+     the lanes of their families), and a lane that comes back anyway is refused
+     and released as `interrupted`. No usable trailer: `--implementer` is omitted
+     and the comment says "implementer unknown". Trailers are self-reported by the
+     commit author. R3 is never reviewed here.
    - Fetch the diff (`gh pr diff N`); over `max_diff_bytes` → `needs-human`
      (`diff-too-large`, once-comment). Build the fixed review prompt (below) and run
      the lane headless: provider `claudeAgent` → `claude -p --model <model> --tools ""
@@ -156,14 +174,17 @@ what would have happened and why. A repo not listed is ignored.
      `waiting` with `review-unavailable`. Never treat a failure as approval.
    - `verdict` must be `approve` or `changes`; an `approve` with any finding of
      severity `high` or `medium` is rewritten to `changes`.
-   - Append the verdict to `reviews.jsonl` (fsync), then post the review comment
-     (display only: a marker first line, then a short table of findings, under 1500
-     characters, no AI attribution footer; model text has HTML, mentions, links and
-     images neutralised). `approve` → continue; `changes` → label
-     `agent-changes-requested`, `blocked`.
-   - Record with `agent-eval record --id <assignment id> --status completed --class review --risk <tier>`
+   - Post the review comment first (display only: a marker first line, then a
+     short table of findings, under 1500 characters, no AI attribution footer;
+     model text has HTML, mentions, links and images neutralised). If it cannot be
+     posted, the review is not recorded, the assignment is released as
+     `interrupted`, and the PR waits as `comment-failed`.
+   - Then record with `agent-eval record --id <assignment id> --status completed --class review --risk <tier>`
      (`--status interrupted` with a note for a failed attempt) so the scoreboard
-     sees it.
+     sees it; if that fails the PR waits as `ledger-unavailable` and nothing is
+     recorded. Last, append the verdict to `reviews.jsonl` (fsync) with the
+     `assignment` id and `lane`. `approve` → continue; `changes` → label
+     `agent-changes-requested`, `blocked`.
 7. Merge: `gh pr merge N --rebase --match-head-commit <sha>` (never `--admin`,
    never `--squash`/`--merge`, never `--delete-branch`). Success → log `merged`. A
    refusal (protection, approval required, head moved) → `blocked` with gh's reason
@@ -192,13 +213,20 @@ verdict is evidence for `changes`.
 (kill switch; contents = reason), `log.jsonl` (one line per decision:
 `at, run, repo, pr, head, tier, action, reason, mode, lane`; rotated to
 `log.jsonl.1` above 5 MB, one previous file kept), `reviews.jsonl` (the only
-review evidence a merge trusts: `repo, pr, head, tier, verdict, lane, at`,
-written with fsync), `attempts.jsonl` (failed review calls, for the backoff),
+review evidence a merge trusts, and only with the ledgers behind it: `repo, pr,
+head, tier, verdict, lane, assignment, at`, written with fsync), `attempts.jsonl` (failed review calls, for the backoff),
 `human.jsonl` (`needs-human` comments already posted), `lock` (flock; a second
 run exits 0 quietly with `busy`). Rate caps count `merged` lines in the last 60
 minutes across both log files. No diff text, comment bodies or credentials in
-the log. These files are as safe as the unix account that owns them; what the
-design excludes is trusting anything a PR comment says.
+the log. The directory is created 0700 and its files 0600 (tightened if they were
+looser). A PreToolUse hook (`guard-delivery-state.sh`) refuses Claude Code's
+Write/Edit and shell redirects, `tee`, `sed -i`, `cp`, `mv` and `rm` on this
+directory, the agent-eval ledgers and the deployed policy files. These files
+are still only as safe as the unix account that owns them: the ledger check
+makes a forged approval take three coordinated writes, and the hook stops
+accidents and prompt-injected shortcuts under Claude Code, but neither stops a
+determined process running as the same user. A separate uid is the real fix
+(JDW-209). What the design excludes is trusting anything a PR comment says.
 
 ### Output
 
@@ -216,8 +244,8 @@ Actions: `merged`, `would-merge`, `waiting`, `blocked`, `needs-human`, `skipped`
 ## Units
 
 `merge-captain.service` (oneshot: `merge-captain run`, `Nice=10`,
-`TimeoutStartSec=30min` (the 20 minute run deadline plus one 5 minute reviewer call
-and the gh calls that finish a pull request already under way), `NoNewPrivileges=yes`, `PrivateTmp=yes`,
+`TimeoutStartSec=30min` (the 20 minute soft deadline, one 5 minute reviewer call
+begun just before it, and slack after the 25 minute hard deadline ends the run), `NoNewPrivileges=yes`, `PrivateTmp=yes`,
 `Environment=PATH=%h/.local/bin:%h/.local/npm-bin:/usr/local/bin:/usr/bin:/bin`)
 and `merge-captain.timer` (`OnCalendar=*:0/15`, `Persistent=false`,
 `RandomizedDelaySec=60`). Same for `agent-eval-collect.service/.timer`
@@ -246,8 +274,13 @@ diff becomes `needs-human`; `explain` has no side effects; `status` output;
 a forged or edited approve comment changes nothing and a review record for the
 exact repo, PR and head is required; a head that moves during classification
 waits; any failing check blocks unless ignored and no checks waits; reviewer
-calls (not invocations) are capped, the run deadline stops new work, failed
-reviews are `interrupted` and back off after two per head; lanes on unlisted
+calls (not invocations; a provider that cannot run takes none) are capped, the
+soft deadline stops new reviews, labels and merges, the hard deadline kills a hung
+reviewer yet still logs the run and frees the lock, failed reviews are
+`interrupted` and back off after two per head; the review comment precedes the
+record and a failed comment records nothing; an approval line without a matching
+assignment and completed `record` outcome is reviewed again; the implementer
+lane comes from commit trailers and is never the reviewer; lanes on unlisted
 providers are excluded and R1 retries with `--allow-same-family`; bot logins
 normalise; model text carries no link or image; credentials in a diff are
 redacted before the prompt; a merge call that failed after merging is logged

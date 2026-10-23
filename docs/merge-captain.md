@@ -27,10 +27,21 @@ first step that fails:
    name is under `[checks] ignore`; a PR that reports no checks waits as
    `no-checks` unless its repo sets `allow_no_checks = true`.
 6. R1 and up: an `approve` for this repo, PR and exact head, at this tier or
-   higher, in the captain's own record (below), or a fresh headless review.
-   Findings of severity high or medium turn an approval into `changes`.
+   higher, in the captain's own record that the ledgers back (below), or a fresh
+   headless review. Findings of severity high or medium turn an approval into
+   `changes`. The reviewer is never a lane that wrote the change: the lane comes
+   from the commits' `Assisted-by:` and `Co-Authored-By:` trailers (mapped through
+   `model` in `lanes.toml`), is passed to `agent-pace assign` as `--implementer`,
+   and with any other implementer lane is also excluded. With no usable trailer the
+   review runs as before and its comment says "implementer unknown". Trailers are
+   whatever the commit author wrote.
 7. `gh pr merge --rebase --match-head-commit <sha>`. Never `--admin`, never another
    merge style, never `--delete-branch`.
+
+The review comment is posted before the review is recorded. If it cannot be
+posted nothing is recorded and the PR waits as `comment-failed`; if `agent-eval`
+refuses the outcome it waits as `ledger-unavailable`. Either way the next run
+reviews again.
 
 A review that times out, exits non-zero or cannot be parsed is never an approval:
 the next lane gets one try, then the PR waits as `review-unavailable`. A head that
@@ -43,7 +54,13 @@ failure, because a failure kind feeds the lane cooldown that all dispatch shares
 `~/.config/agents/merge-captain.toml` (source `home/dot_config/agents/merge-captain.toml`).
 `[limits]` holds the caps: PRs per run (6), reviewer calls per run (2, failed
 calls included), merges per hour (6), review timeout (300 s), largest diff read.
-A run starts no reviewer call and no new PR after 20 minutes (`deadline`).
+After 20 minutes a run starts no reviewer call, label write, merge or new PR
+(`deadline`; a review that finished is still commented and recorded, and merged
+next run). At 25 minutes an alarm ends the run: the running child is killed, the
+PR in flight is logged as `waiting` `hard-deadline` (check whether it merged),
+the final `run` line is written and the lock is released. `gh` and tool calls time
+out at 60 s. `MERGE_CAPTAIN_DEADLINE_S` and `MERGE_CAPTAIN_HARD_DEADLINE_S` override
+the two limits for tests.
 `[authors] allow` lists the logins it will touch. gh reports a bot as `app/name` or
 `name[bot]`; both are compared as `name[bot]`, so write `jdwlabs-agent-bot[bot]`,
 `renovate[bot]`; a name without the suffix matches a person only.
@@ -87,8 +104,9 @@ renamed to `log.jsonl.1` (one previous file is kept); the hourly caps read both.
 
 Other files in the state directory, all written by the captain only:
 
-- `reviews.jsonl`: `repo, pr, head, tier, verdict, lane, at`, appended with fsync
-  after a real review. This is the only thing a merge trusts.
+- `reviews.jsonl`: `repo, pr, head, tier, verdict, lane, assignment, at`, appended
+  with fsync after a real review. This is the only thing a merge trusts, and only
+  together with the ledgers (below).
 - `attempts.jsonl`: failed review calls, for the 6-hour backoff.
 - `human.jsonl`: which `needs-human` comments were posted, so each head gets one.
 
@@ -116,7 +134,26 @@ A `waiting` for `quota` or `review-unavailable` costs nothing; `blocked` with
   marker back from a PR: an approval exists only as a line in `reviews.jsonl`
   for that repo, PR and head. The comments are for people; model text in them
   has links, images, HTML and mentions stripped. This stops forged or edited
-  comments, not a process that can write the state directory as the same user.
+  comments.
+- A line in `reviews.jsonl` is not enough on its own. An `approve` counts only if
+  its `assignment` id is in agent-pace's `assignments.jsonl` and the latest
+  `outcomes.jsonl` row for that id (agent-eval, under `AGENT_EVAL_STATE`, default
+  `~/.local/state/agent-eval`) is a `completed` `review` on the same lane at or
+  above the PR's tier, with `source: record`. The files are read directly, not
+  through the tools. A missing ledger or any mismatch means the PR is reviewed
+  again. A `changes` line blocks regardless, since a forged one only stops a
+  merge. The state directory is created 0700 with 0600 files and tightened if it
+  was looser.
+- `~/.claude/hooks/guard-delivery-state.sh` (a PreToolUse hook on `Write|Edit|MultiEdit|Bash`,
+  enforced in `settings.json`) refuses Claude Code tool calls that write the
+  captain's state, the agent-eval ledgers or the deployed `change-risk.toml`,
+  `lanes.toml` and `merge-captain.toml`: Write/Edit on those paths, and shell
+  redirects, `tee`, `sed -i`, `cp`, `mv`, `rm` and similar aimed at them. It reads
+  command text, so it stops accidents and prompt-injected shortcuts inside Claude
+  Code only. It does not stop a determined process running as the same user (a
+  script, another tool, an obfuscated path), and nothing in these files can: a
+  separate uid for the captain and its state is the real fix (JDW-209). Pause and
+  resume go through `merge-captain pause|resume`, which the hook allows.
 - If the repository's ruleset requires an approving review, the merge is refused
   and shows as `blocked`; the captain does not approve its own reviews.
 - `opencode` reviewers are off by default. Findings, 2026-10-23: a plain

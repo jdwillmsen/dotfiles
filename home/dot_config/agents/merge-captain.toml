@@ -29,8 +29,10 @@ providers = ["claudeAgent"]
 ignore = []
 
 [authors]
-# Only pull requests opened by these logins are touched.
-allow = ["jdwillmsen", "jdwlabs-agent-bot", "renovate[bot]", "dependabot[bot]"]
+# Only pull requests opened by these logins are touched. A bot is spelled with
+# its [bot] suffix whether gh reports it as app/name or name[bot]; a name
+# without the suffix matches a person only.
+allow = ["jdwillmsen", "jdwlabs-agent-bot[bot]", "renovate[bot]", "dependabot[bot]"]
 
 [[repo]]
 name = "jdwillmsen/dotfiles"

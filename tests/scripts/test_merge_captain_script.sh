@@ -140,6 +140,8 @@ if head2 == ["pr", "merge"]:
     pr = jload(f"pr_{n}.json", {})
     pr["state"] = "MERGED"
     save_pr(n, pr)
+    if rd("merge_then_fail") is not None:
+        fail("error connecting to api.github.com")
     sys.exit(0)
 if head2 == ["label", "list"]:
     say(jload("labels.json", []))
@@ -339,7 +341,7 @@ cfg() {  # limit overrides as key=value; LIVE_MAX sets the live repo's ceiling
         printf '[checks]\nignore = [%s]\n' "${CHECK_IGNORE:-}"
         printf '[reviewers]\nproviders = [%s]\n' "${PROVIDERS:-\"claudeAgent\"}"
         echo '[authors]'
-        echo 'allow = ["jdwillmsen", "jdwlabs-agent-bot", "renovate[bot]", "dependabot[bot]"]'
+        echo 'allow = ["jdwillmsen", "jdwlabs-agent-bot[bot]", "renovate[bot]", "dependabot[bot]"]'
         printf '[[repo]]\nname = "acme/live"\nmode = "live"\nmax_tier = "%s"\n' "${LIVE_MAX:-R2}"
         if [ -n "${ALLOW_NO_CHECKS:-}" ]; then echo 'allow_no_checks = true'; fi
         printf '[[repo]]\nname = "acme/dry"\nmode = "dry-run"\nmax_tier = "R2"\n'
@@ -982,7 +984,12 @@ fx pr 24 baseRefName=release
 fx pr 25 'author={"login":"renovate","is_bot":false}'
 fx pr 26 'author={"login":"app/renovate","is_bot":true}'
 fx pr 27 'author={"login":"mallory[bot]","is_bot":true}'
+fx pr 28 'author={"login":"app/jdwlabs-agent-bot","is_bot":true}'
+fx pr 29 'author={"login":"jdwlabs-agent-bot","is_bot":false}'
+fx pr 19 'author={"login":"dependabot[bot]","is_bot":true}'
 fx class 26 R0 tags=deps reasons=lockfiles:R0:package-lock.json
+fx class 28 R0
+fx class 19 R0
 want 0 run
 expect 20 skipped draft
 expect 21 skipped "label hold"
@@ -992,7 +999,10 @@ expect 24 skipped base-not-default
 expect 25 skipped author-not-allowed
 expect 27 skipped author-not-allowed
 expect 26 merged
-[ "$(wc -l <"$S/class.log")" = 1 ] || fail "only the eligible pull request should be classified" "$(cat "$S/class.log")"
+expect 28 merged
+expect 19 merged
+expect 29 skipped author-not-allowed
+[ "$(wc -l <"$S/class.log")" = 3 ] || fail "only the eligible pull request should be classified" "$(cat "$S/class.log")"
 
 # ── Kill switch ──
 newcase
@@ -1402,6 +1412,99 @@ want 0 run
 [ "$(grep -c '<!--' "$S/posted_100.txt")" = 1 ] || fail "forged marker survived" "$(cat "$S/posted_100.txt")"
 grep -q '@someone' "$S/posted_100.txt" && fail "a mention survived in the comment"
 
+# Model text cannot render a link or an image: either would fetch from a host the model chose.
+newcase
+fx pr 105
+fx class 105 R1
+fx pace 1 lane=claude-sonnet provider=claudeAgent model=claude-sonnet-5-5
+python3 - "$S/rev_claude_1.out" <<'PY'
+import json, sys
+text = json.dumps({"verdict": "changes", "findings": [
+    {"severity": "high", "file": "![x](https://beacon.example/p.png)", "line": 1,
+     "issue": "see [details](http://beacon.example/a) or https://beacon.example/b or www.beacon.example/c", "fix": "x"}]})
+open(sys.argv[1], "w").write(json.dumps({"is_error": False, "result": text}))
+PY
+want 0 run
+expect 105 blocked "review changes"
+grep -q 'beacon.example' "$S/posted_105.txt" && fail "a model-chosen URL survived in the comment" "$(cat "$S/posted_105.txt")"
+grep -qF '](' "$S/posted_105.txt" && fail "a markdown link survived in the comment" "$(cat "$S/posted_105.txt")"
+grep -qF '![' "$S/posted_105.txt" && fail "a markdown image survived in the comment" "$(cat "$S/posted_105.txt")"
+grep -q 'details' "$S/posted_105.txt" || fail "the link text should survive as plain text" "$(cat "$S/posted_105.txt")"
+
+# ── Credentials in a diff never reach a model ──
+newcase
+fx pr 106 'title="fix: rotate ghp_abcdefghijklmnopqrstuvwx123456"'
+fx class 106 R1
+python3 - "$S/diff_106.txt" <<'PY'
+import sys
+lines = [
+    "+-----BEGIN OPENSSH PRIVATE KEY-----", "+b3BlbnNzaC1rZXktdjEAAAAABG5vbmU", "+-----END OPENSSH PRIVATE KEY-----",
+    "+t1 = ghp_abcdefghijklmnopqrstuvwx123456", "+t2 = github_pat_11AAAAAAA0123456789_abcdefgh",
+    "+t3 = gho_abcdefghijklmnopqrstuvwxyz0123", "+aws = AKIAIOSFODNN7EXAMPLE", "+slack = xoxb-1234567890-abcdefghij",
+    '+DB_PASSWORD = "correct-horse-battery"', "+API_TOKEN=Zm9vYmFyYmF6cXV4", "+secret: 'abcdef123456'",
+    '+ok = request.headers.get("x")', "+token = os.environ[NAME]", "+sha = 0123456789abcdef0123456789abcdef01234567",
+]
+open(sys.argv[1], "w").write("\n".join(lines) + "\n")
+PY
+fx pace 1 lane=claude-sonnet provider=claudeAgent model=claude-sonnet-5-5
+fx rev claude 1 approve
+want 0 run
+expect 106 merged
+python3 -I - "$S/claude.stdin.1" <<'PY' || fail "credential-shaped text reached the reviewer" "$(cat "$S/claude.stdin.1")"
+import sys
+t = open(sys.argv[1]).read()
+for secret in ("PRIVATE KEY", "b3BlbnNzaC1r", "ghp_abcdef", "github_pat_11", "gho_abcdef", "AKIAIOSFODNN7", "xoxb-1234",
+               "correct-horse", "Zm9vYmFy", "abcdef123456"):
+    assert secret not in t, secret
+assert t.count("[redacted]") >= 10, t
+for kept in ('request.headers.get("x")', "os.environ[NAME]", "0123456789abcdef0123456789abcdef01234567"):
+    assert kept in t, kept
+assert "title: fix: rotate [redacted]" in t, "the title is scrubbed too"
+PY
+
+# ── A merge call that fails after the merge went through is still a merge ──
+newcase max_merges_per_hour=1
+fx pr 107
+fx class 107 R0
+fx pr 108
+fx class 108 R0
+touch "$S/merge_then_fail"
+want 0 run
+expect 107 merged "pull request is merged"
+expect 108 skipped hourly-cap
+want 0 status
+grep -q '^merges_last_hour: 1$' "$out" || fail "a reconciled merge must count toward the hourly cap" "$(cat "$out")"
+newcase
+fx pr 109
+fx class 109 R0
+printf 'GraphQL: Pull request is not mergeable (mergePullRequest)\n' >"$S/merge_fail"
+want 0 run
+expect 109 blocked "merge refused"
+
+# ── log.jsonl is rotated at 5 MB, one previous file kept, and caps still see the last hour ──
+newcase
+mkdir -p "$STATE"
+python3 - "$STATE/log.jsonl" <<'PY'
+import json, sys
+pad = "x" * 900
+with open(sys.argv[1], "w") as f:
+    for i in range(6000):
+        f.write(json.dumps({"at": "2026-10-01T00:00:00Z", "action": "skipped", "repo": "x/y", "pr": i, "reason": pad}) + "\n")
+    for i in range(6):
+        f.write(json.dumps({"at": "2026-10-23T19:50:00Z", "action": "merged", "repo": "x/y", "pr": i}) + "\n")
+PY
+[ "$(stat -c %s "$STATE/log.jsonl")" -gt 5242880 ] || fail "the rotation fixture is not over 5 MB"
+fx pr 114
+fx class 114 R0
+want 0 run
+expect 114 skipped hourly-cap
+[ -s "$STATE/log.jsonl.1" ] && [ "$(stat -c %s "$STATE/log.jsonl")" -lt 5000 ] || fail "the log was not rotated" "$(ls -l "$STATE")"
+want 0 status
+grep -q '^merges_last_hour: 6$' "$out" || fail "rotation lost the last hour's merges" "$(cat "$out")"
+want 0 run
+logs=("$STATE"/log.jsonl*)
+[ "${#logs[@]}" = 2 ] || fail "more than one previous log kept" "${logs[*]}"
+
 # ── Failures that are not a pull request's ──
 newcase
 fx pr 101
@@ -1515,6 +1618,31 @@ allow = ["jdwillmsen", "renovate[bot]"]
 assert aa({"login": "JDWillmsen"}, allow) and aa({"login": "app/renovate", "is_bot": True}, allow)
 assert aa({"login": "renovate[bot]"}, allow) and not aa({"login": "renovate", "is_bot": False}, allow)
 assert not aa({"login": "app/jdwillmsen", "is_bot": True}, allow) and not aa(None, allow)
+bots = ["jdwlabs-agent-bot[bot]"]
+assert aa({"login": "app/jdwlabs-agent-bot", "is_bot": True}, bots) and aa({"login": "jdwlabs-agent-bot[bot]"}, bots)
+assert not aa({"login": "jdwlabs-agent-bot", "is_bot": False}, bots), "a person must not match a bot entry"
+assert not aa({"login": "app/jdwlabs-agent-bot", "is_bot": True}, ["jdwlabs-agent-bot"]), "a bare entry is for people"
+assert not aa({"login": ""}, [""]) and mc.Captain.author_login({"login": "App/Renovate", "is_bot": True}) == "renovate[bot]"
+import json
+sha2 = "b" * 40
+for state, want in (("MERGED", "merged"), ("OPEN", "blocked")):
+    cap2 = mc.Captain({"limits": mc.LIMIT_DEFAULTS, "allow": [], "ignore": [], "providers": ["claudeAgent"]})
+    cap2.repo, cap2.live = "a/b", True
+    called = []
+    def fake_gh(args, write=False, stdin=None, state=state, called=called):
+        if args[:2] == ["pr", "merge"]:
+            called.append(1)
+            return mc.Result(124, "", "timed out", timed_out=True)
+        return mc.Result(0, json.dumps({"headRefOid": sha2, "state": state if called else "OPEN", "isDraft": False,
+                                        "labels": []}))
+    cap2.gh = fake_gh
+    try:
+        cap2.merge("a/b", 5, sha2, {}, "why", None)
+    except mc.Stop as stop:
+        assert stop.action == want, (state, stop.action, stop.reason)
+    else:
+        raise SystemExit("merge did not stop")
+    cap2.close()
 assert "[redacted]" in mc.clean("token ghp_" + "a" * 30) and mc.clean("a\nb\tc") == "a b c"
 assert mc.clean("x" * 400).endswith("…") and len(mc.clean("x" * 400)) == 300
 PY

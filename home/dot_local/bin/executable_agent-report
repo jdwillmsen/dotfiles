@@ -876,7 +876,8 @@ def check_models(j, window, cs, ce):
     if not (isinstance(j, dict) and j.get("window") == window and j.get("start") == cs.isoformat()
             and j.get("end") == ce.isoformat() and isinstance(j.get("empty"), bool)
             and isinstance(j.get("previous"), dict) and isinstance(j.get("observations"), list)
-            and all(isinstance(x, str) for x in j["observations"])):
+            and all(isinstance(x, str) for x in j["observations"])
+            and (j.get("skipped_lines") is None or am.is_amount(j["skipped_lines"]))):
         raise DeliveryError("bad_output")
     check_models_block(j)
     check_models_block(j["previous"])
@@ -1271,6 +1272,8 @@ def render_models(r):
         return lines + [f"Model evaluation skipped ({m['skipped']}).", ""]
     if m.get("errored"):
         return lines + [errored(m), ""]
+    if m.get("skipped_lines"):
+        lines += [f"Partial: {int(m['skipped_lines'])} unreadable ledger lines", ""]
     if m["empty"]:
         return lines + ["The evaluation ledger is empty: no dispatches or outcomes recorded yet.", ""]
     prev = m["previous"]

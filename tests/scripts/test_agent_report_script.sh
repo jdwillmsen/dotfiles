@@ -53,7 +53,7 @@ export PATH="$tmp/bin:$PATH"
 
 # A stub agent-eval returning the shape `agent-eval report --format json` has.
 # STUB_EVAL_MODE picks the reply: populated (default), empty, fail, badjson,
-# wrongwindow or nonumber.
+# wrongwindow, nonumber, partial (three unreadable ledger lines) or badskipped.
 cat >"$tmp/bin/agent-eval-stub" <<'STUB'
 #!/usr/bin/env python3
 import datetime as dt, json, os, sys
@@ -101,6 +101,10 @@ rep = {"window": "weekly" if mode == "wrongwindow" else window, "empty": empty,
        **block(start, end, not empty, False), "previous": block(pstart, start, not empty, True),
        "observations": ["The evaluation ledger is empty: no dispatches or outcomes recorded yet."] if empty else
        ["7 dispatches against 4 in the previous window.", "Most dispatches went to codex (4 of 7)."]}
+if mode == "partial":
+    rep["skipped_lines"] = 3
+if mode == "badskipped":
+    rep["skipped_lines"] = "some"
 if mode == "nonumber":
     rep["dispatches"]["total"] = "many"
 print(json.dumps(rep, indent=2))
@@ -1101,6 +1105,19 @@ md="$(mmd)"
 grep -qF "The evaluation ledger is empty: no dispatches or outcomes recorded yet." <<<"$md" || fail "an empty ledger is not said" "$md"
 ! grep -q "Completion and quality\|Pace:" <<<"$md" || fail "an empty ledger still renders tables" "$md"
 [ "$(mj 'm["empty"]')" = true ] || fail "the empty flag is not stored"
+
+# Unreadable ledger lines are shown as a partial result, in every layout, and never read as a quiet window.
+STUB_EVAL_MODE=partial run 0 --window weekly --end 2026-10-09 --dry-run --no-insights --no-github
+[ "$(mj 'm["skipped_lines"]')" = 3 ] || fail "skipped_lines is not stored" "$(mj 'm')"
+md="$(mmd)"
+grep -qF "Partial: 3 unreadable ledger lines" <<<"$md" || fail "a damaged ledger is not flagged" "$md"
+grep -qF "### Completion and quality by lane" <<<"$md" || fail "a partial report lost its tables" "$md"
+STUB_EVAL_MODE=partial run 0 --window daily --end 2026-10-09 --dry-run --no-insights --no-github
+grep -qF "Partial: 3 unreadable ledger lines" <<<"$(mmd)" || fail "the daily report hides a damaged ledger" "$(mmd)"
+STUB_EVAL_MODE=badskipped run 0 --window weekly --end 2026-10-09 --dry-run --no-insights --no-github
+[ "$(mj 'm["reason"]')" = '"bad_output"' ] || fail "a non-number skipped_lines is not bad_output" "$(mj 'm')"
+run 0 --window weekly --end 2026-10-09 --dry-run --no-insights --no-github
+! grep -qF "Partial" <<<"$(mmd)" || fail "a clean ledger is flagged as partial" "$(mmd)"
 
 # A failed call, bad JSON, a reply for another window, a non-number or a missing tool is errored with a fixed code, never zero,
 # and the rest of the report still builds; the tool's own text stays out of the report.

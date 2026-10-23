@@ -149,7 +149,10 @@ line, gap, multiplier), dispatches by lane and by class against the previous
 window, completion and quality per lane, the keep, probation, drop-for-class
 and promotion verdicts, cooldown events and the one-line observations. The
 daily report shows only pace and cooldowns. An empty ledger renders one line
-saying so. `agent-eval` reports daily, weekly, biweekly and monthly windows;
+saying so. When `agent-eval` skipped unreadable ledger lines it returns
+`skipped_lines`, and the section opens with `Partial: N unreadable ledger
+lines` so a damaged ledger is never read as a quiet window; it is a note, not
+an error. `agent-eval` reports daily, weekly, biweekly and monthly windows;
 quarterly and yearly are marked `{"skipped": ...}` rather than answered with
 a different window's days. A failed call, a timeout, a missing tool, invalid
 JSON or a reply for another window is `{"errored": true, "reason": ...}` with

@@ -3,8 +3,9 @@
 
 Turns the store's session rows, quota readings and ledger into a daily,
 weekly, biweekly, monthly, quarterly or yearly report with deltas, flags and,
-for longer windows, delivery metrics from GitHub and no-mistakes. Weekly and
-monthly reports add one capped model call for commentary.
+for longer windows, delivery metrics from GitHub and no-mistakes, and the
+model-evaluation section from agent-eval. Weekly and monthly reports add one
+capped model call for commentary.
 Agent-facing: stdout is TOON, diagnostics go to stderr.
 """
 import argparse
@@ -829,6 +830,98 @@ def delivery(opts, w):
     return {"github": github, "no_mistakes": no_mistakes_delivery(cs, ce)}
 
 
+# ── Models ───────────────────────────────────────────────────────────────────
+
+# The windows agent-eval can report; the other two are skipped rather than
+# approximated with the nearest one, which would cover different days.
+EVAL_WINDOWS = ("daily", "weekly", "biweekly", "monthly")
+EVAL_TIMEOUT_S = int(os.environ.get("AGENT_REPORT_EVAL_TIMEOUT", "60"))
+PROSE = re.compile(r"[\x20-\x7e]{1,300}")
+PROSE_KEYS = ("verdict", "advise", "observations")
+
+
+def eval_bin():
+    return os.environ.get("AGENT_REPORT_EVAL") or shutil.which("agent-eval") or str(am.HOME / ".local/bin/agent-eval")
+
+
+def amounts(d):
+    return isinstance(d, dict) and all(am.is_amount(v) for v in d.values())
+
+
+def check_models_block(b):
+    """The parts of one window's block that render reads. Numbers must be
+    numbers before they are shown, or a damaged reply would read as a quiet
+    window."""
+    d, o = b["dispatches"], b["outcomes"]
+    ok = am.is_amount(d["total"]) and amounts(d["by_lane"]) and amounts(d["by_class"]) \
+        and am.is_amount(o["total"]) and isinstance(o["by_lane"], dict) \
+        and all(isinstance(v, dict) and am.is_amount(v["attempts"]) and am.is_amount(v["completed"])
+                and all(v.get(k) is None or am.is_amount(v[k]) for k in ("completion", "quality", "quality_lb", "judged"))
+                for v in o["by_lane"].values())
+    pace = b["pace"]
+    ok = ok and (pace is None or (isinstance(pace, dict) and all(
+        pace.get(k) is None or am.is_amount(pace[k])
+        for k in ("assignments", "used_last", "line_last", "multiplier_mean", "multiplier_min", "multiplier_max"))))
+    ok = ok and isinstance(b["cooldowns"], list) and all(
+        isinstance(c, dict) and isinstance(c["lane"], str) and isinstance(c["at"], str) for c in b["cooldowns"])
+    ok = ok and isinstance(b["verdicts"], list) and all(
+        isinstance(v, dict) and isinstance(v["lane"], str) and isinstance(v["class"], str) and isinstance(v["verdict"], str)
+        and (v.get("quality_lb") is None or am.is_amount(v["quality_lb"])) and (v.get("n") is None or am.is_amount(v["n"]))
+        for v in b["verdicts"])
+    if not ok:
+        raise DeliveryError("bad_output")
+
+
+def check_models(j, window, cs, ce):
+    if not (isinstance(j, dict) and j.get("window") == window and j.get("start") == cs.isoformat()
+            and j.get("end") == ce.isoformat() and isinstance(j.get("empty"), bool)
+            and isinstance(j.get("previous"), dict) and isinstance(j.get("observations"), list)
+            and all(isinstance(x, str) for x in j["observations"])):
+        raise DeliveryError("bad_output")
+    check_models_block(j)
+    check_models_block(j["previous"])
+
+
+def scrub_models(v, prose=False):
+    """agent-eval's strings are lane and class identifiers plus a few fixed
+    phrases; anything else is replaced whole, as the audit's strings are."""
+    if isinstance(v, dict):
+        return {am.clean_id(k): scrub_models(x, k in PROSE_KEYS) for k, x in v.items()}
+    if isinstance(v, list):
+        return [scrub_models(x, prose) for x in v]
+    if isinstance(v, str):
+        if prose:
+            return v if PROSE.fullmatch(v) and not am.ID_CREDENTIAL.search(v) else "_invalid"
+        return am.clean_id(v)
+    return v
+
+
+def call_eval(window, cs, ce):
+    cmd = [eval_bin(), "report", "--window", window, "--end", ce.isoformat(), "--format", "json"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=EVAL_TIMEOUT_S, env=am.child_env())
+    except subprocess.TimeoutExpired:
+        raise DeliveryError("timeout")
+    except OSError as e:
+        raise DeliveryError("not_installed", e.strerror or type(e).__name__)
+    if r.returncode != 0:
+        raise DeliveryError("eval_exit", (r.stderr.strip().splitlines() or [""])[0])
+    try:
+        j = json.loads(r.stdout)
+    except ValueError:
+        raise DeliveryError("bad_output")
+    check_models(j, window, cs, ce)
+    return scrub_models(j)
+
+
+def models(opts, w):
+    (cs, ce), _ = w
+    if opts.window not in EVAL_WINDOWS:
+        return {"skipped": f"agent-eval has no {opts.window} window"}
+    # Anchoring on the window's own end date reproduces the same window.
+    return section(lambda: call_eval(opts.window, cs, ce))
+
+
 # ── Insights (one capped model call) ─────────────────────────────────────────
 
 INSIGHTS_WINDOWS = ("weekly", "monthly")
@@ -999,7 +1092,8 @@ def build_report(opts, w, th):
         "current": current,
         "previous": {"start": ps.isoformat(), "end": pe.isoformat(), **summarize_window(ps, pe)},
         "trend": trend(opts.window, label),
-        "flags": flags, "delivery": delivery(opts, w), "audit": embed_audit(opts.window, label), "insights": None,
+        "flags": flags, "delivery": delivery(opts, w), "audit": embed_audit(opts.window, label), "models": models(opts, w),
+        "insights": None,
     }
 
 
@@ -1146,6 +1240,68 @@ def render_delivery(r):
     return lines + [""]
 
 
+def pace_line(p):
+    if not p:
+        return "No pace readings in this window."
+    used, line = p.get("used_last"), p.get("line_last")
+    gap = f"{used - line:+.1f} points" if used is not None and line is not None else "n/a"
+    pc = lambda v: "n/a" if v is None else f"{num(v)}%"
+    return (f"Pace: used {pc(used)}, pace line {pc(line)}, gap {gap}; multiplier mean {num(p.get('multiplier_mean'))} "
+            f"(min {num(p.get('multiplier_min'))}, max {num(p.get('multiplier_max'))}) over {num(p.get('assignments'))} assignments.")
+
+
+def cooldown_lines(events):
+    if not events:
+        return ["No cooldowns in this window."]
+    return table(["Lane", "Entered cooldown", "Until"], [(c["lane"], c["at"], c.get("until") or "n/a") for c in events])
+
+
+def dispatch_table(title, cur, prev):
+    keys = sorted(set(cur) | set(prev))
+    return table([title, "This window", "Previous", "Change"],
+                 [(k, num(cur.get(k, 0)), num(prev.get(k, 0)), change(cur.get(k, 0), prev.get(k, 0))) for k in keys])
+
+
+def render_models(r):
+    m = r.get("models")
+    if not m:
+        return []
+    lines = ["## Models", ""]
+    if "skipped" in m:
+        return lines + [f"Model evaluation skipped ({m['skipped']}).", ""]
+    if m.get("errored"):
+        return lines + [errored(m), ""]
+    if m["empty"]:
+        return lines + ["The evaluation ledger is empty: no dispatches or outcomes recorded yet.", ""]
+    prev = m["previous"]
+    lines += [pace_line(m["pace"]), ""]
+    if r["window"] == "daily":
+        return lines + ["### Cooldowns", ""] + cooldown_lines(m["cooldowns"]) + [""]
+    d, pd = m["dispatches"], prev["dispatches"]
+    lines += [f"Dispatches: {num(d['total'])} against {num(pd['total'])} in the previous window.", ""]
+    if d["by_lane"] or pd["by_lane"]:
+        lines += dispatch_table("Lane", d["by_lane"], pd["by_lane"]) + [""]
+        lines += dispatch_table("Class", d["by_class"], pd["by_class"]) + [""]
+    lines += ["### Completion and quality by lane", ""]
+    if m["outcomes"]["by_lane"]:
+        lines += table(["Lane", "Attempts", "Completed", "Completion", "Judged", "Quality", "Quality lower bound"],
+                       [(la, num(v["attempts"]), num(v["completed"]), pct_share(v.get("completion")), num(v.get("judged")),
+                         pct_share(v.get("quality")), num(v.get("quality_lb"))) for la, v in m["outcomes"]["by_lane"].items()])
+    else:
+        lines.append("No outcomes in this window.")
+    lines += ["", "### Verdicts", ""]
+    if m["verdicts"]:
+        lines += table(["Lane", "Class", "Judged", "Quality lower bound", "Verdict", "Advice"],
+                       [(v["lane"], v["class"], num(v.get("n")), num(v.get("quality_lb")), v["verdict"], v.get("advise") or "")
+                        for v in m["verdicts"]])
+    else:
+        lines.append("No verdicts: no outcomes in the evidence period.")
+    lines += ["", "### Cooldowns", ""] + cooldown_lines(m["cooldowns"])
+    if m["observations"]:
+        lines += ["", "### Observations", ""] + [f"- {o}" for o in m["observations"]]
+    return lines + [""]
+
+
 def render_audit(r):
     if r["window"] not in AUDIT_WINDOWS:
         return []
@@ -1190,7 +1346,7 @@ def render_insights(r):
     return ["## Insights", "", f"Not generated: {why}.", ""]
 
 
-SECTION_RENDERERS = [render_delivery, render_audit, render_thresholds, render_insights]
+SECTION_RENDERERS = [render_delivery, render_models, render_audit, render_thresholds, render_insights]
 
 
 def render(r):

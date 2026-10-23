@@ -41,6 +41,7 @@ WINDOW_S = 7 * 86400
 # Epochs outside these bounds are corrupt, not merely old or far off.
 EPOCH_MIN = dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc).timestamp()
 EPOCH_MAX = dt.datetime(2100, 1, 1, tzinfo=dt.timezone.utc).timestamp()
+PCT_MAX = 200
 # A reading older than this no longer says where the quota is now.
 STALE_S = 30 * 60
 CONCURRENCY_WINDOW_S = 4 * 3600
@@ -228,7 +229,9 @@ def sane_reading(r):
         if r.get(key) is None:
             continue
         v = number(r[key])
-        if v is None or not (math.isfinite(v) and 0 <= v <= 100):
+        # The plan reports usage past its limit (102 has been logged), and that
+        # is exactly the reading the five-hour pause exists for.
+        if v is None or not (math.isfinite(v) and 0 <= v <= PCT_MAX):
             return False
     return True
 
@@ -569,10 +572,12 @@ def cmd_ladder(args):
     return 0
 
 
-def review_rule(ctx, risk, implementer):
+def review_rule(ctx, risk, implementer, allow_same_family=False):
     """Who may review work done by `implementer` at this tier, as a predicate over
     a lane plus the reason when nobody can. An unknown implementer excludes no
-    one beyond the tier rule itself."""
+    one beyond the tier rule itself. `allow_same_family` only lifts the R1
+    other-family requirement: the implementer's own lane stays excluded and the
+    R2 and R3 rules do not move."""
     impl = ctx.by_id.get(implementer) if implementer else None
     if risk == "R3":
         why = "no independent R3 reviewer" if implementer == R3_REVIEWER else f"{R3_REVIEWER} cannot review"
@@ -581,7 +586,8 @@ def review_rule(ctx, risk, implementer):
         return (lambda c: c["id"] in R2_REVIEWERS and c["id"] != implementer), \
             "no sonnet-or-better reviewer other than the implementer"
     if risk == "R1":
-        return (lambda c: c["id"] != implementer and (impl is None or c["family"] != impl["family"])), \
+        return (lambda c: c["id"] != implementer
+                and (allow_same_family or impl is None or c["family"] != impl["family"])), \
             "no eligible reviewer of another model family"
     return (lambda c: True), "no reviewer"
 
@@ -619,7 +625,7 @@ def choose(ctx, args, busy):
     exclude = parse_lane_list(args.exclude, ctx)
     pace_cfg, ev_cfg = ctx.cfg["pacing"], ctx.cfg["evaluation"]
     if cls == "review" and risk != "R0":
-        allowed, why = review_rule(ctx, risk, args.implementer)
+        allowed, why = review_rule(ctx, risk, args.implementer, getattr(args, "allow_same_family", False))
         if not any(can_review(x, risk) and allowed(x) for x in ctx.lanes):
             return {"result": "none", "reason": why}
     else:
@@ -775,6 +781,8 @@ def build_parser():
     a.add_argument("--ticket", metavar="KEY")
     a.add_argument("--seed", metavar="S")
     a.add_argument("--implementer", metavar="LANE", help="lane that wrote the change, for review classes")
+    a.add_argument("--allow-same-family", action="store_true",
+                   help="for class review at R1: accept a reviewer of the implementer's model family")
     a.add_argument("--no-log", action="store_true", help="decide without appending to assignments.jsonl")
     a.add_argument("--json", action="store_true")
 

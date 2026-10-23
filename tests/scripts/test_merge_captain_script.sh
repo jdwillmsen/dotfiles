@@ -325,9 +325,11 @@ cfg() {  # limit overrides as key=value; LIVE_MAX sets the live repo's ceiling
         echo "[limits]"
         local kv
         for kv in "$@"; do echo "$kv"; done
+        printf '[checks]\nignore = [%s]\n' "${CHECK_IGNORE:-}"
         echo '[authors]'
         echo 'allow = ["jdwillmsen", "jdwlabs-agent-bot", "renovate[bot]", "dependabot[bot]"]'
         printf '[[repo]]\nname = "acme/live"\nmode = "live"\nmax_tier = "%s"\n' "${LIVE_MAX:-R2}"
+        if [ -n "${ALLOW_NO_CHECKS:-}" ]; then echo 'allow_no_checks = true'; fi
         printf '[[repo]]\nname = "acme/dry"\nmode = "dry-run"\nmax_tier = "R2"\n'
         printf '[[repo]]\nname = "acme/off"\nmode = "off"\nmax_tier = "R2"\n'
     } >"$CFG"
@@ -822,7 +824,7 @@ expect 31 skipped paused
 ! writes | grep -vqE '^(label create|pr edit)' || fail "the kill switch did not stop the writes" "$(writes)"
 
 # ── Gates ──
-newcase max_prs_per_run=20
+CHECK_IGNORE='"lint"' newcase max_prs_per_run=20
 for n in 40 41 42 43 44 45 46 47 48 49 50 51; do
     fx pr "$n"
     fx class "$n" R1
@@ -883,6 +885,64 @@ fx class 56 R0
 want 0 run
 expect 56 merged
 
+# Every failing conclusion blocks, required or not, unless the name is on the ignore list.
+for concl in FAILURE ERROR TIMED_OUT CANCELLED ACTION_REQUIRED STARTUP_FAILURE; do
+    for ms in UNSTABLE CLEAN; do
+        newcase
+        echo '[{"name":"build"}]' >"$S/required.json"
+        fx pr 130 "mergeStateStatus=$ms" 'statusCheckRollup=[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS"},{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"'"$concl"'"}]'
+        fx class 130 R0
+        want 0 run
+        expect 130 blocked "checks failed: lint"
+        [ "$(count '^pr merge' "$S/gh.log")" = 0 ] || fail "a failing non-required check ($concl, $ms) did not block"
+    done
+done
+newcase
+fx pr 131 'statusCheckRollup=[{"__typename":"StatusContext","context":"ci/legacy","state":"ERROR"}]' mergeStateStatus=UNSTABLE
+fx class 131 R0
+want 0 run
+expect 131 blocked "checks failed: ci/legacy"
+# A listed name is tolerated, but only that name, and never when it is a required check.
+CHECK_IGNORE='"lint"' newcase
+echo '[{"name":"build"}]' >"$S/required.json"
+fx pr 132 mergeStateStatus=UNSTABLE 'statusCheckRollup=[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS"},{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"TIMED_OUT"}]'
+fx class 132 R0
+fx pr 133 mergeStateStatus=UNSTABLE 'statusCheckRollup=[{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"FAILURE"},{"__typename":"CheckRun","name":"deploy","status":"COMPLETED","conclusion":"FAILURE"}]'
+fx class 133 R0
+fx pr 134 mergeStateStatus=UNSTABLE 'statusCheckRollup=[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS"}]'
+fx class 134 R0
+want 0 run
+expect 132 merged
+expect 133 blocked "checks failed: deploy"
+expect 134 blocked "merge state UNSTABLE"
+CHECK_IGNORE='"build"' newcase
+echo '[{"name":"build"}]' >"$S/required.json"
+fx pr 135 mergeStateStatus=UNSTABLE 'statusCheckRollup=[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"FAILURE"}]'
+fx class 135 R0
+want 0 run
+expect 135 blocked "checks failed: build"
+# No checks at all is not a pass: wait, unless the repository says it has none by design.
+newcase
+fx pr 136 'statusCheckRollup=[]'
+fx class 136 R0
+want 0 run
+expect 136 waiting no-checks
+[ "$(count '^pr merge' "$S/gh.log")" = 0 ] || fail "merged a pull request with no checks"
+ALLOW_NO_CHECKS=1 newcase
+fx pr 136 'statusCheckRollup=[]'
+fx class 136 R0
+want 0 run
+expect 136 merged
+
+# ── The tier must describe the commit that is merged ──
+newcase
+approve_setup 137 R1
+printf '%s\n' "$(printf '%040x' 13700)" >"$S/head_seq_137"
+want 0 run
+expect 137 waiting "head moved during classification"
+[ -z "$(writes)" ] || fail "a pull request whose head moved during classification was written to" "$(writes)"
+[ ! -e "$S/claude.calls" ] && [ ! -e "$S/pace.log" ] || fail "reviewed a pull request whose head moved during classification"
+
 # ── Classification failure never guesses a tier ──
 newcase
 fx pr 57
@@ -910,13 +970,13 @@ grep -q '^label create tag/ci' "$S/gh.log" && fail "an existing label was create
 # ── Head handling ──
 newcase
 approve_setup 60 R1
-printf '%s\n%s\n' "$(printf '%040x' 60)" "$(printf '%040x' 6000)" >"$S/head_seq_60"
+printf '%s\n%s\n%s\n' "$(printf '%040x' 60)" "$(printf '%040x' 60)" "$(printf '%040x' 6000)" >"$S/head_seq_60"
 want 0 run
 expect 60 waiting "head moved during review"
 [ ! -e "$S/claude.calls" ] || fail "reviewed a diff whose head moved"
 newcase
 approve_setup 61 R1
-printf '%s\n%s\n%s\n' "$(printf '%040x' 61)" "$(printf '%040x' 61)" "$(printf '%040x' 6100)" >"$S/head_seq_61"
+printf '%s\n%s\n%s\n%s\n' "$(printf '%040x' 61)" "$(printf '%040x' 61)" "$(printf '%040x' 61)" "$(printf '%040x' 6100)" >"$S/head_seq_61"
 want 0 run
 expect 61 waiting "head moved before merge"
 [ "$(count '^pr merge' "$S/gh.log")" = 0 ] || fail "merged a head that was not the reviewed one"

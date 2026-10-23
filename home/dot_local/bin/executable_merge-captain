@@ -154,6 +154,10 @@ def clean(text, limit=300):
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
+def shown_names(names):
+    return ", ".join(clean(x, 60) for x in names[:3])
+
+
 def md_safe(text, limit):
     """Model-written text headed for a pull request comment: no HTML (so no
     forged marker), no mentions, no table breakers."""
@@ -223,6 +227,9 @@ def load_config():
     allow = (cfg.get("authors") or {}).get("allow")
     if not isinstance(allow, list) or not all(isinstance(a, str) and a.strip() for a in allow):
         die(EXIT_FAIL, "[authors] allow must be a list of login names")
+    ignore = (cfg.get("checks") or {}).get("ignore", [])
+    if not isinstance(ignore, list) or not all(isinstance(a, str) and a.strip() for a in ignore):
+        die(EXIT_FAIL, "[checks] ignore must be a list of check names")
     repos, seen = [], set()
     for row in cfg.get("repo") or []:
         name = row.get("name") if isinstance(row, dict) else None
@@ -238,8 +245,11 @@ def load_config():
         if ceiling not in CEILINGS:
             die(EXIT_FAIL, f"repo {name}: max_tier must be one of {','.join(CEILINGS)} "
                            f"(R3 is never merged), got {ceiling!r}")
-        repos.append({"name": name, "mode": mode, "max_tier": ceiling})
-    return {"limits": limits, "allow": allow, "repos": repos}
+        no_checks = row.get("allow_no_checks", False)
+        if not isinstance(no_checks, bool):
+            die(EXIT_FAIL, f"repo {name}: allow_no_checks must be true or false, got {no_checks!r}")
+        repos.append({"name": name, "mode": mode, "max_tier": ceiling, "allow_no_checks": no_checks})
+    return {"limits": limits, "allow": allow, "ignore": ignore, "repos": repos}
 
 
 # ── External tools ───────────────────────────────────────────────────────────
@@ -692,26 +702,33 @@ class Captain:
             return set() if "no required checks" in r.err else None
         return {x.get("name") for x in rows if isinstance(x, dict)} if isinstance(rows, list) else None
 
-    def gate(self, repo, n, head, d):
+    def gate(self, rc, n, d):
+        repo = rc["name"]
         mergeable = str(d.get("mergeable") or "").upper()
         if mergeable == "CONFLICTING":
             raise Stop("blocked", "merge conflicts")
         if mergeable != "MERGEABLE":
             raise Stop("waiting", "mergeability not computed yet")
 
+        rollup = [x for x in d.get("statusCheckRollup") or [] if isinstance(x, dict)]
+        if not rollup and not rc["allow_no_checks"]:
+            raise Stop("waiting", "no-checks")
         states = {"pass": [], "pending": [], "fail": []}
-        for item in d.get("statusCheckRollup") or []:
-            if isinstance(item, dict):
-                name = clean(item.get("name") or item.get("context") or "check", 60)
-                states[self.check_state(item)].append(name)
+        for item in rollup:
+            states[self.check_state(item)].append(str(item.get("name") or item.get("context") or "check"))
         if states["pending"]:
-            raise Stop("waiting", f"checks pending: {', '.join(states['pending'][:3])}")
+            raise Stop("waiting", f"checks pending: {shown_names(states['pending'])}")
         state = str(d.get("mergeStateStatus") or "").upper()
-        if states["fail"]:
-            required = self.required_checks(repo, n) if state == "UNSTABLE" else None
+        # Only a failure the owner listed by name is tolerated; every other failing check blocks, required or not.
+        unlisted = [x for x in states["fail"] if x not in self.cfg["ignore"]]
+        if unlisted:
+            raise Stop("blocked", f"checks failed: {shown_names(unlisted)}")
+        tolerated = bool(states["fail"])
+        if tolerated:
+            required = self.required_checks(repo, n)
             if required is None or set(states["fail"]) & required:
-                raise Stop("blocked", f"checks failed: {', '.join(states['fail'][:3])}")
-            self.step("checks", "only non-required checks failing")
+                raise Stop("blocked", f"checks failed: {shown_names(states['fail'])}")
+            self.step("checks", "only ignored checks failing")
 
         if str(d.get("reviewDecision") or "").upper() == "CHANGES_REQUESTED":
             raise Stop("blocked", "changes requested in a review")
@@ -754,7 +771,7 @@ class Captain:
         updated = parse_time(d.get("updatedAt"))
         if updated is None or self.now - updated < SETTLE_S:
             raise Stop("waiting", "updated in the last 120 seconds")
-        if state not in ("CLEAN", "UNSTABLE"):
+        if state != "CLEAN" and not (state == "UNSTABLE" and tolerated):
             raise Stop("blocked", f"merge state {clean(state, 20) or 'unknown'}")
 
     # -- review --------------------------------------------------------------
@@ -967,6 +984,10 @@ class Captain:
         tier, tags, reasons = self.classify(repo, n)
         d["tier"], d["tags"] = tier, tags
         self.step("classify", f"{tier} {','.join(tags)}")
+        # The tier describes the commit change-class read, which may not be the one the gate evaluated.
+        classified, _ = self.fetch_head(repo, n)
+        if classified != head:
+            raise Stop("waiting", "head moved during classification")
 
         if self.live:
             wanted = [f"risk/{tier}"] + [f"tag/{t}" for t in tags]
@@ -983,7 +1004,7 @@ class Captain:
                                f"Risk tier {tier} is above the {ceiling} this repository lets the captain merge, "
                                "so it is left for a person.", why)
 
-        self.gate(repo, n, head, details)
+        self.gate(rc, n, details)
         self.step("gates", "met")
 
         lane = None

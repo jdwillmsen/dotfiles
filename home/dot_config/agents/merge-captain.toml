@@ -6,6 +6,8 @@
 #       off     ignored
 # max_tier: highest risk tier it may merge on its own (R0, R1 or R2). R3 is never
 # merged, whatever is written here.
+# allow_no_checks: true lets a repository with no CI at all merge; otherwise a
+# pull request that reports no checks waits.
 
 [limits]
 max_prs_per_run = 6
@@ -13,6 +15,11 @@ max_reviews_per_run = 3
 max_merges_per_hour = 6
 review_timeout_s = 600
 max_diff_bytes = 150000
+
+[checks]
+# Names of checks whose failure is tolerated. Every other failing check blocks
+# the merge, required or not.
+ignore = []
 
 [authors]
 # Only pull requests opened by these logins are touched.

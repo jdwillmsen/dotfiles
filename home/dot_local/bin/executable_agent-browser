@@ -97,9 +97,10 @@ cmd_check() {
     [ -n "$site" ] || err usage "check needs a site" "agent-browser check <github|linkedin|URL>"
     alive chrome || err not_running "browser is not running" "agent-browser start"
     command -v uv >/dev/null 2>&1 || err missing_dependency "uv not found" "install uv"
-    # Decides from what the page renders, never from cookies or form fields.
+    # Decides from what the page renders, never from cookies or field values.
     uv run -q --with playwright python - "$site" "$CDP_PORT" <<'PY'
 import sys
+from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright
 site, port = sys.argv[1], sys.argv[2]
 known = {
@@ -107,6 +108,21 @@ known = {
     "linkedin": ("https://www.linkedin.com/feed/", "linkedin.com/login"),
 }
 url, login_marker = known.get(site, (site, "/login"))
+LOGIN_HOSTS = ("account.", "accounts.", "login.", "auth.", "sso.", "signin.", "id.")
+LOGIN_WORDS = ("login", "signin", "sign_in", "sign-in", "checkpoint")
+LOGIN_SEGMENTS = {"auth", "sso"}
+
+
+def looks_logged_out(asked, landed, marker):
+    # Logged-out sites often redirect to a separate account host, which the
+    # path markers alone never see.
+    a, l = urlparse(asked), urlparse(landed)
+    path = l.path.lower()
+    if marker in landed or any(w in path for w in LOGIN_WORDS) or LOGIN_SEGMENTS & set(path.split("/")):
+        return True
+    return l.hostname != a.hostname and (l.hostname or "").startswith(LOGIN_HOSTS)
+
+
 with sync_playwright() as p:
     ctx = p.chromium.connect_over_cdp(f"http://127.0.0.1:{port}").contexts[0]
     page = ctx.new_page()
@@ -118,7 +134,7 @@ with sync_playwright() as p:
             user = page.locator('meta[name="user-login"]').get_attribute("content") or ""
             ok = bool(user)
         else:
-            ok = login_marker not in page.url and "signin" not in page.url and "checkpoint" not in page.url
+            ok = not looks_logged_out(url, page.url, login_marker) and not page.locator("input[type=password]:visible").count()
         print(f"site: {site}\nlogged_in: {'yes' if ok else 'no'}")
         if user:
             print(f"user: {user}")

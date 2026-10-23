@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+set -uo pipefail
+# A logged-in browser an agent can drive while the human handles every login.
+#
+# The human signs in once per site through a noVNC viewer; the session lives
+# in one persistent Chrome profile, so later tasks reuse it instead of asking
+# again. The agent drives the page over the Chrome DevTools Protocol and never
+# types, reads or stores a credential: the check subcommand only looks at what
+# a logged-in page shows, never at cookies or password fields.
+#
+# Two ports carry the trust boundary. CDP grants full control of every
+# logged-in session, so it binds to loopback only. The viewer binds to the
+# tailnet address only, never 0.0.0.0, and stop closes it after each task.
+#
+# See docs/agent-browser.md.
+
+PROFILE="${AGENT_BROWSER_PROFILE:-$HOME/.cache/agent-browser}"
+RUN="${AGENT_BROWSER_RUN:-${XDG_RUNTIME_DIR:-/tmp/agent-browser-$UID}/agent-browser}"
+DISPLAY_NUM="${AGENT_BROWSER_DISPLAY:-99}"
+CDP_PORT="${AGENT_BROWSER_CDP_PORT:-9222}"
+VNC_PORT="${AGENT_BROWSER_VNC_PORT:-5900}"
+WEB_PORT="${AGENT_BROWSER_WEB_PORT:-6080}"
+NOVNC_DIR="${AGENT_BROWSER_NOVNC_DIR:-/usr/share/novnc}"
+COMPONENTS="xvfb chrome vnc web"
+
+err() {  # err CODE MESSAGE [HINT]
+    printf 'error: %s\nmessage: %s\n' "$1" "$2"
+    [ $# -lt 3 ] || printf 'help[1]:\n  %s\n' "$3"
+    exit 1
+}
+
+alive() { [ -f "$RUN/$1.pid" ] && kill -0 "$(cat "$RUN/$1.pid")" 2>/dev/null; }
+
+tailnet_ip() {
+    [ -n "${AGENT_BROWSER_BIND:-}" ] && { echo "$AGENT_BROWSER_BIND"; return; }
+    command -v tailscale >/dev/null 2>&1 || return 1
+    tailscale ip -4 2>/dev/null | head -n1
+}
+
+launch() {  # launch NAME CMD... ; detached, pid recorded
+    "${@:2}" >"$RUN/$1.log" 2>&1 &
+    echo $! >"$RUN/$1.pid"
+}
+
+cmd_start() {
+    local url="${1:-about:blank}" ip
+    for bin in Xvfb google-chrome x11vnc websockify; do
+        command -v "$bin" >/dev/null 2>&1 || err missing_dependency "$bin not found" "see docs/agent-browser.md for the packages"
+    done
+    ip="$(tailnet_ip)" || true
+    [ -n "$ip" ] || err no_tailnet "no tailnet IPv4 address; the viewer never binds anywhere else" "tailscale up"
+    mkdir -p "$RUN" "$PROFILE"; chmod 700 "$RUN" "$PROFILE"
+
+    alive xvfb || { launch xvfb Xvfb ":$DISPLAY_NUM" -screen 0 1440x900x24 -nolisten tcp; sleep 1; }
+    alive chrome || {
+        DISPLAY=":$DISPLAY_NUM" launch chrome google-chrome --user-data-dir="$PROFILE" \
+            --remote-debugging-address=127.0.0.1 --remote-debugging-port="$CDP_PORT" \
+            --no-first-run --no-default-browser-check --window-size=1440,900 --start-maximized "$url"
+        sleep 2
+    }
+    alive vnc || { launch vnc x11vnc -display ":$DISPLAY_NUM" -localhost -rfbport "$VNC_PORT" -forever -shared -nopw -quiet; sleep 1; }
+    alive web || launch web websockify --web "$NOVNC_DIR" "$ip:$WEB_PORT" "localhost:$VNC_PORT"
+    echo "$ip" >"$RUN/bind"
+    cmd_status
+}
+
+cmd_stop() {
+    local stopped=0
+    for c in web vnc chrome xvfb; do
+        if alive "$c"; then kill "$(cat "$RUN/$c.pid")" 2>/dev/null && stopped=$((stopped + 1)); fi
+        rm -f "$RUN/$c.pid"
+    done
+    rm -f "$RUN/bind"
+    printf 'stopped: %d\nprofile: %s (kept; sessions persist)\n' "$stopped" "$PROFILE"
+}
+
+cmd_status() {
+    local up=0 c ip
+    printf 'components[4]{name,state}:\n'
+    for c in $COMPONENTS; do
+        if alive "$c"; then printf '  %s,up\n' "$c"; up=$((up + 1)); else printf '  %s,down\n' "$c"; fi
+    done
+    printf 'profile: %s\n' "$PROFILE"
+    if [ "$up" -eq 4 ]; then
+        ip="$(cat "$RUN/bind" 2>/dev/null)"
+        printf 'state: running\nviewer: http://%s:%s/vnc.html\ncdp: http://127.0.0.1:%s\n' "$ip" "$WEB_PORT" "$CDP_PORT"
+        printf 'help[2]:\n  agent-browser check <github|linkedin|URL>\n  agent-browser stop\n'
+    elif [ "$up" -eq 0 ]; then
+        printf 'state: stopped\nhelp[1]:\n  agent-browser start [URL]\n'
+    else
+        printf 'state: partial (%d/4 up)\nhelp[1]:\n  agent-browser stop && agent-browser start\n' "$up"
+    fi
+}
+
+cmd_check() {
+    local site="${1:-}"
+    [ -n "$site" ] || err usage "check needs a site" "agent-browser check <github|linkedin|URL>"
+    alive chrome || err not_running "browser is not running" "agent-browser start"
+    command -v uv >/dev/null 2>&1 || err missing_dependency "uv not found" "install uv"
+    # Decides from what the page renders, never from cookies or form fields.
+    uv run -q --with playwright python - "$site" "$CDP_PORT" <<'PY'
+import sys
+from playwright.sync_api import sync_playwright
+site, port = sys.argv[1], sys.argv[2]
+known = {
+    "github": ("https://github.com/", "github.com/login"),
+    "linkedin": ("https://www.linkedin.com/feed/", "linkedin.com/login"),
+}
+url, login_marker = known.get(site, (site, "/login"))
+with sync_playwright() as p:
+    ctx = p.chromium.connect_over_cdp(f"http://127.0.0.1:{port}").contexts[0]
+    page = ctx.new_page()
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(1500)
+        user = ""
+        if site == "github":
+            user = page.locator('meta[name="user-login"]').get_attribute("content") or ""
+            ok = bool(user)
+        else:
+            ok = login_marker not in page.url and "signin" not in page.url and "checkpoint" not in page.url
+        print(f"site: {site}\nlogged_in: {'yes' if ok else 'no'}")
+        if user:
+            print(f"user: {user}")
+        if not ok:
+            print("help[1]:\n  open the viewer from `agent-browser status`, sign in, then re-run this check")
+    finally:
+        page.close()
+PY
+}
+
+cmd_wipe() {
+    [ "${1:-}" = "--yes" ] || err confirmation_required "wipe deletes every saved login in $PROFILE" "agent-browser wipe --yes"
+    alive chrome && err running "stop the browser first" "agent-browser stop"
+    rm -rf "$PROFILE"
+    printf 'wiped: %s\n' "$PROFILE"
+}
+
+usage() {
+    cat <<EOF
+agent-browser: logged-in browser for agents; the human does every login.
+usage: agent-browser [status|start [URL]|stop|check <github|linkedin|URL>|wipe --yes]
+EOF
+}
+
+case "${1:-status}" in
+    status) cmd_status ;;
+    start) shift; cmd_start "$@" ;;
+    stop) cmd_stop ;;
+    check) shift; cmd_check "$@" ;;
+    wipe) shift; cmd_wipe "$@" ;;
+    -h|--help|help) usage ;;
+    *) err unknown_command "unknown command: $1" "agent-browser --help" ;;
+esac

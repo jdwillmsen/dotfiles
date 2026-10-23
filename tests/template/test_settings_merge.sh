@@ -77,3 +77,23 @@ echo "$out" | "$PY" -c 'import json,sys; s=json.load(sys.stdin)["skillOverrides"
  assert not {"tdd","zoom-out","setup-matt-pocock-skills"} & set(s), "removed skillOverrides kept: %s" % s; \
  assert s["my-skill"]=="off", "unknown user skillOverride removed"; \
  assert s["lavish"]=="off", "enforced skillOverride lost"; print("PASS")'
+
+# The delivery-state guard is enforced: present on a fresh install, kept next to the rtk hook, added next to hooks
+# written by hand, never duplicated, and not switched off by an on-disk PreToolUse list that omits it.
+# shellcheck disable=SC2016  # the python source carries a literal $HOME, which the settings file keeps unexpanded
+guard_check='import json,sys; d=json.load(sys.stdin); pre=d["hooks"]["PreToolUse"]; \
+ guards=[h for e in pre for h in e["hooks"] if h["command"].endswith("guard-delivery-state.sh")]; \
+ assert len(guards)==1, "guard hook count %d" % len(guards); \
+ entry=[e for e in pre if any(h["command"].endswith("guard-delivery-state.sh") for h in e["hooks"])][0]; \
+ assert entry["matcher"]=="Write|Edit|MultiEdit|Bash", entry["matcher"]; \
+ assert guards[0]["command"]=="$HOME/.claude/hooks/guard-delivery-state.sh", guards[0]; \
+ assert guards[0]["type"]=="command"'
+out="$(printf '' | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
+echo "$out" | "$PY" -c "$guard_check; \
+assert any(h[\"command\"]==\"rtk hook claude\" for e in pre for h in e[\"hooks\"]), \"rtk hook lost\"; print(\"PASS\")"
+existing='{"hooks":{"PreToolUse":[{"matcher":"Task","hooks":[{"type":"command","command":"my-hook"}]}],"Stop":[{"hooks":[{"type":"command","command":"my-stop"}]}]}}'
+out="$(printf '%s' "$existing" | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
+out="$(printf '%s' "$out" | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
+echo "$out" | "$PY" -c "$guard_check; \
+assert any(h[\"command\"]==\"my-hook\" for e in pre for h in e[\"hooks\"]), \"user hook lost\"; \
+assert d[\"hooks\"][\"Stop\"][0][\"hooks\"][0][\"command\"]==\"my-stop\", \"user Stop hook lost\"; print(\"PASS\")"

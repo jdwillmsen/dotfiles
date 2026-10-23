@@ -254,7 +254,7 @@ good_line() {
     echo '{"at": NaN, "seven_day_pct": 50}'
     echo "{\"at\": $((now_epoch - 30)), \"seven_day_pct\": NaN, \"seven_day_resets_at\": $((now_epoch + 302400))}"
     echo "{\"at\": $((now_epoch - 30)), \"seven_day_pct\": Infinity}"
-    echo "{\"at\": $((now_epoch - 30)), \"seven_day_pct\": 140, \"seven_day_resets_at\": $((now_epoch + 302400))}"
+    echo "{\"at\": $((now_epoch - 30)), \"seven_day_pct\": 250, \"seven_day_resets_at\": $((now_epoch + 302400))}"
     echo "{\"at\": $((now_epoch - 30)), \"five_hour_pct\": -5}"
     echo "{\"at\": $((now_epoch - 30)), \"seven_day_pct\": 50, \"seven_day_resets_at\": 1e20}"
     echo "{\"at\": $((now_epoch - 30)), \"seven_day_pct\": 50, \"seven_day_resets_at\": \"nan\"}"
@@ -266,6 +266,11 @@ check "j['quota_skipped'] == 12" "skipped quota lines are miscounted"
 check "j['state'] == 'under' and j['used_pct'] == 27.5 and j['claude_multiplier'] == 1.632" "a bad line displaced the good reading"
 run 0 status
 grep -q "^quota_skipped: 12" "$out" || fail "status TOON has no quota_skipped" "$(cat "$out")"
+# A reading past the limit is real data: 102% on the five-hour window pauses Claude lanes.
+printf '{"at": %s, "five_hour_pct": 102, "five_hour_resets_at": %s, "seven_day_pct": 46, "seven_day_resets_at": %s}\n' \
+    "$((now_epoch - 60))" "$((now_epoch + 7200))" "$((now_epoch + 302400))" >"$AGENT_PACE_QUOTA"
+run 0 status --json
+check "j['quota_skipped'] == 0 and j['five_hour_paused'] is True" "a reading over 100 percent was discarded instead of pausing"
 # Invalid UTF-8 beside a good line is survivable; the lone bad line is counted.
 { printf '\xff\xfe\n'; good_line; } >"$AGENT_PACE_QUOTA"
 run 0 status --json
@@ -515,6 +520,23 @@ AGENT_PACE_LANES="$only_anthropic" run 3 assign --class review --risk R1 --imple
 check "j['result'] == 'none' and j['reason']" "R1 review fell back to the implementer's family"
 AGENT_PACE_LANES="$only_anthropic" run 0 assign --class impl --risk R1 --implementer claude-sonnet --no-log --json
 check "j['review_lane'] is None" "R1 review_lane fell back to the implementer's family"
+# --allow-same-family lifts only the R1 family rule: the implementer's own lane stays out.
+AGENT_PACE_LANES="$only_anthropic" run 0 assign --class review --risk R1 --implementer claude-sonnet --allow-same-family \
+    --no-log --json
+check "j['result'] == 'assigned' and j['lane'] == 'claude-opus'" "--allow-same-family did not reach the other same-family lane"
+AGENT_PACE_LANES="$only_anthropic" run 0 assign --class review --risk R1 --allow-same-family --no-log --json
+check "j['result'] == 'assigned'" "--allow-same-family without an implementer"
+AGENT_PACE_LANES="$only_anthropic" run 3 assign --class review --risk R1 --implementer claude-sonnet \
+    --exclude claude-opus --allow-same-family --no-log --json
+check "j['result'] == 'none'" "--allow-same-family overrode --exclude"
+run 3 assign --class review --risk R3 --implementer claude-opus --allow-same-family --no-log --json
+check "j['result'] == 'none' and j['reason'] == 'no independent R3 reviewer'" "--allow-same-family relaxed the R3 rule"
+for s in 1 2 3 4 5 6; do
+    run 0 assign --class review --risk R2 --implementer claude-sonnet --allow-same-family --seed "af$s" --no-log --json
+    check "j['lane'] == 'claude-opus'" "--allow-same-family relaxed the R2 rule (implementer reviewed itself)"
+    run 0 assign --class review --risk R2 --implementer claude-opus --allow-same-family --seed "af$s" --no-log --json
+    check "j['lane'] == 'claude-sonnet'" "--allow-same-family relaxed the R2 rule"
+done
 
 # ── Evidence: ladder order, factor, floor ──
 weights '{"lanes": {

@@ -118,7 +118,7 @@ def looks_logged_out(asked, landed, marker):
     # path markers alone never see.
     a, l = urlparse(asked), urlparse(landed)
     path = l.path.lower()
-    if marker in landed or any(w in path for w in LOGIN_WORDS) or LOGIN_SEGMENTS & set(path.split("/")):
+    if marker in (l.hostname or "") + path or any(w in path for w in LOGIN_WORDS) or LOGIN_SEGMENTS & set(path.split("/")):
         return True
     return l.hostname != a.hostname and (l.hostname or "").startswith(LOGIN_HOSTS)
 

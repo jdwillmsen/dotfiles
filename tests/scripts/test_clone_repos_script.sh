@@ -106,6 +106,11 @@ grep -qx '  acme/missing,acme/missing,failed' <<<"$out" || fail "failed row: $ou
 grep -qx '  acme/one,acme/one2,cloned' <<<"$out" || fail "a failure must not stop later clones: $out"
 [ ! -e "$root/acme/missing" ] || fail "failed clone left a directory"
 
+# A value with a TOON delimiter must be quoted or the line misparses.
+printf '%s\n' $'acme/one\tacme/one\todd:tag' >"$tmp/odd.tsv"
+out="$(bash "$script" --list "$tmp/odd.tsv" --root "$root" --group 'odd:tag' --dry-run)" || fail "odd tag dry run: $out"
+grep -qx 'groups: "odd:tag"' <<<"$out" || fail "value with ':' must be quoted: $out"
+
 # Usage errors exit 2 and name the known groups.
 rc=0; out="$(run --group nope)" || rc=$?
 [ "$rc" = 2 ] || fail "unknown group must exit 2, got $rc"

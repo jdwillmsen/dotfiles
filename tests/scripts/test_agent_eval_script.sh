@@ -665,7 +665,7 @@ r = json.load(open(sys.argv[1]))["rows"][0]
 assert r["attempts"] == 6 and r["success"] == 5, r
 PY
 AGENT_EVAL_GH="$tmp/no-gh" run 1 enrich
-grep -q "^error:\|^errors: 5$" "$out" || fail "a missing gh was not reported" "$(cat "$out")"
+grep -q "^error:\|^errors: 4$" "$out" || fail "a missing gh was not reported" "$(cat "$out")"
 
 # GitHub's search rate limit stops the run cleanly: what is known is kept, the next run continues, no failure.
 cat >"$tmp/gh-limited" <<'STUB'
@@ -695,20 +695,48 @@ gaps = [b - a for a, b in zip(t, t[1:])]
 assert min(gaps) >= 0.25, min(gaps)
 PY
 
-# An outcome whose PR state settled long ago is not searched again.
+# A ticket whose every attempt is a closed, unmerged PR is final and is not searched again; a merged one
+# keeps being checked (a revert can land weeks later), and a settled attempt never hands its PR to another.
 python3 - "$AGENT_EVAL_STATE/outcomes.jsonl" <<'PY'
 import json, sys
 rows = {}
 for line in open(sys.argv[1]):
     r = json.loads(line)
     rows[r["id"]] = r
-r = dict(rows["e-12"], id="e-old", ticket="JDW-77", merged=True, reverted=False,
-         pr="https://example.invalid/o/r/pull/77", at="2026-09-20T00:00:00+00:00")
-open(sys.argv[1], "a").write(json.dumps(r) + "\n")
+base = rows["e-12"]
+def add(**kw):
+    r = dict(base, **kw)
+    open(sys.argv[1], "a").write(json.dumps(r) + "\n")
+add(id="e-final", ticket="JDW-77", merged=False, reverted=None, pr="https://example.invalid/o/r/pull/77",
+    at="2026-10-20T00:00:00+00:00")
+add(id="e-old-merged", ticket="JDW-78", merged=True, reverted=False, pr="https://example.invalid/o/r/pull/78",
+    at="2026-10-02T00:00:00+00:00")
+add(id="e-old-merged-2", ticket="JDW-78", merged=None, reverted=None, pr=None, status="completed",
+    at="2026-10-15T00:00:00+00:00")
 PY
+cat >"$tmp/gh-seen" <<'STUB'
+#!/usr/bin/env bash
+echo "$@" >>"$GH_TIMES"
+echo '[{"number":78,"title":"feat: JDW-78","url":"https://example.invalid/o/r/pull/78","state":"closed"}]'
+STUB
+chmod +x "$tmp/gh-seen"
 : >"$tmp/gh-times"
-GH_TIMES="$tmp/gh-times" AGENT_EVAL_GH="$tmp/gh-timed" run 0 enrich --since 90
-grep -q "^tickets: 5$" "$out" || fail "a settled old outcome was searched again" "$(cat "$out")"
+GH_TIMES="$tmp/gh-times" AGENT_EVAL_GH="$tmp/gh-seen" run 0 enrich --since 90
+grep -q -- "JDW-77" "$tmp/gh-times" && fail "a final closed-unmerged ticket was searched again" "$(cat "$tmp/gh-times")"
+grep -q -- "JDW-78" "$tmp/gh-times" || fail "a merged ticket stopped being checked for reverts" "$(cat "$tmp/gh-times")"
+python3 - "$AGENT_EVAL_STATE/outcomes.jsonl" <<'PY' || fail "a second attempt was handed the first attempt's PR"
+import json, sys
+rows = {}
+for line in open(sys.argv[1]):
+    r = json.loads(line)
+    rows[r["id"]] = r
+assert rows["e-old-merged-2"]["pr"] is None, rows["e-old-merged-2"]
+PY
+
+# Bad pacing settings fall back to the default instead of crashing or switching pacing off.
+for bad in abc nan -1 inf; do
+    AGENT_EVAL_GH_INTERVAL_S="$bad" AGENT_EVAL_GH="$tmp/no-gh" "$ae" scoreboard >/dev/null 2>&1 || fail "AGENT_EVAL_GH_INTERVAL_S=$bad broke the tool"
+done
 
 # Searches are scoped to the owners in the streams map, one call per owner, and only one attempt per ticket is marked.
 cat >"$tmp/gh-scoped" <<'STUB'

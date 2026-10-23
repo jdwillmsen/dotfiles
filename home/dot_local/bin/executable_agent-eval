@@ -65,9 +65,16 @@ T3_DB = Path(os.environ.get("AGENT_EVAL_T3_DB", HOME / ".t3/userdata/statev2.sql
 GH = os.environ.get("AGENT_EVAL_GH", "gh")
 # GitHub's search API allows 30 requests a minute and a rescan of every ticket needs many more, so
 # searches are spaced out. Tests set this to 0.
-GH_INTERVAL_S = float(os.environ.get("AGENT_EVAL_GH_INTERVAL_S", "2.3"))
-# An outcome whose PR state settled this long ago is not searched again.
-SETTLED_AFTER_DAYS = 14
+def _interval():
+    default = 2.3
+    try:
+        v = float(os.environ.get("AGENT_EVAL_GH_INTERVAL_S", default))
+    except ValueError:
+        return default
+    return v if math.isfinite(v) and v >= 0 else default
+
+
+GH_INTERVAL_S = _interval()
 STREAMS_PATH = Path(os.environ.get("AGENT_EVAL_STREAMS",
                                    Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "streams.json"))
 T3_TIMEOUT_S = float(os.environ.get("AGENT_EVAL_T3_TIMEOUT_S", "10"))
@@ -806,7 +813,7 @@ def gh_search(key, merged, owner):
     except (OSError, subprocess.TimeoutExpired) as e:
         raise RuntimeError(type(e).__name__)
     if res.returncode != 0:
-        if re.search(r"rate limit", res.stderr or "", re.I):
+        if re.search(r"rate limit|abuse", res.stderr or "", re.I):
             raise RateLimited("GitHub search rate limit")
         raise RuntimeError(f"gh exited {res.returncode}")
     try:
@@ -848,14 +855,16 @@ def enrich_targets(group, found):
 def cmd_enrich(args):
     owners = load_owners()
     cutoff = now() - dt.timedelta(days=args.since)
-    settled_cutoff = now() - dt.timedelta(days=SETTLED_AFTER_DAYS)
     outs = [o for o in read_outcomes().values()
-            if o.get("ticket") and (parse_ts(o.get("at")) or cutoff) >= cutoff
-            and not (o.get("merged") in (True, False) and o.get("pr")
-                     and (parse_ts(o.get("at")) or settled_cutoff) < settled_cutoff)]
+            if o.get("ticket") and (parse_ts(o.get("at")) or cutoff) >= cutoff]
     by_ticket = {}
     for o in outs:
         by_ticket.setdefault(o["ticket"], []).append(o)
+    # A PR closed without merging is final. A merged one keeps being looked at for as long as the
+    # window reaches, because a revert can land weeks later. Skip a ticket only when every attempt
+    # of it is final, so target selection still sees the attempt that owns the PR.
+    by_ticket = {k: g for k, g in by_ticket.items()
+                 if not all(o.get("merged") is False and o.get("pr") for o in g)}
     updates, errors, limited = [], 0, False
     for key, group in sorted(by_ticket.items()):
         try:

@@ -525,6 +525,24 @@ for kind in conflict prose; do
     if [ "$kind" = conflict ]; then expect 5 blocked "review changes"; else expect 5 merged; fi
 done
 
+# ── The comment is posted before the review is recorded; no comment, no record, no merge ──
+newcase
+approve_setup 20 R1
+touch "$S/comment_fail"
+want 0 run
+expect 20 waiting comment-failed
+[ ! -e "$STATE/reviews.jsonl" ] || fail "a review whose comment failed was recorded" "$(cat "$STATE/reviews.jsonl")"
+[ "$(count '^pr merge' "$S/gh.log")" = 0 ] || fail "merged on a review nobody could read"
+grep -q 'record --id a-1 --status interrupted' "$S/eval.log" || fail "the unposted review must not count as completed" "$(cat "$S/eval.log")"
+grep -q 'status completed' "$S/eval.log" && fail "a review without a comment was recorded as completed"
+# The next run reviews again once comments work.
+rm "$S/comment_fail"
+fx pace 2 lane=claude-sonnet provider=claudeAgent model=claude-sonnet-5-5
+fx rev claude 2 approve
+want 0 run
+expect 20 merged "review approve by claude-sonnet"
+[ "$(cat "$S/claude.n")" = 2 ] || fail "the head should have been reviewed again" "$(cat "$S/claude.n")"
+
 # ── A failed review is never an approval ──
 PROVIDERS='"claudeAgent","opencode"' newcase review_timeout_s=1
 fx pr 6

@@ -1013,9 +1013,18 @@ class Captain:
                 self.record_attempt(repo, n, head, lane, outcome)
                 continue
             verdict, findings = outcome
+            # The comment goes first: a review nobody can read on the pull request is not recorded, so it is not
+            # merged on and the next run reviews again.
+            try:
+                self.comment(repo, n, review_comment(head, tier, verdict, lane, findings, same_family))
+            except Stop as s:
+                if s.action != "error":
+                    raise
+                self.record_eval(aid, tier, status="interrupted", note="review comment not posted")
+                self.record_attempt(repo, n, head, lane, "comment-failed")
+                raise Stop("waiting", "comment-failed", lane) from None
             self.record_eval(aid, tier, findings=len(findings), pr_url=f"https://github.com/{repo}/pull/{n}")
             self.record_review(repo, n, head, tier, verdict, lane)
-            self.comment(repo, n, review_comment(head, tier, verdict, lane, findings, same_family))
             if verdict == "changes":
                 self.ensure_labels(repo, ["agent-changes-requested"])
                 self.edit_labels(repo, n, ["agent-changes-requested"], [])

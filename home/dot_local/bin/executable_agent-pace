@@ -1,0 +1,705 @@
+#!/usr/bin/env python3
+"""agent-pace — turn plan-quota use into a dispatch mix, and pick a lane for a task.
+
+Reads the plan-quota log and the lane policy, shifts weight between the claude
+and free lane groups so the 7-day window ends near its target, and logs every
+assignment. Arithmetic and rules only: calls no model. Agent-facing: stdout is
+TOON (or JSON with --json), diagnostics go to stderr.
+"""
+import argparse
+import datetime as dt
+import fcntl
+import json
+import os
+import random
+import re
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+VERSION = "1.0.0"
+
+# Fast path before any real work: harnesses probe --version constantly.
+if __name__ == "__main__" and len(sys.argv) == 2 and sys.argv[1] in ("-v", "-V", "--version"):
+    print(VERSION)
+    sys.exit(0)
+
+EXIT_FAIL, EXIT_USAGE, EXIT_UNPLACED = 1, 2, 3
+
+HOME = Path.home()
+LANES_FILE = Path(os.environ.get("AGENT_PACE_LANES")
+                  or Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "agents/lanes.toml")
+QUOTA_FILE = Path(os.environ.get("AGENT_PACE_QUOTA")
+                  or Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "agent-metrics/quota.jsonl")
+EVAL_STATE = Path(os.environ.get("AGENT_EVAL_STATE")
+                  or Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "agent-eval")
+
+RISKS = ("R0", "R1", "R2", "R3")
+WINDOW_S = 7 * 86400
+# A reading older than this no longer says where the quota is now.
+STALE_S = 30 * 60
+CONCURRENCY_WINDOW_S = 4 * 3600
+# Past this share of the window the claude weight stops shrinking while there
+# is still quota left: unspent quota at the reset is wasted.
+END_GAME_F = 0.85
+EVIDENCE_FLOOR = 0.2
+EVAL_TIMEOUT_S = 30
+TICKET = re.compile(r"[A-Z][A-Z0-9]*-[0-9]+")
+LANE_KEYS = ("id", "group", "provider", "model", "status", "share", "max_risk", "concurrency", "classes")
+
+USAGE_SHORT = "agent-pace [status | shares | assign | ladder] [--help]"
+
+
+def log(msg):
+    print(f"agent-pace: {msg}", file=sys.stderr)
+
+
+# ── TOON output ──────────────────────────────────────────────────────────────
+
+def toon_scalar(v):
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    s = str(v)
+    if s == "" or s != s.strip() or re.search(r'[,:"\\\n\[\]{}]', s) or s in ("true", "false", "null") \
+            or re.fullmatch(r"-?\d+(\.\d+)?", s):
+        return json.dumps(s, ensure_ascii=False)
+    return s
+
+
+def toon(obj, indent=0):
+    pad = "  " * indent
+    out = []
+    for k, v in obj.items():
+        if isinstance(v, dict):
+            out.append(f"{pad}{k}:")
+            out.append(toon(v, indent + 1))
+        elif isinstance(v, list) and v and all(isinstance(x, dict) for x in v):
+            keys = list(v[0].keys())
+            out.append(f"{pad}{k}[{len(v)}]{{{','.join(keys)}}}:")
+            for row in v:
+                out.append(pad + "  " + ",".join(toon_scalar(row.get(c)) for c in keys))
+        elif isinstance(v, list):
+            out.append(f"{pad}{k}[{len(v)}]:")
+            for x in v:
+                out.append(pad + "  " + toon_scalar(x))
+        else:
+            out.append(f"{pad}{k}: {toon_scalar(v)}")
+    return "\n".join(out)
+
+
+def emit(obj, as_json=False):
+    print(json.dumps(obj, ensure_ascii=False) if as_json else toon(obj))
+
+
+def die(code, msg, help_line=None):
+    out = {"error": msg}
+    if help_line:
+        out["help"] = help_line
+    out["code"] = "usage" if code == EXIT_USAGE else "failed"
+    emit(out)
+    sys.exit(code)
+
+
+def usage_error(msg, help_line=None):
+    die(EXIT_USAGE, msg, help_line or USAGE_SHORT)
+
+
+# ── Time ─────────────────────────────────────────────────────────────────────
+
+def to_epoch(v):
+    """Epoch seconds from a number, a numeric string or an ISO 8601 string."""
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, dt.datetime):
+        return (v if v.tzinfo else v.replace(tzinfo=dt.timezone.utc)).timestamp()
+    if isinstance(v, dt.date):
+        return dt.datetime(v.year, v.month, v.day, tzinfo=dt.timezone.utc).timestamp()
+    if isinstance(v, str):
+        s = v.strip()
+        try:
+            return float(s)
+        except ValueError:
+            pass
+        try:
+            d = dt.datetime.fromisoformat(s)
+        except ValueError:
+            return None
+        return (d if d.tzinfo else d.replace(tzinfo=dt.timezone.utc)).timestamp()
+    return None
+
+
+def iso(epoch):
+    if epoch is None:
+        return None
+    return dt.datetime.fromtimestamp(epoch, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def now_epoch():
+    fixed = os.environ.get("AGENT_PACE_NOW")
+    if fixed:
+        e = to_epoch(fixed)
+        if e is None:
+            usage_error(f"AGENT_PACE_NOW is not a time: {fixed}")
+        return e
+    return dt.datetime.now(dt.timezone.utc).timestamp()
+
+
+# ── Config ───────────────────────────────────────────────────────────────────
+
+def load_policy():
+    """Unreadable policy fails closed: guessing shares would mis-route work."""
+    try:
+        with open(LANES_FILE, "rb") as f:
+            cfg = tomllib.load(f)
+    except OSError as e:
+        die(EXIT_FAIL, f"cannot read lanes policy {LANES_FILE}: {e.strerror}", "Run `chezmoi apply` to deploy it")
+    except tomllib.TOMLDecodeError as e:
+        die(EXIT_FAIL, f"{LANES_FILE} is not valid TOML: {e}")
+    try:
+        p = cfg["pacing"]
+        for k in ("target_end_pct", "band_pct", "gain", "claude_weight_min", "claude_weight_max",
+                  "five_hour_pause_pct", "opus_share_cap"):
+            float(p[k])
+        cfg["evaluation"]["min_samples"]
+        cfg["evaluation"]["prior_weight"]
+        cfg["evaluation"]["explore_fraction"]
+        cfg["classes"]["all"]
+        lanes = cfg["lane"]
+        for lane in lanes:
+            for k in LANE_KEYS:
+                lane[k]
+            if lane["max_risk"] not in RISKS:
+                raise ValueError(f"lane {lane['id']}: max_risk {lane['max_risk']}")
+    except (KeyError, TypeError, ValueError) as e:
+        die(EXIT_FAIL, f"{LANES_FILE} is malformed: {e!r}")
+    if len({lane["id"] for lane in lanes}) != len(lanes):
+        die(EXIT_FAIL, f"{LANES_FILE} repeats a lane id")
+    return cfg
+
+
+# ── Quota and pacing ─────────────────────────────────────────────────────────
+
+def read_jsonl(path):
+    try:
+        text = Path(path).read_text()
+    except OSError:
+        return []
+    rows = []
+    for line in text.splitlines():
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(d, dict):
+            rows.append(d)
+    return rows
+
+
+def number(v):
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def newest_with(rows, key):
+    best = None
+    for r in rows:
+        at = to_epoch(r.get("at"))
+        if at is None or number(r.get(key)) is None:
+            continue
+        if best is None or at >= best[0]:
+            best = (at, r)
+    return best
+
+
+def clamp(x, lo, hi):
+    return max(lo, min(hi, x))
+
+
+def r1(x):
+    return None if x is None else round(x, 1)
+
+
+def pace_state(cfg, now):
+    """Where the quota stands against the pace line, and the claude weight
+    multiplier that follows. A window with no fresh reading paces at baseline."""
+    p = cfg["pacing"]
+    rows = read_jsonl(QUOTA_FILE)
+    newest = max((to_epoch(r.get("at")) for r in rows if to_epoch(r.get("at")) is not None), default=None)
+    s = {"now": iso(now), "quota_at": iso(newest),
+         "quota_age_min": None if newest is None else round(max(0, now - newest) / 60, 1),
+         "state": "no-data", "stale": False, "window_start": None, "window_resets_at": None,
+         "elapsed_pct": None, "used_pct": None, "pace_line_pct": None, "gap_pct": None,
+         "hours_left": None, "claude_multiplier": 1.0,
+         "five_hour_pct": None, "five_hour_resets_at": None, "five_hour_stale": False,
+         "five_hour_paused": False}
+
+    five = newest_with(rows, "five_hour_pct")
+    if five:
+        at, r = five
+        s["five_hour_pct"] = number(r["five_hour_pct"])
+        resets = to_epoch(r.get("five_hour_resets_at"))
+        s["five_hour_resets_at"] = iso(resets)
+        s["five_hour_stale"] = now - at > STALE_S
+        # A reading whose window has already reset says nothing about the new one.
+        rolled = resets is not None and resets <= now
+        s["five_hour_paused"] = (not s["five_hour_stale"] and not rolled
+                                 and s["five_hour_pct"] >= float(p["five_hour_pause_pct"]))
+
+    seven = newest_with(rows, "seven_day_pct")
+    if seven:
+        at, r = seven
+        used = number(r["seven_day_pct"])
+        resets = to_epoch(r.get("seven_day_resets_at"))
+        s["used_pct"] = used
+        if resets is not None:
+            start = resets - WINDOW_S
+            f = clamp((now - start) / WINDOW_S, 0.0, 1.0)
+            line = float(p["target_end_pct"]) * f
+            s.update(window_start=iso(start), window_resets_at=iso(resets), elapsed_pct=r1(f * 100),
+                     pace_line_pct=r1(line), gap_pct=r1(line - used), hours_left=r1(max(0, resets - now) / 3600))
+            if now - at > STALE_S:
+                s["state"], s["stale"] = "stale", True
+            else:
+                gap = line - used
+                if abs(gap) <= float(p["band_pct"]):
+                    s["state"] = "on"
+                else:
+                    s["state"] = "under" if gap > 0 else "over"
+                    m = 1 + float(p["gain"]) * gap / max(line, 5.0)
+                    m = clamp(m, float(p["claude_weight_min"]), float(p["claude_weight_max"]))
+                    if f > END_GAME_F and used < float(p["target_end_pct"]):
+                        m = max(m, 1.0)
+                    s["claude_multiplier"] = round(m, 3)
+    s["recommendation"] = recommend(s, p)
+    return s
+
+
+def recommend(s, p):
+    if s["five_hour_paused"]:
+        return (f"five-hour window at {s['five_hour_pct']:g}%: claude lanes paused until "
+                f"{s['five_hour_resets_at']}; send work to free lanes or defer claude-only work")
+    state = s["state"]
+    if state == "no-data":
+        return "no seven-day reading: baseline shares"
+    if state == "stale":
+        return f"quota reading is {s['quota_age_min']:g} min old: baseline shares until it refreshes"
+    gap = abs(s["gap_pct"])
+    if state == "on":
+        return f"on pace (within {float(p['band_pct']):g} points of the line): baseline shares"
+    if state == "under":
+        return (f"under the pace line by {gap:g} points with {s['hours_left']:g} h left: "
+                f"favour claude lanes (x{s['claude_multiplier']:g})")
+    return (f"over the pace line by {gap:g} points with {s['hours_left']:g} h left: "
+            f"favour free lanes (claude x{s['claude_multiplier']:g})")
+
+
+# ── Agent-eval evidence ──────────────────────────────────────────────────────
+
+def load_evidence():
+    """Per-lane evidence from `agent-eval weights --json`, or None and why not."""
+    path = os.environ.get("AGENT_PACE_EVAL")
+    if path is None:
+        path = str(HOME / ".local/bin/agent-eval")
+    if not path.strip():
+        return None, "agent-eval unavailable"
+    try:
+        r = subprocess.run([path, "weights", "--json"], capture_output=True, text=True, timeout=EVAL_TIMEOUT_S,
+                           stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None, "agent-eval unavailable"
+    if r.returncode != 0:
+        return None, "agent-eval failed"
+    try:
+        lanes = json.loads(r.stdout)["lanes"]
+        if not isinstance(lanes, dict):
+            raise TypeError
+    except (ValueError, KeyError, TypeError):
+        return None, "agent-eval output unreadable"
+    return lanes, None
+
+
+class Ctx:
+    def __init__(self, cfg, now):
+        self.cfg, self.now = cfg, now
+        self.lanes = cfg["lane"]
+        self.by_id = {lane["id"]: lane for lane in self.lanes}
+        self.pace = pace_state(cfg, now)
+        self.evidence, self.evidence_note = load_evidence()
+        self.paused = self.pace["five_hour_paused"]
+
+    def lane_class_stats(self, lane_id, cls):
+        entry = (self.evidence or {}).get(lane_id, {})
+        stats = entry.get(cls) if isinstance(entry, dict) else None
+        return stats if isinstance(stats, dict) else {}
+
+    def blocked(self, lane):
+        """Why a lane cannot take work at all right now, or None."""
+        if lane["status"] == "paused":
+            return "paused"
+        until = to_epoch(lane.get("unavailable_until"))
+        if until is not None and self.now < until:
+            return f"unavailable until {iso(until)}"
+        entry = (self.evidence or {}).get(lane["id"], {})
+        if isinstance(entry, dict):
+            cool = [to_epoch(v.get("cooldown_until")) for v in entry.values() if isinstance(v, dict)]
+            cool = [c for c in cool if c is not None and c > self.now]
+            if cool:
+                return f"cooldown until {iso(max(cool))}"
+        return None
+
+    def multiplier(self, lane):
+        return self.pace["claude_multiplier"] if lane["group"] == "claude" else 1.0
+
+    def posterior(self, lane, cls):
+        ev = self.cfg["evaluation"]
+        st = self.lane_class_stats(lane["id"], cls)
+        n = number(st.get("n")) or 0.0
+        q = number(st.get("quality_mean")) or 0.0
+        pw = float(ev["prior_weight"])
+        return (pw * float(lane.get("prior", 0.5)) + q * n) / (pw + n)
+
+
+def read_ledger_ids(name):
+    return [r.get("id") for r in read_jsonl(EVAL_STATE / name)]
+
+
+def open_assignments(now):
+    """Unfinished assignments per lane: younger than the window, no outcome yet."""
+    done = set(read_ledger_ids("outcomes.jsonl"))
+    counts = {}
+    for r in read_jsonl(EVAL_STATE / "assignments.jsonl"):
+        at = to_epoch(r.get("at"))
+        if at is None or now - at >= CONCURRENCY_WINDOW_S or r.get("id") in done:
+            continue
+        counts[r.get("lane")] = counts.get(r.get("lane"), 0) + 1
+    return counts
+
+
+def eligible_lanes(ctx, cls, risk, exclude, busy):
+    """Lanes that may take this task, before pacing and before the five-hour pause."""
+    out = []
+    for lane in ctx.lanes:
+        if cls not in lane["classes"] or lane["id"] in exclude:
+            continue
+        if RISKS.index(lane["max_risk"]) < RISKS.index(risk):
+            continue
+        if lane["status"] == "explore" and risk != "R0":
+            continue
+        if ctx.blocked(lane):
+            continue
+        if busy.get(lane["id"], 0) >= int(lane["concurrency"]):
+            continue
+        out.append(lane)
+    return out
+
+
+# ── Weights ──────────────────────────────────────────────────────────────────
+
+def apply_opus_cap(weights, cap):
+    """Scale opus down so it is at most `cap` of the total. Left alone when it is
+    the only lane with weight: a cap cannot make a task unplaceable."""
+    opus = weights.get("claude-opus", 0.0)
+    others = sum(w for k, w in weights.items() if k != "claude-opus")
+    if opus <= 0 or others <= 0:
+        return weights, False
+    if opus / (opus + others) <= cap:
+        return weights, False
+    weights = dict(weights)
+    weights["claude-opus"] = cap / (1 - cap) * others
+    return weights, True
+
+
+def lane_note(ctx, lane):
+    reason = ctx.blocked(lane)
+    if reason:
+        return reason
+    if lane["group"] == "claude" and ctx.paused:
+        return f"five-hour pause until {ctx.pace['five_hour_resets_at']}"
+    if lane["status"] == "explore":
+        return "explore: R0 only"
+    return ""
+
+
+def cmd_shares(args):
+    ctx = Ctx(load_policy(), now_epoch())
+    base = {}
+    for lane in ctx.lanes:
+        blocked = ctx.blocked(lane) or (lane["group"] == "claude" and ctx.paused)
+        base[lane["id"]] = 0.0 if blocked else float(lane["share"]) * ctx.multiplier(lane)
+    weights, capped = apply_opus_cap(base, float(ctx.cfg["pacing"]["opus_share_cap"]))
+    total = sum(weights.values())
+    rows = []
+    for lane in ctx.lanes:
+        note = lane_note(ctx, lane)
+        if capped and lane["id"] == "claude-opus" and not note:
+            note = "capped"
+        rows.append({"lane": lane["id"], "group": lane["group"], "status": lane["status"], "share": lane["share"],
+                     "effective_pct": round(100 * weights[lane["id"]] / total, 2) if total else 0.0, "note": note})
+    out = {"state": ctx.pace["state"], "claude_multiplier": ctx.pace["claude_multiplier"],
+           "five_hour_paused": ctx.paused, "evidence": ctx.evidence_note or "agent-eval",
+           "recommendation": ctx.pace["recommendation"], "lanes": rows}
+    emit(out, args.json)
+    return 0
+
+
+def cmd_status(args):
+    ctx = Ctx(load_policy(), now_epoch())
+    out = {k: v for k, v in ctx.pace.items() if not k.startswith("_")}
+    emit(out, args.json)
+    return 0
+
+
+# ── Ladder and assign ────────────────────────────────────────────────────────
+
+def parse_lane_list(raw, ctx):
+    names = [x for x in (raw or "").split(",") if x]
+    for n in names:
+        if n not in ctx.by_id:
+            usage_error(f"unknown lane: {n}", "Lane ids are in lanes.toml")
+    return set(names)
+
+
+def check_task(ctx, cls, risk):
+    if cls not in ctx.cfg["classes"]["all"]:
+        usage_error(f"unknown class: {cls}", "Classes: " + ",".join(ctx.cfg["classes"]["all"]))
+    if risk not in RISKS:
+        usage_error(f"unknown risk: {risk}", "Risk is one of R0,R1,R2,R3")
+
+
+def build_ladder(ctx, eligible, cls):
+    """Free lanes by evidence, then sonnet, then opus; the order work escalates in."""
+    pos = {lane["id"]: i for i, lane in enumerate(ctx.lanes)}
+    free = [lane for lane in eligible if lane["group"] == "free"]
+    free.sort(key=lambda lane: (-ctx.posterior(lane, cls), pos[lane["id"]]))
+    out = [(lane, ctx.posterior(lane, cls)) for lane in free]
+    for lid in ("claude-sonnet", "claude-opus"):
+        lane = next((x for x in eligible if x["id"] == lid), None)
+        if lane:
+            out.append((lane, ctx.posterior(lane, cls)))
+    return out
+
+
+def active(ctx, eligible):
+    return [x for x in eligible if not (x["group"] == "claude" and ctx.paused)]
+
+
+def cmd_ladder(args):
+    ctx = Ctx(load_policy(), now_epoch())
+    check_task(ctx, args.cls, args.risk)
+    exclude = parse_lane_list(args.exclude, ctx)
+    eligible = active(ctx, eligible_lanes(ctx, args.cls, args.risk, exclude, open_assignments(ctx.now)))
+    rungs = build_ladder(ctx, eligible, args.cls)
+    rows = [{"rank": i + 1, "lane": lane["id"], "group": lane["group"], "evidence": round(post, 3)}
+            for i, (lane, post) in enumerate(rungs)]
+    out = {"class": args.cls, "risk": args.risk, "five_hour_paused": ctx.paused,
+           "evidence": ctx.evidence_note or "agent-eval", "ladder": rows}
+    emit(out, args.json)
+    return 0
+
+
+def pick_review_lane(ctx, lane, cls, risk):
+    """The tier rule's reviewer: none for R0, another family for R1, sonnet or
+    better for R2, opus for R3."""
+    if risk == "R0" or cls == "review":
+        return None
+    if risk == "R3":
+        return "claude-opus"
+
+    def usable(cand):
+        return not ctx.blocked(cand) and not (cand["group"] == "claude" and ctx.paused)
+
+    if risk == "R2":
+        picks = [ctx.by_id[i] for i in ("claude-sonnet", "claude-opus") if i in ctx.by_id]
+        return next((c["id"] for c in picks if usable(c)), picks[0]["id"] if picks else None)
+    cands = [c for c in ctx.lanes if "review" in c["classes"] and c["status"] == "active"
+             and RISKS.index(c["max_risk"]) >= RISKS.index(risk) and c["family"] != lane["family"] and usable(c)]
+    cands.sort(key=lambda c: c["id"] != "claude-sonnet")
+    return cands[0]["id"] if cands else None
+
+
+def make_id(now, taken):
+    stamp = dt.datetime.fromtimestamp(now, dt.timezone.utc).strftime("%Y%m%d-%H%M")
+    while True:
+        aid = f"a-{stamp}-{os.urandom(2).hex()[:3]}"
+        if aid not in taken:
+            return aid
+
+
+def choose(ctx, args, busy):
+    cls, risk = args.cls, args.risk
+    exclude = parse_lane_list(args.exclude, ctx)
+    pace_cfg, ev_cfg = ctx.cfg["pacing"], ctx.cfg["evaluation"]
+    candidates = eligible_lanes(ctx, cls, risk, exclude, busy)
+    if not candidates:
+        return {"result": "none", "reason": "no lane lists this class at this risk and is available and under its cap"}
+    eligible = active(ctx, candidates)
+    if not eligible:
+        return {"result": "defer", "defer_until": ctx.pace["five_hour_resets_at"],
+                "reason": (f"only claude lanes can take {cls} at {risk} and the five-hour window is at "
+                           f"{ctx.pace['five_hour_pct']:g}%: retry after the reset")}
+
+    pool = eligible
+    if args.implementer and risk == "R1" and cls in ("review", "review-fix"):
+        fam = ctx.by_id[args.implementer]["family"]
+        other = [x for x in eligible if x["family"] != fam]
+        pool = other or eligible
+
+    best = max(ctx.posterior(x, cls) for x in pool)
+    parts, weights = {}, {}
+    for lane in pool:
+        evidence = 1.0
+        if ctx.evidence is not None:
+            evidence = max(EVIDENCE_FLOOR, ctx.posterior(lane, cls) / best) if best > 0 else 1.0
+        pace = ctx.multiplier(lane)
+        parts[lane["id"]] = {"share": lane["share"], "pace": pace, "evidence": evidence, "explore": 1.0}
+        weights[lane["id"]] = float(lane["share"]) * pace * evidence
+
+    if ctx.evidence is not None and risk in ("R0", "R1"):
+        under = [x["id"] for x in pool if weights[x["id"]] > 0
+                 and (number(ctx.lane_class_stats(x["id"], cls).get("n")) or 0) < float(ev_cfg["min_samples"])]
+        w_under = sum(weights[i] for i in under)
+        w_rest = sum(weights.values()) - w_under
+        frac = float(ev_cfg["explore_fraction"])
+        if under and w_rest > 0 and w_under / (w_under + w_rest) < frac:
+            boost = frac / (1 - frac) * w_rest / w_under
+            for i in under:
+                parts[i]["explore"] = boost
+                weights[i] *= boost
+
+    weights, capped = apply_opus_cap(weights, float(pace_cfg["opus_share_cap"]))
+    total = sum(weights.values())
+    if total <= 0:
+        return {"result": "none", "reason": "every eligible lane has a share of 0"}
+
+    seed = args.seed or args.ticket or f"{ctx.now}"
+    rng = random.Random(seed)
+    point = rng.random() * total
+    chosen, acc = None, 0.0
+    for lane in pool:
+        if weights[lane["id"]] <= 0:
+            continue
+        acc += weights[lane["id"]]
+        chosen = lane
+        if point < acc:
+            break
+    p = parts[chosen["id"]]
+    note = f"; {ctx.evidence_note}" if ctx.evidence_note else ""
+    note += "; opus cap applied" if capped else ""
+    if ctx.pace["state"] == "stale":
+        note += "; quota reading stale, baseline pace"
+    reason = (f"weight {weights[chosen['id']] / total:.2f} (share {p['share']:g}, pace x{p['pace']:g}, "
+              f"evidence x{p['evidence']:.2f}, explore x{p['explore']:.2f}){note}")
+    ladder = [lane["id"] for lane, _ in build_ladder(ctx, eligible, cls) if lane["id"] != chosen["id"]]
+    return {"result": "assigned", "lane": chosen, "reason": reason, "fallback": ladder,
+            "review_lane": pick_review_lane(ctx, chosen, cls, risk)}
+
+
+def cmd_assign(args):
+    ctx = Ctx(load_policy(), now_epoch())
+    check_task(ctx, args.cls, args.risk)
+    if args.ticket and not TICKET.fullmatch(args.ticket):
+        usage_error(f"not a ticket key: {args.ticket}", "Expected a key like JDW-123")
+    if args.implementer and args.implementer not in ctx.by_id:
+        usage_error(f"unknown lane: {args.implementer}", "Lane ids are in lanes.toml")
+
+    lock = None
+    if not args.no_log:
+        EVAL_STATE.mkdir(parents=True, exist_ok=True)
+        lock = open(EVAL_STATE / "assignments.lock", "w")
+        fcntl.flock(lock, fcntl.LOCK_EX)
+    try:
+        res = choose(ctx, args, open_assignments(ctx.now))
+        base = {"class": args.cls, "risk": args.risk}
+        if res["result"] != "assigned":
+            out = {"result": res["result"], **base, "reason": res["reason"]}
+            if res["result"] == "defer":
+                out["defer_until"] = res["defer_until"]
+            emit(out, args.json)
+            return EXIT_UNPLACED
+        lane = res["lane"]
+        aid = make_id(ctx.now, set(read_ledger_ids("assignments.jsonl")))
+        out = {"assignment": aid, "lane": lane["id"], "provider": lane["provider"], "model": lane["model"], **base,
+               "reason": res["reason"], "review_lane": res["review_lane"], "fallback": res["fallback"],
+               "result": "assigned", "logged": not args.no_log}
+        if lock:
+            pace = ctx.pace
+            record = {"id": aid, "at": iso(ctx.now), "lane": lane["id"], "provider": lane["provider"],
+                      "model": lane["model"], "class": args.cls, "risk": args.risk, "ticket": args.ticket,
+                      "pace": {"used": pace["used_pct"], "line": pace["pace_line_pct"],
+                               "multiplier": pace["claude_multiplier"]},
+                      "implementer": args.implementer}
+            with open(EVAL_STATE / "assignments.jsonl", "a") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        emit(out, args.json)
+        return 0
+    finally:
+        if lock:
+            lock.close()
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        usage_error(message, f"Run `{self.prog} --help`")
+
+
+def cmd_home(args):
+    ctx = Ctx(load_policy(), now_epoch())
+    p = ctx.pace
+    emit({"state": p["state"], "claude_multiplier": p["claude_multiplier"], "five_hour_paused": ctx.paused,
+          "recommendation": p["recommendation"], "help": USAGE_SHORT})
+    return 0
+
+
+def build_parser():
+    p = Parser(prog="agent-pace", description=__doc__.split("\n\n")[0],
+               formatter_class=argparse.RawDescriptionHelpFormatter,
+               epilog="examples:\n  agent-pace status\n  agent-pace assign --class impl --risk R1 --ticket JDW-12\n"
+                      "  agent-pace ladder --class review --risk R2\n\n"
+                      "assign exits 0 when it picked a lane, 3 when the work must wait (result: defer) or no\n"
+                      "lane can take it (result: none).")
+    p.set_defaults(func=cmd_home)
+    sub = p.add_subparsers(metavar="command", parser_class=Parser)
+
+    s = sub.add_parser("status", help="window, elapsed, used, pace line, gap, hours left, recommendation")
+    s.set_defaults(func=cmd_status)
+    s.add_argument("--json", action="store_true")
+
+    sh = sub.add_parser("shares", help="effective share per lane after pacing")
+    sh.set_defaults(func=cmd_shares)
+    sh.add_argument("--json", action="store_true")
+
+    a = sub.add_parser("assign", help="pick a lane for a task and log the decision")
+    a.set_defaults(func=cmd_assign)
+    a.add_argument("--class", dest="cls", required=True, metavar="C")
+    a.add_argument("--risk", required=True, metavar="R")
+    a.add_argument("--exclude", metavar="LANE,...")
+    a.add_argument("--ticket", metavar="KEY")
+    a.add_argument("--seed", metavar="S")
+    a.add_argument("--implementer", metavar="LANE", help="lane that wrote the change, for review classes")
+    a.add_argument("--no-log", action="store_true", help="decide without appending to assignments.jsonl")
+    a.add_argument("--json", action="store_true")
+
+    ld = sub.add_parser("ladder", help="the escalation order for a class and risk")
+    ld.set_defaults(func=cmd_ladder)
+    ld.add_argument("--class", dest="cls", required=True, metavar="C")
+    ld.add_argument("--risk", required=True, metavar="R")
+    ld.add_argument("--exclude", metavar="LANE,...")
+    ld.add_argument("--json", action="store_true")
+    return p
+
+
+def main(argv):
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

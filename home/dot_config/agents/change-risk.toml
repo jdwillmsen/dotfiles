@@ -190,6 +190,12 @@ exclude = ["**/*.md", "docs/**", "tests/**", "**/test_*.sh"]
 # is interviewed with the owner first.
 
 [[rule]]
+id = "plan-docs-tests"
+tag = "docs"
+tier = "R0"
+plan = ['(?is)\A\s*(add|update|fix|write|improve|expand|correct)\b[^.\n]{0,60}\b(docs?|documentation|readme|tests?|comments?|typos?)\b[^\n]{0,80}\s*\Z']
+
+[[rule]]
 id = "plan-irreversible"
 tag = "irreversible"
 tier = "R3"

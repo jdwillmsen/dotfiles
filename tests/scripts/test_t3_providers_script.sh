@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# The trigger prefers T3CODE_HOME over $HOME/.t3, and T3 sets it in every
+# session it starts, so a run from inside T3 would rewrite the live settings.
+unset T3CODE_HOME
 here="$(cd "$(dirname "$0")/../.." && pwd)"
 trigger="$here/home/run_onchange_52-enable-t3-providers.sh.tmpl"
 dropin="$here/home/dot_config/systemd/user/t3code.service.d/10-provider-path.conf"

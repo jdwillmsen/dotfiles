@@ -30,6 +30,7 @@ export AGENT_EVAL_LANES="$lanes_real"
 export AGENT_EVAL_NOW="2026-10-23T12:00:00+00:00"
 export AGENT_EVAL_T3_DB="$tmp/missing.sqlite"
 export AGENT_EVAL_GH="$tmp/no-gh"
+export AGENT_EVAL_GH_INTERVAL_S=0
 export AGENT_EVAL_STREAMS="$tmp/streams.json"
 printf '%s\n' '{"jiraSite":"https://x.invalid","streams":{"jdwillmsen":{"jira":"JDW"},"jdwlabs":{"jira":"JDWLABS"}}}' \
     >"$AGENT_EVAL_STREAMS"
@@ -665,6 +666,49 @@ assert r["attempts"] == 6 and r["success"] == 5, r
 PY
 AGENT_EVAL_GH="$tmp/no-gh" run 1 enrich
 grep -q "^error:\|^errors: 5$" "$out" || fail "a missing gh was not reported" "$(cat "$out")"
+
+# GitHub's search rate limit stops the run cleanly: what is known is kept, the next run continues, no failure.
+cat >"$tmp/gh-limited" <<'STUB'
+#!/usr/bin/env bash
+echo "HTTP 403: API rate limit exceeded for user ID 1" >&2
+exit 1
+STUB
+chmod +x "$tmp/gh-limited"
+AGENT_EVAL_GH="$tmp/gh-limited" run 0 enrich
+grep -q "^rate_limited: true$" "$out" || fail "a search rate limit was not reported" "$(cat "$out")"
+grep -q "^errors: 0$" "$out" || fail "a search rate limit was counted as ticket errors" "$(cat "$out")"
+
+# Searches are spaced out, so a rescan stays under the 30-a-minute search limit.
+cat >"$tmp/gh-timed" <<'STUB'
+#!/usr/bin/env bash
+date +%s.%N >>"$GH_TIMES"
+echo '[]'
+STUB
+chmod +x "$tmp/gh-timed"
+: >"$tmp/gh-times"
+GH_TIMES="$tmp/gh-times" AGENT_EVAL_GH_INTERVAL_S=0.3 AGENT_EVAL_GH="$tmp/gh-timed" run 0 enrich
+python3 - "$tmp/gh-times" <<'PY' || fail "enrich searches were not spaced by the configured interval"
+import sys
+t = [float(x) for x in open(sys.argv[1]).read().split()]
+assert len(t) >= 6, len(t)
+gaps = [b - a for a, b in zip(t, t[1:])]
+assert min(gaps) >= 0.25, min(gaps)
+PY
+
+# An outcome whose PR state settled long ago is not searched again.
+python3 - "$AGENT_EVAL_STATE/outcomes.jsonl" <<'PY'
+import json, sys
+rows = {}
+for line in open(sys.argv[1]):
+    r = json.loads(line)
+    rows[r["id"]] = r
+r = dict(rows["e-12"], id="e-old", ticket="JDW-77", merged=True, reverted=False,
+         pr="https://example.invalid/o/r/pull/77", at="2026-09-20T00:00:00+00:00")
+open(sys.argv[1], "a").write(json.dumps(r) + "\n")
+PY
+: >"$tmp/gh-times"
+GH_TIMES="$tmp/gh-times" AGENT_EVAL_GH="$tmp/gh-timed" run 0 enrich --since 90
+grep -q "^tickets: 5$" "$out" || fail "a settled old outcome was searched again" "$(cat "$out")"
 
 # Searches are scoped to the owners in the streams map, one call per owner, and only one attempt per ticket is marked.
 cat >"$tmp/gh-scoped" <<'STUB'

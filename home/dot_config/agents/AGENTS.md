@@ -86,12 +86,65 @@ touched block; never comment out dead code. Match surrounding density.
     `Assisted-by: Codex:gpt-6-luna`. A subagent on another model adds its
     own `Assisted-by` line.
 
+## Risk Tiers — Who Reviews What
+
+The owner supplies ideas and judgement; agents plan, build, review and merge.
+A human looks only at critical work. Classify before you start and again
+before you merge: `change-class --plan FILE` for a plan or ticket,
+`change-class` (or `--pr N`) for a diff. Policy: `~/.config/agents/change-risk.toml`;
+rationale: dotfiles `docs/autonomous-delivery.md`. Highest tier wins; when
+unsure, classify up. Put the result on the PR and ticket as labels
+(`risk/R2`, `tag/prd`).
+
+| Tier | Examples | Review before merge | Human |
+|---|---|---|---|
+| R0 | docs, tests, comments | green CI | no |
+| R1 | ordinary code, dependencies | one agent reviewer of another model family | no |
+| R2 | CI, deploy config, non-prd rollout, very large diffs | Sonnet-or-better reviewer, bot findings resolved | no |
+| R3 | prd, infra apply, auth and secrets, data and migrations, network, these rules, governance, game servers | Opus reviewer | **interview before work starts; approval before merge** |
+
+- An R3 plan is not started until the owner has been asked the open questions
+  (blast radius, rollback, who is affected). Every other tier needs no
+  confirmation to start or to merge.
+- Never lower a tier because the change "looks small". Evidence from the
+  model scoreboard can raise what a model may do (`lanes.toml`), never what a
+  tier requires.
+- Merge R0–R2 yourself once its gate is met, via the repo's rebase merge; leave
+  R3 for the human. After merging, run the repo's rollout and confirm it live.
+
+## Tickets — Stuck Work and Handoffs
+
+- **One ticket, one worktree, one thread.** Name the thread and branch after
+  the ticket key. Orchestration state lives in the ticket or Epic, not in a long
+  thread; start a fresh thread rather than continue one past a few hundred turns.
+- **When stuck, file a ticket and keep going.** Stuck means the same fix failed
+  twice, a tool or credential is missing, or the next step needs a decision only
+  the owner can make. Also file any out-of-scope work you find. Use the
+  `jira-followup` skill: no confirmation, label `agent-filed` (add `needs-human`
+  when only the owner can unblock it), duplicate check first, never in `OPS`.
+- On stopping, comment on the ticket: what is done, what remains, the branch or
+  PR, the next step. A fresh agent must be able to resume from that alone.
+- Agents move tickets to In Progress and Review; only a human sets Done, except
+  a ticket whose PR you merged and rolled out and verified live.
+
+## Dispatch — Which Model Does the Work
+
+- Do not pick a model by habit. For delegated work run
+  `agent-pace assign --class <class> --risk <tier> --ticket <KEY>`, dispatch to
+  the lane it returns, then `agent-eval record` the outcome. If a lane fails,
+  take the next one on its fallback ladder; do not retry the same model.
+- Sonnet is the default workhorse, Opus is for planning, final review, security
+  and what Sonnet failed, and free lanes take bounded work. Pacing keeps the
+  weekly plan quota fully but not over-used.
+- Inspect the worktree of every delegated task before trusting its summary.
+
 ## Pull Requests
 
-- **Never merge a PR without reviewing it**: all checks green; every review
+- **Never merge a PR whose gate is unmet**: all checks green; every review
   thread and bot/security finding fixed or explicitly justified (cross-check
-  the code-scanning API `state=open`, not just the comment thread); diff read
-  line-by-line; rationale recorded in the description.
+  the code-scanning API `state=open`, not just the comment thread); the review
+  its tier requires done by an agent and its findings addressed; rationale and
+  the `risk/` label recorded in the description.
 - **A PR that needs an approving review is opened as the bot.** GitHub blocks
   self-approval and these repos have one maintainer, so one opened under the
   human's `gh` auth can only merge by bypass. Before `gh pr create`,

@@ -123,7 +123,7 @@ Pacing rules (the contract for the tests):
   as stale, and pacing falls back to baseline shares.
 - Within `band_pct` of the line: baseline shares.
 - Under the line: the `claude` group weight multiplier is
-  `clamp(1 + gain × gap / max(pace_line, 5), min, max)`; over the line the same
+  `clamp(1 + gain × gap / max(pace_line, 25), min, max)`; over the line the same
   formula with a negative gap shrinks it. Free-group weights are unchanged and
   all weights are renormalised. Near the end of the window (f > 0.85) with
   headroom left, the multiplier is at least 1.

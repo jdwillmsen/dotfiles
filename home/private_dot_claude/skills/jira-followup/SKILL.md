@@ -27,7 +27,8 @@ Do not file for something you can finish in this task.
    If a match exists, comment on it instead of filing.
 3. Create the issue (Bug, Task or Spike) in KEY:
    - Parent: the Epic that fits; otherwise the project's "Agent follow-ups" Epic.
-   - Labels: `agent-filed`, plus `needs-human` when only the owner can unblock it.
+   - Labels: `agent-filed`, plus `needs-human` when only the owner can unblock it,
+     and the tier from `change-class --plan` as `risk-R0`..`risk-R3` when known.
    - Status stays Backlog. Only a human moves it to Ready.
 4. Description, in this order, each a line or two:
    - **Repo/path**: `owner/repo`, files or service.

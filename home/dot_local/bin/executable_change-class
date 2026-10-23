@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 from pathlib import Path
 
@@ -24,6 +25,21 @@ TIER_INDEX = {t: i for i, t in enumerate(TIERS)}
 CONTENT_SCAN_CAP = 2 * 1024 * 1024
 UNTRACKED_FILE_CAP = 1024 * 1024
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+# Regexes can go quadratic on long input, so every scan is bounded; a clipped
+# scan is reported as a reason to look harder, never passed quietly.
+LINE_SCAN_CAP = 4000
+PLAN_SCAN_CAP = 100 * 1024
+FILE_LINES_SCAN_CAP = 20000
+
+
+def _budget():
+    try:
+        return float(os.environ.get("CHANGE_CLASS_SCAN_BUDGET", "20"))
+    except ValueError:
+        return 20.0
+
+
+SCAN_BUDGET_SECONDS = _budget()
 
 # Fast path before any real work: harnesses probe --version constantly.
 if __name__ == "__main__" and len(sys.argv) == 2 and sys.argv[1] in ("-v", "-V", "--version"):
@@ -79,6 +95,8 @@ def emit_result(result):
     out.append(f"lines: {result['lines']}")
     if result.get("content_scanned") is False:
         out.append("content_scanned: false")
+    elif result.get("content_scanned") == "partial":
+        out.append("content_scanned: partial")
     warnings = result.get("warnings") or []
     if warnings:
         out.append(f"warnings[{len(warnings)}]: {','.join(warnings)}")
@@ -149,6 +167,14 @@ def regex_list(value, where):
         return [re.compile(p) for p in value]
     except re.error as e:
         fail(f"rules {where}: invalid expression: {e}")
+
+
+def repo_list(value, where):
+    if value is None:
+        return []
+    if not isinstance(value, list) or not value or not all(isinstance(p, str) and p.strip() for p in value):
+        fail(f"rules {where}: repos must be a non-empty list of strings")
+    return [p.strip().lower() for p in value]
 
 
 def matches(patterns, path):
@@ -276,11 +302,12 @@ def load_policy(path):
         exclude = glob_list(rule.get("exclude"), where)
         content = regex_list(rule.get("content"), where)
         plan = regex_list(rule.get("plan"), where)
+        repos = repo_list(rule.get("repos"), where)
         if not paths and not content and not plan:
             fail(f"rules {where}: needs paths, content or plan")
         rules.append({
             "id": rid, "tier": _tier(rule.get("tier"), where), "tag": rule["tag"],
-            "paths": paths, "exclude": exclude, "content": content, "plan": plan,
+            "paths": paths, "exclude": exclude, "content": content, "plan": plan, "repos": repos,
         })
 
     return {"tiers": clean_tiers, "size": clean_size, "default": clean_default,
@@ -706,8 +733,19 @@ def read_plan(value):
 
 # ── Classification ───────────────────────────────────────────────────────────
 
+def _repo_matches(wanted, full, bare):
+    return bool(full) and wanted.lower() in (full.lower(), bare.lower())
+
+
 def _floor_matches(floor, full, bare):
-    return bool(full) and floor["repo"] in (full, bare)
+    return _repo_matches(floor["repo"], full, bare)
+
+
+def _rule_applies(rule, full, bare, repo_known):
+    # An unidentified repo cannot prove a scoped rule irrelevant, so it applies.
+    if not rule["repos"] or not repo_known:
+        return True
+    return any(_repo_matches(r, full, bare) for r in rule["repos"])
 
 
 def classify(paths, bad, lines, changed, plan_text, policy, repo, repo_known, content_scanned, explain):
@@ -717,10 +755,19 @@ def classify(paths, bad, lines, changed, plan_text, policy, repo, repo_known, co
     best = -1
     all_docs_r0 = bool(paths) and not bad
 
-    path_rules = [r for r in policy["rules"] if r["paths"]]
-    content_rules = [r for r in policy["rules"] if r["content"]]
-    plan_rules = [r for r in policy["rules"] if r["plan"]]
-    content_skip = {}
+    bare = repo.rsplit("/", 1)[-1] if repo else ""
+    active = [r for r in policy["rules"] if _rule_applies(r, repo, bare, repo_known)]
+    path_rules = [r for r in active if r["paths"]]
+    content_rules = [r for r in active if r["content"]]
+    plan_rules = [r for r in active if r["plan"]]
+    clipped = False
+
+    def clip_reason(where):
+        nonlocal clipped
+        nonlocal best
+        clipped = True
+        reasons.append({"rule": "scan-truncated", "tier": "R2", "where": where, "tag": None})
+        best = max(best, TIER_INDEX["R2"])
 
     for path in sorted(bad):
         reasons.append({"rule": "undecodable-path", "tier": "R3", "where": path, "tag": "path"})
@@ -732,7 +779,6 @@ def classify(paths, bad, lines, changed, plan_text, policy, repo, repo_known, co
         docs_r0 = any(r["tier"] == "R0" and r["tag"] == "docs" for r in matched)
         if not docs_r0:
             all_docs_r0 = False
-        content_skip[path] = any(r["tier"] == "R0" for r in matched)
         if not matched:
             default = policy["default"]
             reasons.append({"rule": "default", "tier": default["tier"], "where": path,
@@ -746,22 +792,46 @@ def classify(paths, bad, lines, changed, plan_text, policy, repo, repo_known, co
             tags.add(rule["tag"])
             best = max(best, TIER_INDEX[rule["tier"]])
 
+    deadline = time.monotonic() + SCAN_BUDGET_SECONDS
+    out_of_time = False
     if changed is not None:
-        for rule in content_rules:
-            for path in paths:
-                if content_skip.get(path):
-                    continue
-                if matches(rule["exclude"], path):
-                    continue
-                if any(rx.search(line) for line in changed.get(path, []) for rx in rule["content"]):
+        for path in paths:
+            file_rules = [r for r in content_rules if not matches(r["exclude"], path)]
+            if not file_rules:
+                continue
+            if out_of_time or time.monotonic() > deadline:
+                out_of_time = True
+                clip_reason(path)
+                continue
+            lines_here = changed.get(path, [])
+            if len(lines_here) > FILE_LINES_SCAN_CAP or any(len(ln) > LINE_SCAN_CAP for ln in lines_here):
+                clip_reason(path)
+            hit = set()
+            for line in lines_here[:FILE_LINES_SCAN_CAP]:
+                if time.monotonic() > deadline:
+                    out_of_time = True
+                    clip_reason(path)
+                    break
+                line = line[:LINE_SCAN_CAP]
+                for rule in file_rules:
+                    if rule["id"] not in hit and any(rx.search(line) for rx in rule["content"]):
+                        hit.add(rule["id"])
+            for rule in file_rules:
+                if rule["id"] in hit:
                     reasons.append({"rule": rule["id"], "tier": rule["tier"], "where": path,
                                     "tag": rule["tag"]})
                     tags.add(rule["tag"])
                     best = max(best, TIER_INDEX[rule["tier"]])
 
     if plan_text:
+        if len(plan_text) > PLAN_SCAN_CAP:
+            plan_text = plan_text[:PLAN_SCAN_CAP]
+            clip_reason("plan")
         plan_hit = False
         for rule in plan_rules:
+            if time.monotonic() > deadline:
+                clip_reason("plan")
+                break
             if any(rx.search(plan_text) for rx in rule["plan"]):
                 plan_hit = True
                 reasons.append({"rule": rule["id"], "tier": rule["tier"], "where": "plan",
@@ -776,9 +846,11 @@ def classify(paths, bad, lines, changed, plan_text, policy, repo, repo_known, co
             tags.add(default["tag"])
             best = max(best, TIER_INDEX[default["tier"]])
 
+    if clipped and content_scanned is not False:
+        content_scanned = "partial"
+
     base_tier = TIERS[best] if best >= 0 else "R0"
 
-    bare = repo.rsplit("/", 1)[-1] if repo else ""
     floor_tier = None
     if paths and policy["floors"] and not repo_known:
         warnings.append("repo unknown, floors skipped")
@@ -884,6 +956,10 @@ def main(argv):
         usage_error("--base is only for diff mode")
     if args.files == "-" and "-" in args.plan:
         usage_error("stdin cannot be both --files - and --plan -")
+    for plan in args.plan:
+        if plan != "-" and not os.path.exists(plan):
+            usage_error(f"--plan takes a file path or '-', not text: pass text on stdin with `--plan -` "
+                        f"or give a file path ({plan[:40]!r} is not a file)")
 
     rules_path = Path(args.rules).expanduser() if args.rules else default_rules()
     policy = load_policy(rules_path)

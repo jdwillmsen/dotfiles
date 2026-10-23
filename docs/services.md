@@ -27,6 +27,7 @@ pressure is how a five-minute outage becomes an hour.
 | `agent-trends.timer` → `.service` | user | same directory and trigger as `agent-notify` — **repo-owned**; see [`agent-trends.md`](agent-trends.md) | yes, installed by a home apply; `not-found` until one runs | — (the page is a file; serving it is a manual `tailscale serve`) | `systemctl --user list-timers 'agent-trends*'` |
 | `agent-label.timer` → `.service` | user | `home/dot_config/systemd/user/`, enabled by `run_onchange_56-enable-agent-label.sh.tmpl` — **repo-owned**; see [`agent-label.md`](agent-label.md) | yes, installed by a home apply; `not-found` until one runs | — | `systemctl --user list-timers 'agent-label*'` |
 | `agent-propose-{daily,weekly,monthly}.timer` → `agent-propose@.service` | user | `home/dot_config/systemd/user/`, enabled by `run_onchange_57-enable-agent-propose.sh.tmpl` — **repo-owned**; see [`agent-propose.md`](agent-propose.md) | yes, installed by a home apply; `not-found` until one runs | — | `systemctl --user list-timers 'agent-propose-*'` |
+| `merge-captain.timer` → `.service`, `agent-eval-collect.timer` → `.service` | user | `home/dot_config/systemd/user/`, enabled by `run_onchange_58-enable-agent-delivery.sh.tmpl` — **repo-owned**; see [`merge-captain.md`](merge-captain.md) | yes, installed by a home apply; `not-found` until one runs | — | `systemctl --user list-timers 'merge-captain*' 'agent-eval-collect*'` |
 | `devbox-reboot-guard.timer` → `.service` | system | `scripts/provision-auto-maintenance.sh` (root step) — **repo-owned**; see [`provisioning.md`](provisioning.md#automatic-updates-and-reboots) | yes, once the script has run | — | `systemctl list-timers devbox-reboot-guard.timer` |
 | `devbox-health-boot.timer` → `.service` | user | `home/dot_config/systemd/user/`, enabled by `run_onchange_58-enable-devbox-health-boot.sh.tmpl` — **repo-owned** | yes, installed by a home apply; fires only at the next boot | — | `systemctl --user status devbox-health-boot.service` |
 | `atop.service`, `atopacct.service`, `atop-rotate.timer` | system | `scripts/provision-monitoring.sh` (root step) | yes | — | `atop -r /var/log/atop/atop_$(date +%Y%m%d)` |
@@ -53,7 +54,8 @@ Everything else in `systemctl list-units` is stock Ubuntu (journald, resolved,
 logind, udev, cron, rsyslog, oomd, qemu-guest-agent, unattended-upgrades).
 `t3-session-expiry.timer`, the four `agent-audit-*.timer`s,
 `agent-metrics-collect.timer`, the six `agent-report-*.timer`s, `agent-notify.timer`,
-`agent-notify-digest.timer`, `agent-trends.timer`, `agent-label.timer` and the three `agent-propose-*.timer`s are the
+`agent-notify-digest.timer`, `agent-trends.timer`, `agent-label.timer`, the three `agent-propose-*.timer`s, `merge-captain.timer` and
+`agent-eval-collect.timer` are the
 only timers this repo owns. Baseline for the
 user manager is `launchpadlib-cache-clean.timer` and for the system manager is
 apt/fwupd/logrotate housekeeping; a timer outside those and the repo-owned ones
@@ -66,7 +68,7 @@ document exists to preserve. Sorted by how much a rebuild gets for free:
 
 **1. `chezmoi apply` recreates it.** `t3-session-expiry.timer` and its service
 (and likewise the `agent-audit`, `agent-metrics`, `agent-report`, `agent-notify`,
-`agent-trends`, `agent-label` and `agent-propose` timers),
+`agent-trends`, `agent-label`, `agent-propose`, `merge-captain` and `agent-eval-collect` timers),
 whose units are repo-owned and whose trigger enables them on a normal home
 apply — which is why a box that reads them as `not-found` is still fully
 recoverable: one apply is the whole remedy. And

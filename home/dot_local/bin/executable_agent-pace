@@ -10,6 +10,7 @@ import argparse
 import datetime as dt
 import fcntl
 import json
+import math
 import os
 import random
 import re
@@ -37,6 +38,9 @@ EVAL_STATE = Path(os.environ.get("AGENT_EVAL_STATE")
 
 RISKS = ("R0", "R1", "R2", "R3")
 WINDOW_S = 7 * 86400
+# Epochs outside these bounds are corrupt, not merely old or far off.
+EPOCH_MIN = dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc).timestamp()
+EPOCH_MAX = dt.datetime(2100, 1, 1, tzinfo=dt.timezone.utc).timestamp()
 # A reading older than this no longer says where the quota is now.
 STALE_S = 30 * 60
 CONCURRENCY_WINDOW_S = 4 * 3600
@@ -188,7 +192,7 @@ def load_policy():
 
 def read_jsonl(path):
     try:
-        text = Path(path).read_text()
+        text = Path(path).read_text(errors="replace")
     except OSError:
         return []
     rows = []
@@ -204,6 +208,44 @@ def read_jsonl(path):
 
 def number(v):
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def sane_reading(r):
+    """A quota line is usable only if its numbers are finite and in range: a NaN
+    percentage or an absurd epoch would otherwise steer the mix or crash."""
+    at = to_epoch(r.get("at"))
+    if at is None or not (math.isfinite(at) and EPOCH_MIN <= at <= EPOCH_MAX):
+        return False
+    for key in ("five_hour_resets_at", "seven_day_resets_at"):
+        if r.get(key) is None:
+            continue
+        e = to_epoch(r[key])
+        if e is None or not (math.isfinite(e) and EPOCH_MIN <= e <= EPOCH_MAX):
+            return False
+    for key in ("five_hour_pct", "seven_day_pct"):
+        if r.get(key) is None:
+            continue
+        v = number(r[key])
+        if v is None or not (math.isfinite(v) and 0 <= v <= 100):
+            return False
+    return True
+
+
+def read_quota(path):
+    """Usable quota readings and the count of lines that were not."""
+    try:
+        lines = [x for x in Path(path).read_text(errors="replace").splitlines() if x.strip()]
+    except OSError:
+        return [], 0
+    rows = []
+    for line in lines:
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(d, dict) and sane_reading(d):
+            rows.append(d)
+    return rows, len(lines) - len(rows)
 
 
 def newest_with(rows, key):
@@ -229,10 +271,11 @@ def pace_state(cfg, now):
     """Where the quota stands against the pace line, and the claude weight
     multiplier that follows. A window with no fresh reading paces at baseline."""
     p = cfg["pacing"]
-    rows = read_jsonl(QUOTA_FILE)
+    rows, skipped = read_quota(QUOTA_FILE)
     newest = max((to_epoch(r.get("at")) for r in rows if to_epoch(r.get("at")) is not None), default=None)
     s = {"now": iso(now), "quota_at": iso(newest),
          "quota_age_min": None if newest is None else round(max(0, now - newest) / 60, 1),
+         "quota_skipped": skipped,
          "state": "no-data", "stale": False, "window_start": None, "window_resets_at": None,
          "elapsed_pct": None, "used_pct": None, "pace_line_pct": None, "gap_pct": None,
          "hours_left": None, "claude_multiplier": 1.0,
@@ -248,7 +291,11 @@ def pace_state(cfg, now):
         s["five_hour_stale"] = now - at > STALE_S
         # A reading whose window has already reset says nothing about the new one.
         rolled = resets is not None and resets <= now
-        s["five_hour_paused"] = (not s["five_hour_stale"] and not rolled
+        # Usage cannot fall before its window resets, so an old reading at the
+        # threshold still pauses while the reset is ahead; with no reset time an
+        # old reading proves nothing.
+        known_open = resets is not None and not rolled
+        s["five_hour_paused"] = (not rolled and (known_open or not s["five_hour_stale"])
                                  and s["five_hour_pct"] >= float(p["five_hour_pause_pct"]))
 
     seven = newest_with(rows, "seven_day_pct")
@@ -257,7 +304,9 @@ def pace_state(cfg, now):
         used = number(r["seven_day_pct"])
         resets = to_epoch(r.get("seven_day_resets_at"))
         s["used_pct"] = used
-        if resets is not None:
+        if resets is not None and resets <= now:
+            s.update(state="rolled", window_start=iso(resets - WINDOW_S), window_resets_at=iso(resets))
+        elif resets is not None:
             start = resets - WINDOW_S
             f = clamp((now - start) / WINDOW_S, 0.0, 1.0)
             line = float(p["target_end_pct"]) * f
@@ -289,6 +338,8 @@ def recommend(s, p):
     state = s["state"]
     if state == "no-data":
         return "no seven-day reading: baseline shares"
+    if state == "rolled":
+        return "seven-day window has reset since the last reading: baseline shares until it refreshes"
     if state == "stale":
         return f"quota reading is {s['quota_age_min']:g} min old: baseline shares until it refreshes"
     gap = abs(s["gap_pct"])
@@ -599,8 +650,8 @@ def choose(ctx, args, busy):
     p = parts[chosen["id"]]
     note = f"; {ctx.evidence_note}" if ctx.evidence_note else ""
     note += "; opus cap applied" if capped else ""
-    if ctx.pace["state"] == "stale":
-        note += "; quota reading stale, baseline pace"
+    if ctx.pace["state"] in ("stale", "rolled"):
+        note += f"; quota reading {ctx.pace['state']}, baseline pace"
     reason = (f"weight {weights[chosen['id']] / total:.2f} (share {p['share']:g}, pace x{p['pace']:g}, "
               f"evidence x{p['evidence']:.2f}, explore x{p['explore']:.2f}){note}")
     ladder = [lane["id"] for lane, _ in build_ladder(ctx, eligible, cls) if lane["id"] != chosen["id"]]

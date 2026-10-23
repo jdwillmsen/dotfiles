@@ -228,3 +228,91 @@ prior = 0.70
 classes = ["docs", "plan", "summarize"]
 unavailable_until = "2026-10-28"
 notes = "Quota exhausted 2026-10-21; design drafts and tiny fixes only."
+
+# Paused lanes never receive work. They exist so history from models that left
+# the catalog or cannot run agent tasks maps to a named lane instead of
+# `unmapped:*`.
+
+[[lane]]
+id = "opencode-minimax-free"
+group = "free"
+provider = "opencode"
+model = "opencode/minimax-m3.1-flash-free"
+family = "minimax"
+status = "paused"
+share = 0
+max_risk = "R0"
+concurrency = 1
+prior = 0.65
+classes = []
+notes = "Left the catalog on 2026-10-23; completed 6 of 6 earlier."
+
+[[lane]]
+id = "opencode-nim-deepseek"
+group = "free"
+provider = "opencode"
+model = "nvidia/deepseek-ai/deepseek-v4.1-flash"
+family = "deepseek"
+status = "paused"
+share = 0
+max_risk = "R0"
+concurrency = 1
+prior = 0.40
+classes = []
+notes = "Response headers timed out at 300 s on every run."
+
+[[lane]]
+id = "opencode-nim-kimi"
+group = "free"
+provider = "opencode"
+model = "nvidia/moonshotai/kimi-k3"
+family = "kimi"
+status = "paused"
+share = 0
+max_risk = "R0"
+concurrency = 1
+prior = 0.40
+classes = []
+notes = "Retired on NIM (410 Gone)."
+
+[[lane]]
+id = "codex-terra"
+group = "free"
+provider = "codex"
+model = "gpt-5.6-terra"
+family = "openai"
+status = "paused"
+share = 0
+max_risk = "R0"
+concurrency = 1
+prior = 0.50
+classes = []
+notes = "ChatGPT Free plan: usage limit on every run."
+
+[[lane]]
+id = "local-chat"
+group = "free"
+provider = "opencode"
+model = "gpu-stack/local-chat"
+family = "qwen"
+status = "paused"
+share = 0
+max_risk = "R0"
+concurrency = 1
+prior = 0.40
+classes = []
+notes = "32K context: the OpenCode system prompt fills it, so no agent tasks. Plain prompts only."
+
+[[lane]]
+id = "claude-opusplan"
+group = "claude"
+provider = "claudeAgent"
+model = "opusplan"
+family = "anthropic"
+status = "paused"
+share = 0
+max_risk = "R0"
+concurrency = 1
+prior = 0.50
+classes = []
+notes = "T3 probe alias, not a dispatch target."

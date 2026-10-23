@@ -106,6 +106,9 @@ unsure, classify up. Put the result on the PR and ticket as labels
 - An R3 plan is not started until the owner has been asked the open questions
   (blast radius, rollback, who is affected). Every other tier needs no
   confirmation to start or to merge.
+- Work done directly on a live system, with no PR to classify, is R3 unless the
+  owner said otherwise. Plan matching is keyword-based: when a plan could touch
+  production, data, access or money, classify it up yourself.
 - Never lower a tier because the change "looks small". Evidence from the
   model scoreboard can raise what a model may do (`lanes.toml`), never what a
   tier requires.

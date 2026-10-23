@@ -476,7 +476,8 @@ python3 -c 'import sys; open(sys.argv[1], "w").write("kubectl delete " + "x" * 2
 run_in "$huge" 0 --rules "$rules"
 grep -qx 'content_scanned: false' "$out" || fail "a diff over the content cap was still scanned" "$(cat "$out")"
 if grep -q 'destructive' "$out"; then fail "a skipped content scan still matched a rule"; fi
-grep -qx 'tier: R1' "$out" || fail "a skipped content scan changed the path tier" "$(cat "$out")"
+grep -qx 'tier: R2' "$out" || fail "a skipped content scan did not raise the tier to R2" "$(cat "$out")"
+grep -q 'scan-truncated' "$out" || fail "a skipped content scan gave no scan-truncated reason" "$(cat "$out")"
 
 # ── --pr uses gh, passing the repo through ──
 mkdir -p "$tmp/bin"
@@ -961,5 +962,60 @@ for cmd in 'rm -r -f /' 'rm -rf ~' 'rm -rf "$HOME"' 'rm --recursive --force /'; 
     got="$( cd "$destructive_repo" && "$cc" --rules "$rules" --base origin/main | sed -n 's/^tier: //p' )"
     [ "$got" = R3 ] || fail "destructive form '$cmd' classified $got, want R3"
 done
+
+# ── Second review round: phrasings, key material, size cap, name segments ──
+for text in \
+    'Get rid of the old postgres instance and its storage' \
+    'Tear down the staging k8s environment' \
+    'Rewrite git history to strip the leaked file and push it' \
+    'Turn off required reviews on main so the bot can merge' \
+    'Give the bot account admin on the GitHub org' \
+    'Kick everyone off the Minecraft world and regenerate the map' \
+    'Bump the live site to the new image' \
+    'Point the apex domain at the new load balancer' \
+    'Lower the backup retention to one day'; do
+    got="$(plan_tier "$tmp" "$text")"
+    [ "$got" = R3 ] || fail "plan '$text' classified $got, want R3" "$(cat "$out")"
+done
+for text in 'Bump the dependency lodash to 4.17.21' 'Fix the flaky retry in the crew client'; do
+    got="$(plan_tier "$tmp" "$text")"
+    [ "$got" = R1 ] || fail "ordinary plan '$text' classified $got, want R1" "$(cat "$out")"
+done
+
+keys_repo="$tmp/key-material"
+new_repo "$keys_repo"
+mkdir -p "$keys_repo/docs" "$keys_repo/tests"
+echo base >"$keys_repo/a.txt"
+commit_all "$keys_repo" base
+git -C "$keys_repo" update-ref refs/remotes/origin/main HEAD
+for target in docs/x.md tests/fixtures.env notes.txt; do
+    mkdir -p "$keys_repo/$(dirname "$target")"
+    printf '%s\n' '-----BEGIN RSA PRIVATE KEY-----' >"$keys_repo/$target"
+    got="$( cd "$keys_repo" && "$cc" --rules "$rules" --base origin/main | sed -n 's/^tier: //p' )"
+    [ "$got" = R3 ] || fail "private key in $target classified $got, want R3"
+    rm -f "$keys_repo/$target"
+done
+
+# shellcheck disable=SC2016  # the text is classified, never expanded
+for cmd in 'rm -fr --no-preserve-root /' 'rm -rf /tmpfoo/../' 'rm -rf /tmp/x/..'; do
+    printf '%s\n' "$cmd" >"$destructive_repo/run.sh"
+    got="$( cd "$destructive_repo" && "$cc" --rules "$rules" --base origin/main | sed -n 's/^tier: //p' )"
+    [ "$got" = R3 ] || fail "destructive form '$cmd' classified $got, want R3"
+done
+printf '%s\n' 'rm -rf /tmp/build-123' >"$destructive_repo/run.sh"
+got="$( cd "$destructive_repo" && "$cc" --rules "$rules" --base origin/main | sed -n 's/^tier: //p' )"
+[ "$got" = R1 ] || fail "a plain /tmp cleanup classified $got, want R1"
+
+# A diff too big to scan is a reason to look harder, not a pass.
+python3 -c "open('$destructive_repo/run.sh','w').write('#' + 'a' * 2300000 + '\nrm -rf /\n')"
+( cd "$destructive_repo" && "$cc" --rules "$rules" --base origin/main ) >"$out"
+grep -qx 'tier: R2' "$out" || fail "an unscannable diff stayed below R2" "$(head -20 "$out")"
+grep -q 'scan-truncated' "$out" || fail "an unscannable diff gave no scan-truncated reason" "$(head -20 "$out")"
+
+real_case jdwlabs/apps src/improve_prdict.go R1
+real_case jdwlabs/apps apps/auth/package.json R2
+real_case jdwlabs/deployments tools/check-prd-drift.py R3
+real_case dotablaze-tech/deployments charts/meowbot/templates/deployment.yaml R3
+real_case jdwillmsen/jdw-deployments charts/crew-lab/templates/crew-deployment.yaml R2
 
 echo "test_change_class_script: OK"

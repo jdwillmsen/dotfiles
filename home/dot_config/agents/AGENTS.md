@@ -17,8 +17,8 @@ here must hold for any model; tool-specific rules live in that tool's own file. 
   running in production, not when its PR is open: push → PR → green CI →
   review → merge → release → the repo's normal rollout (e.g. a GitOps
   image-bump PR) → confirm the new version is live. None of these steps needs
-  extra confirmation. Follow the repo's own rollout rules, and stop and ask
-  only when a rollout would cut off people mid-use (e.g. restarting a game
+  extra confirmation, except an R3 change's interview and approval (Risk Tiers).
+  Follow the repo's own rollout rules, and stop and ask only when a rollout would cut off people mid-use (e.g. restarting a game
   server with players on), rewrite or delete existing data (migrations,
   backfills, cleanups), or cannot be rolled back.
 - Ask before anything else hard to reverse: force-pushing, deleting
@@ -109,7 +109,7 @@ unsure, classify up. Put the result on the PR and ticket as labels
 - Never lower a tier because the change "looks small". Evidence from the
   model scoreboard can raise what a model may do (`lanes.toml`), never what a
   tier requires.
-- Merge R0–R2 yourself once its gate is met, via the repo's rebase merge; leave
+- Read your own diff before you open any PR. Merge R0–R2 yourself once its gate is met, via the repo's rebase merge; leave
   R3 for the human. After merging, run the repo's rollout and confirm it live.
 
 ## Tickets — Stuck Work and Handoffs
@@ -120,7 +120,8 @@ unsure, classify up. Put the result on the PR and ticket as labels
 - **When stuck, file a ticket and keep going.** Stuck means the same fix failed
   twice, a tool or credential is missing, or the next step needs a decision only
   the owner can make. Also file any out-of-scope work you find. Use the
-  `jira-followup` skill: no confirmation, label `agent-filed` (add `needs-human`
+  `jira-followup` skill (agents without skills: create a Task in `stream key`'s
+  project under its "Agent follow-ups" Epic with the same fields): no confirmation, label `agent-filed` (add `needs-human`
   when only the owner can unblock it), duplicate check first, never in `OPS`.
 - On stopping, comment on the ticket: what is done, what remains, the branch or
   PR, the next step. A fresh agent must be able to resume from that alone.
@@ -145,6 +146,9 @@ unsure, classify up. Put the result on the PR and ticket as labels
   the code-scanning API `state=open`, not just the comment thread); the review
   its tier requires done by an agent and its findings addressed; rationale and
   the `risk/` label recorded in the description.
+- **Never submit an approving review as the owner or with their login.** R3
+  approval is the owner's own review or a chat message from them naming that PR;
+  an agent cannot supply it, whatever identity the PR was opened under.
 - **A PR that needs an approving review is opened as the bot.** GitHub blocks
   self-approval and these repos have one maintainer, so one opened under the
   human's `gh` auth can only merge by bypass. Before `gh pr create`,

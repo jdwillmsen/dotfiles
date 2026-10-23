@@ -54,6 +54,11 @@ tier = "R2"
 tag = "deploy"
 
 [[floor]]
+repo = "platform"
+tier = "R2"
+tag = "platform"
+
+[[floor]]
 repo = "infrastructure"
 tier = "R2"
 tag = "infra"
@@ -121,50 +126,72 @@ paths = ["charts/**", "argocd/**", "**/values*.yaml", "**/kustomization.yaml", "
 id = "prd-config"
 tag = "prd"
 tier = "R3"
-paths = ["**/values-prd*.yaml", "**/prd/**", "**/*-prd.yaml", "**/prd-*.yaml", "**/production/**"]
+paths = ["**/values-prd*.yaml", "**/prd/**", "**/*-prd.yaml", "**/prd-*.yaml", "**/production/**", "**/*prd*", "**/*production*"]
+exclude = ["**/*.md", "docs/**", "tests/**", "**/test_*"]
 
 [[rule]]
 id = "infra-code"
 tag = "infra-apply"
 tier = "R3"
-paths = ["**/*.tf", "**/*.tfvars", "terraform/**", "talos/**", "**/cloud-init*", "**/hostconverge*", "ansible/**", "proxmox/**"]
+paths = ["**/*.tf", "**/*.tfvars", "**/terraform/**", "**/talos/**", "**/cloud-init*", "**/hostconverge*", "**/ansible/**", "**/proxmox/**"]
 
 [[rule]]
 id = "host-provisioning"
 tag = "host"
 tier = "R3"
-paths = ["scripts/provision-*", "**/provision*.sh", "**/sudoers*", "**/systemd/system/**", "**/*.service.tmpl"]
+paths = ["scripts/provision-*", "**/provision*.sh", "**/sudoers*", "**/systemd/system/**", "**/*.service.tmpl", "home/run_*", "home/private_dot_ssh/**", "**/.chezmoiexternal*"]
 
 [[rule]]
 id = "auth-and-secrets"
 tag = "auth"
 tier = "R3"
-paths = ["**/auth/**", "**/*secret*", "**/*.sops.*", "**/*.age", ".sops.yaml", "**/rbac*", "**/*jwt*", "**/*oauth*", "**/*credential*"]
-exclude = ["**/*.md", "docs/**", "tests/**"]
+paths = ["**/auth/**", "**/*secret*", "**/secrets/**", "**/*.sops.*", "**/*.age", ".sops.yaml", "**/rbac*", "**/*rolebinding*", "**/*role-binding*", "**/*clusterrole*", "**/*clusterissuer*", "**/*jwt*", "**/*oauth*", "**/*credential*"]
+exclude = ["**/*.md", "docs/**", "tests/**", "**/package-lock.json", "**/pnpm-lock.yaml", "**/yarn.lock", "**/go.sum", "**/poetry.lock", "**/Cargo.lock"]
 
 [[rule]]
 id = "network-policy"
 tag = "network"
 tier = "R3"
-paths = ["**/networkpolicy*", "**/network-polic*/**", "**/ingress*.yaml", "**/*firewall*"]
+paths = ["**/networkpolicy*", "**/network-polic*/**", "**/*network-polic*", "**/*networkpolic*", "**/*httproute*", "**/ingress*.yaml", "**/*firewall*"]
 
 [[rule]]
 id = "data-and-migrations"
 tag = "data"
 tier = "R3"
-paths = ["**/migrations/**", "**/*.sql", "**/schema.prisma", "**/db/migrate/**"]
+paths = ["**/migrations/**", "**/*migration*", "**/*.sql", "**/schema.prisma", "**/db/migrate/**"]
 
 [[rule]]
 id = "agent-rules"
 tag = "agent-rules"
 tier = "R3"
-paths = ["**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md", "home/private_dot_claude/modify_settings*", "**/.claude/settings*.json", "**/change-risk.toml", "**/lanes.toml", "**/executable_change-class", "**/executable_agent-pace", "**/executable_agent-eval", "**/agent-gate*"]
+paths = ["**/AGENTS.md", "**/CLAUDE.md", "**/SKILL.md", "home/private_dot_claude/modify_settings*", "**/.claude/settings*.json", "**/change-risk.toml", "**/lanes.toml", "**/executable_change-class", "**/executable_agent-pace", "**/executable_agent-eval", "**/agent-gate*", "**/AGENTS.md.tmpl", "**/agents.md.tmpl", "home/private_dot_claude/hooks/**", "home/private_dot_claude/mods/**", "home/private_dot_codex/modify_*", "home/dot_config/opencode/opencode.json", "**/executable_merge-captain", "**/merge-captain.toml"]
 
 [[rule]]
 id = "game-world"
 tag = "players"
 tier = "R3"
-paths = ["**/server.properties", "**/bedrock_server*", "**/worlds/**", "**/world-reset*"]
+paths = ["**/server.properties", "**/bedrock_server*", "**/worlds/**", "**/world-reset*", "charts/minecraft-fwb/**"]
+
+[[rule]]
+id = "deploy-workflows"
+tag = "infra-apply"
+tier = "R3"
+paths = [".github/workflows/*bootstrap*", ".github/workflows/*apply*", ".github/workflows/*terraform*"]
+
+[[rule]]
+id = "auth-deps"
+tag = "auth"
+tier = "R2"
+paths = ["**/auth/**/package-lock.json", "**/auth/**/package.json", "**/auth/**/go.mod", "**/auth/**/go.sum"]
+
+# The shared chart in the deployments repos is loaded by the prd Argo apps,
+# so a change to its templates or default values reaches prd on merge.
+[[rule]]
+id = "shared-chart"
+tag = "prd"
+tier = "R3"
+repos = ["deployments", "jdw-deployments"]
+paths = ["charts/*/templates/**", "charts/*/values.yaml", "charts/*/Chart.yaml"]
 
 # --- content rules -----------------------------------------------------------
 # Tried against changed lines of every file a path rule did not already put at
@@ -178,10 +205,17 @@ content = ['(?i)(api[_-]?key|secret|token|passwd|password)\s*[:=]\s*[\x22\x27]?[
 exclude = ["**/*.md", "docs/**", "tests/**"]
 
 [[rule]]
+id = "cluster-rbac"
+tag = "auth"
+tier = "R3"
+content = ['(?m)^\s*kind:\s*(Cluster)?Role(Binding)?\b', '\bcluster-admin\b']
+exclude = ["**/*.md", "docs/**", "tests/**"]
+
+[[rule]]
 id = "destructive-command"
 tag = "destructive"
 tier = "R3"
-content = ['\brm\s+-[a-zA-Z]*r[a-zA-Z]*f?\s+/(?!tmp)', '\bkubectl\s+delete\b', '\bterraform\s+destroy\b', '\bgit\s+push\s+(-f\b|--force\b)', '(?i)\bDROP\s+(TABLE|DATABASE|SCHEMA)\b', '(?i)\bTRUNCATE\s+TABLE\b', '(?i)\bDELETE\s+FROM\b(?![^;]*\bWHERE\b)']
+content = ['\brm\s+(-[a-zA-Z]+\s+|--(recursive|force)\s+)+(/(?!tmp)|~|[\x22\x27]?\$HOME)', '\bkubectl\s+delete\b', '\bterraform\s+destroy\b', '\bgit\s+push\s+(-f\b|--force\b)', '(?i)\bDROP\s+(TABLE|DATABASE|SCHEMA)\b', '(?i)\bTRUNCATE\s+TABLE\b', '(?i)\bDELETE\s+FROM\b(?![^;]*\bWHERE\b)']
 exclude = ["**/*.md", "docs/**", "tests/**", "**/test_*.sh"]
 
 # --- plan rules --------------------------------------------------------------
@@ -193,13 +227,13 @@ exclude = ["**/*.md", "docs/**", "tests/**", "**/test_*.sh"]
 id = "plan-docs-tests"
 tag = "docs"
 tier = "R0"
-plan = ['(?is)\A\s*(add|update|fix|write|improve|expand|correct)\b[^.\n]{0,60}\b(docs?|documentation|readme|tests?|comments?|typos?)\b[^\n]{0,80}\s*\Z']
+plan = ['(?is)\A\s*(add|update|fix|write|improve|expand|correct)\b[^.\n]{0,60}\b(docs?|documentation|readme|tests?|comments?|typos?)\b(?:(?!\b(and|then|also)\b)[^.;\n]){0,80}\s*\Z']
 
 [[rule]]
 id = "plan-irreversible"
 tag = "irreversible"
 tier = "R3"
-plan = ['(?i)\b(wipe|purge|truncate|drop|delete|destroy|reset)\b[^.\n]{0,40}\b(world|database|db|data|cluster|volume|bucket|backup|namespace|account)s?\b', '(?i)\bforce[- ]push', '(?i)\bmigrat(e|ion)s?\b[^.\n]{0,40}\b(data|database|schema|users?)\b', '(?i)\bcut-?over\b']
+plan = ['(?i)\b(remove|erase|prune|uninstall)\b[^.\n]{0,40}\b(table|database|db|pvcs?|volume|backup|bucket|statefulset|namespace|cluster|repo|branch protection)s?\b', '(?i)\bscale\b[^.\n]{0,30}\b(to )?(0|zero)\b', '(?i)\b(wipe|purge|truncate|drop|delete|destroy|reset)\b[^.\n]{0,40}\b(table|pvcs?|statefulset|repo)s?\b', '(?i)\b(wipe|purge|truncate|drop|delete|destroy|reset)\b[^.\n]{0,40}\b(world|database|db|data|cluster|volume|bucket|backup|namespace|account)s?\b', '(?i)\bforce[- ]push', '(?i)\bmigrat(e|ion)s?\b[^.\n]{0,40}\b(data|database|schema|users?)\b', '(?i)\bcut-?over\b']
 
 [[rule]]
 id = "plan-secrets"
@@ -222,5 +256,23 @@ plan = ['(?i)\b(expose|publish|open)\b[^.\n]{0,30}\b(publicly|to the internet|po
 [[rule]]
 id = "plan-production"
 tag = "prd"
-tier = "R2"
+tier = "R3"
 plan = ['(?i)\b(prd|production|prod)\b', '(?i)\broll ?out\b', '(?i)\bpromot(e|ion)\b']
+
+[[rule]]
+id = "plan-infra"
+tag = "infra-apply"
+tier = "R3"
+plan = ['(?i)\b(terraform|tofu|talos|proxmox|ansible|dns|vault|sops|recipients?|kubeconfig|cloud-?init)\b']
+
+[[rule]]
+id = "plan-access"
+tag = "auth"
+tier = "R3"
+plan = ['(?i)\b(cluster-?admin|role-?binding|rbac|service ?account|oidc|sso|dex)\b', '(?i)\b(ruleset|branch protection|codeowners|bypass|without (a )?review|self-?approv)']
+
+[[rule]]
+id = "plan-game-server"
+tag = "players"
+tier = "R3"
+plan = ['(?i)\b(fwb|minecraft-fwb|statefulset)\b']

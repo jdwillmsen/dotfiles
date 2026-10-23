@@ -21,7 +21,7 @@ fi
 # been added deliberately mid-session and silently deleting it would be hostile.
 declared=$'{{ range .agentSkills }}{{ .name }}\n{{ end }}{{ range .claudeSkillsDir }}{{ .name }}\n{{ end }}'
 # Skills that provision themselves outside this file.
-declared+=$'no-mistakes\naxi-quickref\njira-create\n'
+declared+=$'no-mistakes\naxi-quickref\njira-create\njira-followup\n'
 undeclared=""
 for d in "$HOME/.claude/skills"/*; do
     [ -e "$d" ] || continue

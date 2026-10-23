@@ -147,7 +147,9 @@ exploration boost:
 
 - Evidence factor comes from `agent-eval weights --json`: the quality posterior
   `(prior_weight × prior + successes) / (prior_weight + n)` for that lane and
-  class, divided by the best eligible lane's value, floored at 0.2. With no
+  class (`successes` is the `success` count in the weights JSON; when it is absent
+  `quality_mean` is taken as the posterior as it stands), divided by the best
+  eligible lane's value, floored at 0.2. With no
   `agent-eval` available it is 1.
 - Exploration boost: on R0/R1 work a lane with fewer than `min_samples`
   judged outcomes in that class gets an extra weight so that about
@@ -203,7 +205,7 @@ agent-eval record --id ID [--status S] [--failure-kind K] [--class C] [--pr URL]
 agent-eval collect [--since DAYS] [--dry-run]       # T3 delegated-task history -> outcomes, idempotent
 agent-eval enrich [--since DAYS]                    # join outcomes to PRs by ticket key via gh: merged, reverted
 agent-eval scoreboard [--since DAYS] [--lane L] [--class C] [--json]
-agent-eval weights --json [--class C]               # per lane and class: n, quality_mean, quality_lb, infra_rate, median_s, cooldown_until
+agent-eval weights --json [--class C]               # per lane and class: n, success, quality_mean, quality_lb, infra_rate, median_s, cooldown_until
 agent-eval verdicts [--since DAYS]                  # keep, probation, drop-for-class, promote advice
 agent-eval report --window daily|weekly|biweekly|monthly [--end YYYY-MM-DD] [--format md|json]
 ```

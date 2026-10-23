@@ -362,9 +362,15 @@ class Ctx:
         ev = self.cfg["evaluation"]
         st = self.lane_class_stats(lane["id"], cls)
         n = number(st.get("n")) or 0.0
-        q = number(st.get("quality_mean")) or 0.0
         pw = float(ev["prior_weight"])
-        return (pw * float(lane.get("prior", 0.5)) + q * n) / (pw + n)
+        prior = float(lane.get("prior", 0.5))
+        success = number(st.get("success"))
+        if success is not None:
+            return (pw * prior + success) / (pw + n)
+        # quality_mean already carries agent-eval's prior; shrinking it again
+        # would count the prior twice.
+        mean = number(st.get("quality_mean"))
+        return mean if n > 0 and mean is not None else prior
 
 
 def read_ledger_ids(name):

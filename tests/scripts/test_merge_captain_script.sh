@@ -322,6 +322,8 @@ elif cmd == "pace":
     kv = kvs(sys.argv[3:])
     result = kv.get("result", "assigned")
     body = {"result": result, "class": "review", "risk": "R1"}
+    if "reason" in kv:
+        body["reason"] = kv["reason"]
     if result == "assigned":
         body.update(assignment=f"a-{k}", lane=kv["lane"], provider=kv["provider"], model=kv["model"], fallback=[])
     open(f"{S}/pace_{k}.json", "w").write(json.dumps(body))
@@ -663,6 +665,20 @@ for result in defer none; do
     fx pace 1 result=$result
     want 0 run
     if [ "$result" = defer ]; then expect 9 waiting quota; else expect 9 waiting no-review-lane; fi
+    [ ! -e "$S/claude.calls" ] || fail "reviewer ran with no lane"
+done
+
+# The reason agent-pace gives is shown, scrubbed, so an operator can tell a full lane from an unlisted class.
+for result in defer none; do
+    newcase
+    fx pr 9
+    fx class 9 R1
+    fx pace 1 result=$result "reason=lane claude-opus at its cap (3 open) token gh$(printf 'p_%s' "$(printf 'a%.0s' {1..30})")"
+    want 0 run
+    expect 9 waiting "at its cap (3 open)"
+    row 9 | grep -q 'gh''p_' && fail "a credential in agent-pace's reason reached the decision" "$(cat "$out")"
+    grep -qF 'at its cap (3 open) token [redacted]' "$out" || fail "the reason was not scrubbed" "$(cat "$out")"
+    grep -qF 'at its cap (3 open)' "$STATE/log.jsonl" || fail "the reason did not reach the log" "$(cat "$STATE/log.jsonl")"
     [ ! -e "$S/claude.calls" ] || fail "reviewer ran with no lane"
 done
 

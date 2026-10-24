@@ -428,6 +428,108 @@ wait "$locker"
 grep -q "^added: 13$" "$out" || fail "a locked database was not read through a copy" "$(cat "$out")"
 [ -z "$(ls -A "$tmp/tmpdir")" ] || fail "the database copy was left behind" "$(ls -A "$tmp/tmpdir")"
 
+# ── collect: a task dispatched under an assignment id closes that assignment ──
+AID=a-20261023-1100-abc
+AID_REC=a-20261023-1105-def
+AID_OLD=a-20261023-1110-123
+add_dispatched() { # slug title status end : a delegated task with one finished run
+    python3 -I - "$AGENT_EVAL_T3_DB" "$@" <<'PY'
+import json, sqlite3, sys
+db_path, slug, title, status, end = sys.argv[1:6]
+t = "thread:delegated-task:command%3Amcp%3Aabc%3Adelegate-task%3A" + slug
+payload = {"modelSelection": {"model": "opencode/glm-5.3-flash-free"}, "startedAt": "2026-10-23T10:00:00.000Z"}
+db = sqlite3.connect(db_path)
+db.execute("insert into orchestration_v2_projection_threads values (?,?)", (t, title))
+db.execute("insert into orchestration_v2_projection_runs values (?,?,?,?,?,?,?,?)",
+           (f"run:{t}:1", t, 1, "opencode", status, "2026-10-23T10:00:00.000Z", end, json.dumps(payload)))
+db.commit()
+PY
+}
+write_assignments() {
+    python3 -I - "$AGENT_EVAL_STATE/assignments.jsonl" <<'PY'
+import json, sys
+rows = [
+    {"id": "a-20261023-1100-abc", "at": "2026-10-23T11:00:00Z", "lane": "claude-opus", "provider": "claudeAgent",
+     "model": "claude-opus-5-5", "class": "review", "risk": "R3", "ticket": "JDW-77"},
+    {"id": "a-20261023-1105-def", "at": "2026-10-23T11:05:00Z", "lane": "claude-sonnet", "provider": "claudeAgent",
+     "model": "claude-sonnet-5-5", "class": "impl", "risk": "R1", "ticket": "JDW-78"},
+    {"id": "a-20261023-1110-123", "at": "2026-10-23T11:10:00Z", "lane": "claude-sonnet", "provider": "claudeAgent",
+     "model": "claude-sonnet-5-5", "class": "docs", "risk": "R0", "ticket": "JDW-79"},
+]
+open(sys.argv[1], "w").write("".join(json.dumps(r) + "\n" for r in rows))
+PY
+}
+outcome_of() { # id : the last ledger row for an id, as JSON; empty when there is none
+    python3 -I - "$AGENT_EVAL_STATE/outcomes.jsonl" "$1" <<'PY'
+import json, sys
+rows = [r for r in map(json.loads, open(sys.argv[1])) if r["id"] == sys.argv[2]]
+print(json.dumps(rows[-1]) if rows else "")
+PY
+}
+
+fresh linked
+export AGENT_EVAL_T3_DB="$tmp/t3-linked.sqlite"
+rm -f "$AGENT_EVAL_T3_DB"
+mkdb "$AGENT_EVAL_T3_DB"
+write_assignments
+add_dispatched "$AID" "Review the thing" completed 2026-10-23T10:30:00.000Z
+add_dispatched "$AID_REC" "Implement the thing" completed 2026-10-23T10:40:00.000Z
+add_dispatched "$AID_OLD" "Write docs" completed 2026-10-23T10:50:00.000Z
+add_dispatched "a-20261023-9999-fff" "Implement orphan slug" completed 2026-10-23T10:55:00.000Z
+# One assignment already has a hand-written outcome; another has a row under the old hashed thread id.
+run 0 record --id "$AID_REC" --status failed --failure-kind quality --note kept
+old_hash="$(id_ending "$AID_OLD")"
+python3 -I - "$AGENT_EVAL_STATE/outcomes.jsonl" "$old_hash" <<'PY'
+import json, sys
+rec = {"id": sys.argv[2], "at": "2026-10-23T10:50:00Z", "lane": "opencode-glm-flash-free", "provider": "opencode",
+       "model": "opencode/glm-5.3-flash-free", "class": "impl", "class_source": "heuristic", "risk": None,
+       "ticket": None, "status": "completed", "failure_kind": "none", "duration_s": 600, "items": 1, "attempt": 1,
+       "pr": "https://github.com/o/r/pull/9", "merged": True, "source": "t3"}
+open(sys.argv[1], "a").write(json.dumps(rec) + "\n")
+PY
+run 0 collect
+python3 - "$(outcome_of "$AID")" "$(outcome_of "$AID_REC")" "$(outcome_of "$AID_OLD")" "$(outcome_of "$old_hash")" \
+    <<'PY' || fail "a dispatched task did not close its assignment"
+import json, sys
+a, rec, old, gone = sys.argv[1:5]
+a = json.loads(a)
+assert a["lane"] == "claude-opus" and a["provider"] == "claudeAgent" and a["model"] == "claude-opus-5-5", a
+assert a["class"] == "review" and a["class_source"] == "assigned" and a["risk"] == "R3", a
+assert a["ticket"] == "JDW-77" and a["status"] == "completed" and a["duration_s"] == 1800 and a["source"] == "t3", a
+rec = json.loads(rec)
+assert rec["source"] == "record" and rec["status"] == "failed" and rec["note"] == "kept", rec
+old = json.loads(old)
+assert old["class"] == "docs" and old["risk"] == "R0" and old["lane"] == "claude-sonnet", old
+assert old["pr"].endswith("/pull/9") and old["merged"] is True, "enrichment of the old row was lost"
+assert gone == "", "the row under the old hashed id was kept"
+PY
+# The thread with an unrelated slug is collected under its hash, as before.
+outcome_of "$(id_ending a-20261023-9999-fff)" | grep -q '"class_source": "heuristic"' \
+    || fail "an unmatched slug was not collected by hash"
+# Each thread is in the ledger once, and a second collect changes nothing.
+python3 - "$AGENT_EVAL_STATE/outcomes.jsonl" <<'PY' || fail "collect left duplicates for a thread"
+import collections, json, sys
+ids = collections.Counter(json.loads(line)["id"] for line in open(sys.argv[1]))
+for i in ("a-20261023-1100-abc", "a-20261023-1110-123"):
+    assert ids[i] == 1, (i, ids[i])
+assert ids["a-20261023-1105-def"] == 1, "the recorded outcome gained a second row"
+PY
+before="$(cat "$AGENT_EVAL_STATE/outcomes.jsonl")"
+run 0 collect
+grep -q "^added: 0$" "$out" && grep -q "^updated: 0$" "$out" || fail "second linked collect changed rows" "$(cat "$out")"
+[ "$before" = "$(cat "$AGENT_EVAL_STATE/outcomes.jsonl")" ] || fail "second linked collect changed the ledger"
+# --dry-run leaves an old row where it is.
+fresh linked-dry
+write_assignments
+python3 -I - "$AGENT_EVAL_STATE/outcomes.jsonl" "$old_hash" <<'PY'
+import json, sys
+open(sys.argv[1], "w").write(json.dumps({"id": sys.argv[2], "at": "2026-10-23T10:50:00Z", "lane": "x", "class": "impl",
+    "class_source": "heuristic", "status": "completed", "source": "t3"}) + "\n")
+PY
+before="$(cat "$AGENT_EVAL_STATE/outcomes.jsonl")"
+run 0 collect --dry-run
+[ "$before" = "$(cat "$AGENT_EVAL_STATE/outcomes.jsonl")" ] || fail "--dry-run rewrote the ledger"
+
 # ── Ledger builder for statistics scenarios ──
 # Each spec: lane,class,risk,status,failure_kind,ci,touch,count,at-start (minutes after 2026-10-22T00:00Z).
 ledger() {

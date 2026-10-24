@@ -178,7 +178,9 @@ Labels: `agent-filed`, `needs-human`, `blocked` (with a `Blocks` link).
 Statuses: no Blocked status exists; park stuck tickets in Backlog with a
 comment. Agents move tickets to In Progress and Review; only a human sets Done.
 
-Saved filters:
+Saved filters (created in Jira on 2026-10-24 as "Agents: Ready queue", "Agents: Human queue",
+"Agents: Stale in progress", "Agents: Agent-filed inbox" and "Agents: Hygiene"; private to the
+owner, ordered as below):
 
 1. Ready queue: `project != OPS AND status = Ready AND labels = agent-actionable ORDER BY priority DESC, created`
 2. Human queue: `project != OPS AND statusCategory != Done AND labels in (human-only, needs-human)`

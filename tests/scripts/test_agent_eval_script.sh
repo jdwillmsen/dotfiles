@@ -573,6 +573,15 @@ grep -q "$old_hash" "$AGENT_EVAL_STATE/outcomes.jsonl.bak" && ! grep -q stale "$
 [ "$(mode_of "$AGENT_EVAL_STATE/outcomes.jsonl.bak")" = 600 ] || fail "an existing backup kept a looser mode"
 
 # A thread that ran on another model than the assignment's lane is not credited to it.
+# A later change of the lane's model in lanes.toml must not stop an existing link from matching, or the
+# same task would be counted again under its hash.
+changed_lanes="$tmp/lanes-changed.toml"
+sed 's/claude-opus-5-5/claude-opus-5-6/' "$lanes_real" >"$changed_lanes"
+AGENT_EVAL_LANES="$changed_lanes" run 0 collect
+[ "$(rows_of "$AID")" = 1 ] || fail "the linked assignment lost its row after a lane edit"
+[ -z "$(outcome_of "$(hash_of "$AID")")" ] || fail "a lane edit made the linked task count twice"
+grep -q "^added: 0$" "$out" || fail "a lane edit re-added rows" "$(cat "$out")"
+
 fresh linked-model
 export AGENT_EVAL_T3_DB="$tmp/t3-model.sqlite"
 rm -f "$AGENT_EVAL_T3_DB"

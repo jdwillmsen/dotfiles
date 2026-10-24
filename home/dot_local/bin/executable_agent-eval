@@ -663,8 +663,12 @@ def run_model(conn, tid, run):
     return run["provider"], model
 
 
-def lane_runs_as(lane_id, provider, model):
-    spec = load_lanes()["lanes"].get(lane_id)
+def assignment_ran_on(assignment, provider, model):
+    """The provider and model the assignment itself recorded. Lanes.toml may change after a task was
+    dispatched, and a link that followed it would stop matching and count the same task twice."""
+    if assignment.get("provider") and assignment.get("model"):
+        return assignment["provider"] == provider and assignment["model"] == model
+    spec = load_lanes()["lanes"].get(assignment.get("lane"))
     return bool(spec) and spec.get("provider") == provider and spec.get("model") == model
 
 
@@ -685,7 +689,7 @@ def link_claimants(conn, threads, runs, assignments, recorded):
         created, planned = parse_ts(th["created_at"]), parse_ts(assignment.get("at"))
         if created is None or planned is None or created < planned:
             continue
-        if lane_runs_as(assignment.get("lane"), *run_model(conn, tid, run)):
+        if assignment_ran_on(assignment, *run_model(conn, tid, run)):
             claims[slug] = tid
     return claims
 

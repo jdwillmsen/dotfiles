@@ -105,6 +105,7 @@ INFRA_RE = re.compile(r"\b410\b|context")
 WORK_RE = re.compile(r"\bgit\b[^|;&\n]*\bcommit\b|\bgh\s+pr\s+create\b")
 TICKET_RE = re.compile(r"\b[A-Z][A-Z0-9]*-[0-9]+\b")
 RETRY_RE = re.compile(r"-r([0-9]+)$")
+ASSIGNMENT_ID_RE = re.compile(r"a-[0-9]{8}-[0-9]{4}-[0-9a-f]{3}")
 LANE_ID_RE = re.compile(r"[A-Za-z0-9:_./-]{1,100}")
 TICKET_ARG_RE = re.compile(r"[A-Z][A-Z0-9]+-[0-9]+")
 PR_URL_RE = re.compile(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+")
@@ -652,14 +653,16 @@ def t3_id(thread_id):
     return "t3:" + hashlib.sha256(thread_id.encode()).hexdigest()[:16]
 
 
-def t3_outcomes(conn, cutoff):
-    """(outcome records, running count, legacy ids) for every finished
+def t3_outcomes(conn, cutoff, assignments):
+    """(outcome records, running count, earlier ids) for every finished
     delegated task newer than `cutoff`. Early collects stored `t3:<thread id>`;
-    the legacy map lets those rows be found again by thread."""
+    the earlier-ids map lets those rows be found again by thread. A task whose
+    slug is an assignment id was dispatched with that id as its clientRequestId,
+    so it is recorded under the assignment id, which closes the assignment."""
     conn.row_factory = sqlite3.Row
     threads = conn.execute("select thread_id, title from orchestration_v2_projection_threads "
                            "where thread_id like '%delegate-task%'").fetchall()
-    out, running, legacy = [], 0, {}
+    out, running, earlier = [], 0, {}
     for th in threads:
         tid = th["thread_id"]
         run = conn.execute("select * from orchestration_v2_projection_runs where thread_id=? "
@@ -705,15 +708,24 @@ def t3_outcomes(conn, cutoff):
         slug = re.split(r"delegate-task(?:%3A|:)", tid)[-1]
         retry = RETRY_RE.search(tid)
         ticket = TICKET_RE.search(title)
-        rec = blank_outcome(t3_id(tid))
-        legacy[rec["id"]] = f"t3:{tid}"
+        assignment = assignments.get(slug) if ASSIGNMENT_ID_RE.fullmatch(slug) else None
+        rec = blank_outcome(slug if assignment else t3_id(tid))
+        earlier[rec["id"]] = [i for i in (t3_id(tid), f"t3:{tid}") if i != rec["id"]]
         rec.update(at=iso(end), lane=lane_for(provider, model), provider=provider, model=model,
                    status=status, failure_kind=failure_kind_for(status, " ".join(errors), did_work),
                    duration_s=max(0, round((end - start).total_seconds())) if start else None, items=items,
                    attempt=int(retry.group(1)) if retry else 1, ticket=ticket.group(0) if ticket else None,
                    source="t3", **{"class": classify_class(title, slug), "class_source": "heuristic"})
+        if assignment:
+            # The dispatcher's choice outranks what the title suggests, and a lane it names stays even
+            # when T3 ran the task on another model.
+            for k in ("lane", "provider", "model", "risk", "ticket"):
+                if assignment.get(k):
+                    rec[k] = assignment[k]
+            if assignment.get("class"):
+                rec.update(**{"class": assignment["class"], "class_source": "assigned"})
         out.append(rec)
-    return out, running, legacy
+    return out, running, earlier
 
 
 COLLECT_OWNED = ("at", "lane", "provider", "model", "status", "failure_kind", "duration_s", "items", "attempt")
@@ -730,9 +742,38 @@ def merge_collected(old, new):
         merged[k] = new[k]
     if not merged.get("ticket"):
         merged["ticket"] = new["ticket"]
-    if merged.get("class_source") == "heuristic":
+    if new["class_source"] == "assigned":
+        # A row first written from T3 alone, before its assignment was known, takes the assignment's view.
+        merged.update(lane=new["lane"], provider=new["provider"], model=new["model"], risk=new["risk"],
+                      ticket=new["ticket"], class_source="assigned", **{"class": new["class"]})
+    elif merged.get("class_source") == "heuristic":
         merged["class"] = new["class"]
     return merged
+
+
+def drop_outcomes(ids):
+    """Remove every row with one of `ids` from the outcome ledger, in place under
+    the append lock. The ledger only appends, but a thread recorded under two ids
+    would be counted twice by every statistic. Unreadable lines stay."""
+    if not ids:
+        return
+    path = ledger_path("outcomes.jsonl")
+    try:
+        with open(path, "r+", encoding="utf-8") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            keep = []
+            for line in fh:
+                try:
+                    obj = json.loads(line)
+                except ValueError:
+                    obj = None
+                if not (isinstance(obj, dict) and obj.get("id") in ids):
+                    keep.append(line)
+            fh.seek(0)
+            fh.writelines(keep)
+            fh.truncate()
+    except OSError as e:
+        die(EXIT_FAIL, f"cannot rewrite {tilde(path)}: {e.strerror}")
 
 
 def cmd_collect(args):
@@ -741,7 +782,7 @@ def cmd_collect(args):
     conn, tmp = open_t3()
     try:
         try:
-            found, running, legacy = t3_outcomes(conn, cutoff)
+            found, running, earlier = t3_outcomes(conn, cutoff, read_assignments())
         except sqlite3.Error as e:
             die(EXIT_FAIL, f"unexpected T3 schema: {e}", "The table and column facts are at the top of agent-eval")
     finally:
@@ -749,22 +790,35 @@ def cmd_collect(args):
         if tmp:
             shutil.rmtree(tmp, ignore_errors=True)
     existing = read_outcomes()
-    new_rows, added, updated, unchanged = [], 0, 0, 0
+    latest = {}
     for rec in found:
-        old = existing.get(rec["id"]) or existing.get(legacy[rec["id"]])
+        # Two threads can carry the same assignment id; the later finish speaks for it.
+        if rec["id"] not in latest or rec["at"] >= latest[rec["id"]]["at"]:
+            latest[rec["id"]] = rec
+    new_rows, stale, added, updated, unchanged = [], set(), 0, 0, 0
+    for rec in latest.values():
+        old = existing.get(rec["id"])
+        superseded = [i for i in earlier[rec["id"]] if i in existing]
+        if rec["class_source"] == "assigned":
+            stale.update(superseded)
+            if old is None and superseded:
+                old = {**existing[superseded[0]], "id": rec["id"]}
+        elif old is None and superseded:
+            old = existing[superseded[0]]
         if old is None:
             new_rows.append(rec)
             added += 1
             continue
         merged = merge_collected(old, rec)
-        if merged == old:
+        if merged == existing.get(merged["id"]):
             unchanged += 1
         else:
             new_rows.append(merged)
             updated += 1
     if not args.dry_run:
         append_jsonl("outcomes.jsonl", new_rows)
-    emit({"scanned": len(found), "added": added, "updated": updated, "unchanged": unchanged,
+        drop_outcomes(stale)
+    emit({"scanned": len(latest), "added": added, "updated": updated, "unchanged": unchanged,
           "skipped_running": running, "since_days": args.since, "dry_run": args.dry_run,
           "state": tilde(STATE)})
     return 0

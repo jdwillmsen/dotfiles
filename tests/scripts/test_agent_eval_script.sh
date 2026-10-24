@@ -146,7 +146,7 @@ mkdb() {
 import json, sqlite3, sys
 db = sqlite3.connect(sys.argv[1])
 db.executescript("""
-create table orchestration_v2_projection_threads (thread_id text primary key, title text);
+create table orchestration_v2_projection_threads (thread_id text primary key, title text, created_at text);
 create table orchestration_v2_projection_runs (run_id text primary key, thread_id text, ordinal integer,
     provider text, status text, requested_at text, completed_at text, payload_json text);
 create table orchestration_v2_projection_turn_items (turn_item_id text primary key, thread_id text, run_id text,
@@ -162,7 +162,7 @@ def add(slug, title, provider, model, status, start, end, errors=(), cmds=(), wo
     t = tid(slug)
     run = f"run:{t}:1"
     payload = {"modelSelection": {"model": model} if model else {}, "startedAt": start}
-    db.execute("insert into orchestration_v2_projection_threads values (?,?)", (t, title))
+    db.execute("insert into orchestration_v2_projection_threads values (?,?,?)", (t, title, start))
     db.execute("insert into orchestration_v2_projection_runs values (?,?,?,?,?,?,?,?)",
                (run, t, 1, provider, status, start, end, json.dumps(payload)))
     def item(kind, st, payload=None):
@@ -217,7 +217,8 @@ add("no-model-in-run", "Fallback model thing", "opencode", None, "completed",
 add("old-one", "Implement an old thing", "opencode", FLASH, "completed",
     "2026-08-01T09:00:00.000Z", "2026-08-01T09:10:00.000Z", work=1)
 # Not a delegated task: must never be read.
-db.execute("insert into orchestration_v2_projection_threads values (?,?)", ("thread:plain-chat", "Chat"))
+db.execute("insert into orchestration_v2_projection_threads values (?,?,?)",
+           ("thread:plain-chat", "Chat", "2026-10-23T08:00:00.000Z"))
 db.execute("insert into orchestration_v2_projection_runs values (?,?,?,?,?,?,?,?)",
            ("run:plain", "thread:plain-chat", 1, "claudeAgent", "completed", "2026-10-23T08:00:00.000Z",
             "2026-10-23T08:10:00.000Z", json.dumps({"modelSelection": {"model": "claude-sonnet-5-5"}})))
@@ -379,7 +380,8 @@ python3 -I - "$tmp/t3-neg.sqlite" <<'PY'
 import json, sqlite3, sys
 db = sqlite3.connect(sys.argv[1])
 t = "thread:delegated-task:command%3Amcp%3Aabc%3Adelegate-task%3Aclock-skew"
-db.execute("insert into orchestration_v2_projection_threads values (?,?)", (t, "Implement skew"))
+db.execute("insert into orchestration_v2_projection_threads values (?,?,?)",
+           (t, "Implement skew", "2026-10-23T10:05:00.000Z"))
 payload = {"modelSelection": {"model": "opencode/glm-5.3-flash-free"}, "startedAt": "2026-10-23T10:05:00.000Z"}
 db.execute("insert into orchestration_v2_projection_runs values (?,?,?,?,?,?,?,?)",
            ("run:skew", t, 1, "opencode", "completed", "2026-10-23T10:00:00.000Z", "2026-10-23T10:00:00.000Z",
@@ -432,16 +434,18 @@ grep -q "^added: 13$" "$out" || fail "a locked database was not read through a c
 AID=a-20261023-1100-abc
 AID_REC=a-20261023-1105-def
 AID_OLD=a-20261023-1110-123
-add_dispatched() { # slug title status end : a delegated task with one finished run
-    python3 -I - "$AGENT_EVAL_T3_DB" "$@" <<'PY'
+OPUS=claude-opus-5-5
+SONNET=claude-sonnet-5-5
+add_dispatched() { # slug title status end [model] [created] [origin] : a delegated claudeAgent task with one finished run
+    python3 -I - "$AGENT_EVAL_T3_DB" "$1" "$2" "$3" "$4" "${5:-$SONNET}" "${6:-2026-10-23T10:00:00.000Z}" "${7:-abc}" <<'PY'
 import json, sqlite3, sys
-db_path, slug, title, status, end = sys.argv[1:6]
-t = "thread:delegated-task:command%3Amcp%3Aabc%3Adelegate-task%3A" + slug
-payload = {"modelSelection": {"model": "opencode/glm-5.3-flash-free"}, "startedAt": "2026-10-23T10:00:00.000Z"}
+db_path, slug, title, status, end, model, created, origin = sys.argv[1:9]
+t = f"thread:delegated-task:command%3Amcp%3A{origin}%3Adelegate-task%3A" + slug
+payload = {"modelSelection": {"model": model}, "startedAt": created}
 db = sqlite3.connect(db_path)
-db.execute("insert into orchestration_v2_projection_threads values (?,?)", (t, title))
+db.execute("insert into orchestration_v2_projection_threads values (?,?,?)", (t, title, created))
 db.execute("insert into orchestration_v2_projection_runs values (?,?,?,?,?,?,?,?)",
-           (f"run:{t}:1", t, 1, "opencode", status, "2026-10-23T10:00:00.000Z", end, json.dumps(payload)))
+           (f"run:{t}:1", t, 1, "claudeAgent", status, created, end, json.dumps(payload)))
 db.commit()
 PY
 }
@@ -449,11 +453,11 @@ write_assignments() {
     python3 -I - "$AGENT_EVAL_STATE/assignments.jsonl" <<'PY'
 import json, sys
 rows = [
-    {"id": "a-20261023-1100-abc", "at": "2026-10-23T11:00:00Z", "lane": "claude-opus", "provider": "claudeAgent",
+    {"id": "a-20261023-1100-abc", "at": "2026-10-23T09:00:00Z", "lane": "claude-opus", "provider": "claudeAgent",
      "model": "claude-opus-5-5", "class": "review", "risk": "R3", "ticket": "JDW-77"},
-    {"id": "a-20261023-1105-def", "at": "2026-10-23T11:05:00Z", "lane": "claude-sonnet", "provider": "claudeAgent",
+    {"id": "a-20261023-1105-def", "at": "2026-10-23T09:05:00Z", "lane": "claude-sonnet", "provider": "claudeAgent",
      "model": "claude-sonnet-5-5", "class": "impl", "risk": "R1", "ticket": "JDW-78"},
-    {"id": "a-20261023-1110-123", "at": "2026-10-23T11:10:00Z", "lane": "claude-sonnet", "provider": "claudeAgent",
+    {"id": "a-20261023-1110-123", "at": "2026-10-23T09:10:00Z", "lane": "claude-sonnet", "provider": "claudeAgent",
      "model": "claude-sonnet-5-5", "class": "docs", "risk": "R0", "ticket": "JDW-79"},
 ]
 open(sys.argv[1], "w").write("".join(json.dumps(r) + "\n" for r in rows))
@@ -461,63 +465,85 @@ PY
 }
 outcome_of() { # id : the last ledger row for an id, as JSON; empty when there is none
     python3 -I - "$AGENT_EVAL_STATE/outcomes.jsonl" "$1" <<'PY'
-import json, sys
-rows = [r for r in map(json.loads, open(sys.argv[1])) if r["id"] == sys.argv[2]]
+import json, os, sys
+rows = [r for r in map(json.loads, open(sys.argv[1])) if r["id"] == sys.argv[2]] if os.path.exists(sys.argv[1]) else []
 print(json.dumps(rows[-1]) if rows else "")
 PY
 }
+rows_of() { # id : how many ledger rows carry an id
+    python3 -I - "$AGENT_EVAL_STATE/outcomes.jsonl" "$1" <<'PY'
+import json, os, sys
+print(sum(json.loads(line)["id"] == sys.argv[2] for line in open(sys.argv[1])) if os.path.exists(sys.argv[1]) else 0)
+PY
+}
+hash_of() { # slug [origin] : the hashed ledger id of a dispatched thread
+    python3 -I -c "
+import hashlib, sys
+tid = 'thread:delegated-task:command%3Amcp%3A' + sys.argv[2] + '%3Adelegate-task%3A' + sys.argv[1]
+print('t3:' + hashlib.sha256(tid.encode()).hexdigest()[:16])" "$1" "${2:-abc}"
+}
+mode_of() { stat -c '%a' "$1"; }
 
 fresh linked
 export AGENT_EVAL_T3_DB="$tmp/t3-linked.sqlite"
 rm -f "$AGENT_EVAL_T3_DB"
 mkdb "$AGENT_EVAL_T3_DB"
 write_assignments
-add_dispatched "$AID" "Review the thing" completed 2026-10-23T10:30:00.000Z
+add_dispatched "$AID" "Review the thing" completed 2026-10-23T10:30:00.000Z "$OPUS"
 add_dispatched "$AID_REC" "Implement the thing" completed 2026-10-23T10:40:00.000Z
 add_dispatched "$AID_OLD" "Write docs" completed 2026-10-23T10:50:00.000Z
 add_dispatched "a-20261023-9999-fff" "Implement orphan slug" completed 2026-10-23T10:55:00.000Z
 # One assignment already has a hand-written outcome; another has a row under the old hashed thread id.
-run 0 record --id "$AID_REC" --status failed --failure-kind quality --note kept
-old_hash="$(id_ending "$AID_OLD")"
-python3 -I - "$AGENT_EVAL_STATE/outcomes.jsonl" "$old_hash" <<'PY'
+run 0 record --id "$AID_REC" --status interrupted --note kept
+rec_hash="$(hash_of "$AID_REC")"
+old_hash="$(hash_of "$AID_OLD")"
+python3 -I - "$AGENT_EVAL_STATE/outcomes.jsonl" "$old_hash" "$rec_hash" <<'PY'
 import json, sys
-rec = {"id": sys.argv[2], "at": "2026-10-23T10:50:00Z", "lane": "opencode-glm-flash-free", "provider": "opencode",
-       "model": "opencode/glm-5.3-flash-free", "class": "impl", "class_source": "heuristic", "risk": None,
-       "ticket": None, "status": "completed", "failure_kind": "none", "duration_s": 600, "items": 1, "attempt": 1,
-       "pr": "https://github.com/o/r/pull/9", "merged": True, "source": "t3"}
-open(sys.argv[1], "a").write(json.dumps(rec) + "\n")
+def row(i, at):
+    return {"id": i, "at": at, "lane": "claude-sonnet", "provider": "claudeAgent", "model": "claude-sonnet-5-5",
+            "class": "impl", "class_source": "heuristic", "risk": None, "ticket": None, "status": "completed",
+            "failure_kind": "none", "duration_s": 600, "items": 7, "attempt": 1,
+            "pr": "https://github.com/o/r/pull/9", "merged": True, "source": "t3"}
+open(sys.argv[1], "a").write(json.dumps(row(sys.argv[2], "2026-10-23T10:50:00Z")) + "\n"
+                             + json.dumps(row(sys.argv[3], "2026-10-23T10:40:00Z")) + "\n")
 PY
+[ ! -e "$AGENT_EVAL_STATE/outcomes.jsonl.bak" ] || fail "a backup exists before any rewrite"
 run 0 collect
 python3 - "$(outcome_of "$AID")" "$(outcome_of "$AID_REC")" "$(outcome_of "$AID_OLD")" "$(outcome_of "$old_hash")" \
-    <<'PY' || fail "a dispatched task did not close its assignment"
+    "$(outcome_of "$rec_hash")" <<'PY' || fail "a dispatched task did not close its assignment"
 import json, sys
-a, rec, old, gone = sys.argv[1:5]
+a, rec, old, gone, kept = sys.argv[1:6]
 a = json.loads(a)
 assert a["lane"] == "claude-opus" and a["provider"] == "claudeAgent" and a["model"] == "claude-opus-5-5", a
 assert a["class"] == "review" and a["class_source"] == "assigned" and a["risk"] == "R3", a
 assert a["ticket"] == "JDW-77" and a["status"] == "completed" and a["duration_s"] == 1800 and a["source"] == "t3", a
 rec = json.loads(rec)
-assert rec["source"] == "record" and rec["status"] == "failed" and rec["note"] == "kept", rec
+assert rec["source"] == "record" and rec["status"] == "interrupted" and rec["note"] == "kept", rec
 old = json.loads(old)
 assert old["class"] == "docs" and old["risk"] == "R0" and old["lane"] == "claude-sonnet", old
 assert old["pr"].endswith("/pull/9") and old["merged"] is True, "enrichment of the old row was lost"
 assert gone == "", "the row under the old hashed id was kept"
+kept = json.loads(kept)
+assert kept["status"] == "completed" and kept["duration_s"] == 2400 and kept["merged"] is True, "the T3 row was lost"
 PY
 # The thread with an unrelated slug is collected under its hash, as before.
-outcome_of "$(id_ending a-20261023-9999-fff)" | grep -q '"class_source": "heuristic"' \
+outcome_of "$(hash_of a-20261023-9999-fff)" | grep -q '"class_source": "heuristic"' \
     || fail "an unmatched slug was not collected by hash"
 # Each thread is in the ledger once, and a second collect changes nothing.
-python3 - "$AGENT_EVAL_STATE/outcomes.jsonl" <<'PY' || fail "collect left duplicates for a thread"
-import collections, json, sys
-ids = collections.Counter(json.loads(line)["id"] for line in open(sys.argv[1]))
-for i in ("a-20261023-1100-abc", "a-20261023-1110-123"):
-    assert ids[i] == 1, (i, ids[i])
-assert ids["a-20261023-1105-def"] == 1, "the recorded outcome gained a second row"
-PY
+[ "$(rows_of "$AID")" = 1 ] && [ "$(rows_of "$AID_OLD")" = 1 ] || fail "collect left duplicates for a thread"
+[ "$(rows_of "$AID_REC")" = 1 ] || fail "the recorded outcome gained a second row"
+[ -n "$(outcome_of "$rec_hash")" ] || fail "the thread under a recorded assignment has no row of its own"
+# The one row dropped is backed up first, privately.
+bak="$AGENT_EVAL_STATE/outcomes.jsonl.bak"
+[ -f "$bak" ] && [ "$(mode_of "$bak")" = 600 ] || fail "no private backup was written before the rewrite"
+grep -q "\"id\": \"$old_hash\"" "$bak" || fail "the backup does not hold the dropped row"
 before="$(cat "$AGENT_EVAL_STATE/outcomes.jsonl")"
+before_bak="$(cat "$bak")"
 run 0 collect
 grep -q "^added: 0$" "$out" && grep -q "^updated: 0$" "$out" || fail "second linked collect changed rows" "$(cat "$out")"
 [ "$before" = "$(cat "$AGENT_EVAL_STATE/outcomes.jsonl")" ] || fail "second linked collect changed the ledger"
+[ "$before_bak" = "$(cat "$bak")" ] || fail "a collect that dropped nothing rewrote the backup"
+
 # --dry-run leaves an old row where it is.
 fresh linked-dry
 write_assignments
@@ -529,6 +555,81 @@ PY
 before="$(cat "$AGENT_EVAL_STATE/outcomes.jsonl")"
 run 0 collect --dry-run
 [ "$before" = "$(cat "$AGENT_EVAL_STATE/outcomes.jsonl")" ] || fail "--dry-run rewrote the ledger"
+[ ! -e "$AGENT_EVAL_STATE/outcomes.jsonl.bak" ] || fail "--dry-run wrote a backup"
+
+# A backup from an earlier rewrite is replaced, and tightened if it was left readable.
+fresh linked-bak
+write_assignments
+python3 -I - "$AGENT_EVAL_STATE/outcomes.jsonl" "$old_hash" <<'PY'
+import json, sys
+open(sys.argv[1], "w").write(json.dumps({"id": sys.argv[2], "at": "2026-10-23T10:50:00Z", "lane": "x", "class": "impl",
+    "class_source": "heuristic", "status": "completed", "source": "t3"}) + "\n")
+PY
+echo stale >"$AGENT_EVAL_STATE/outcomes.jsonl.bak"
+chmod 644 "$AGENT_EVAL_STATE/outcomes.jsonl.bak"
+run 0 collect
+grep -q "$old_hash" "$AGENT_EVAL_STATE/outcomes.jsonl.bak" && ! grep -q stale "$AGENT_EVAL_STATE/outcomes.jsonl.bak" \
+    || fail "the previous backup was not overwritten"
+[ "$(mode_of "$AGENT_EVAL_STATE/outcomes.jsonl.bak")" = 600 ] || fail "an existing backup kept a looser mode"
+
+# A thread that ran on another model than the assignment's lane is not credited to it.
+fresh linked-model
+export AGENT_EVAL_T3_DB="$tmp/t3-model.sqlite"
+rm -f "$AGENT_EVAL_T3_DB"
+mkdb "$AGENT_EVAL_T3_DB"
+write_assignments
+add_dispatched "$AID" "Review the thing" completed 2026-10-23T10:30:00.000Z "$SONNET"
+run 0 collect
+[ "$(rows_of "$AID")" = 0 ] || fail "a thread on another model closed the assignment"
+outcome_of "$(hash_of "$AID")" | grep -q '"lane": "claude-sonnet"' || fail "the fallback row lost the lane T3 reports"
+outcome_of "$(hash_of "$AID")" | grep -q '"class_source": "heuristic"' || fail "the fallback row took the assignment's class"
+
+# A thread created before the assignment existed is not credited to it either.
+fresh linked-early
+export AGENT_EVAL_T3_DB="$tmp/t3-early.sqlite"
+rm -f "$AGENT_EVAL_T3_DB"
+mkdb "$AGENT_EVAL_T3_DB"
+write_assignments
+add_dispatched "$AID" "Review the thing" completed 2026-10-23T08:30:00.000Z "$OPUS" 2026-10-23T08:00:00.000Z
+run 0 collect
+[ "$(rows_of "$AID")" = 0 ] && [ "$(rows_of "$(hash_of "$AID")")" = 1 ] || fail "a thread older than the assignment closed it"
+
+# Reusing a linked id from a second thread cannot take the link over, in a later collect or the same one.
+fresh linked-replay
+export AGENT_EVAL_T3_DB="$tmp/t3-replay.sqlite"
+rm -f "$AGENT_EVAL_T3_DB"
+mkdb "$AGENT_EVAL_T3_DB"
+write_assignments
+add_dispatched "$AID" "Review the thing" completed 2026-10-23T10:30:00.000Z "$OPUS"
+run 0 collect
+add_dispatched "$AID" "Replayed review" failed 2026-10-23T11:30:00.000Z "$OPUS" 2026-10-23T11:00:00.000Z other
+run 0 collect
+python3 - "$(outcome_of "$AID")" "$(outcome_of "$(hash_of "$AID" other)")" <<'PY' || fail "a replayed id took over the link"
+import json, sys
+first, second = map(json.loads, sys.argv[1:3])
+assert first["status"] == "completed" and first["duration_s"] == 1800 and first["class_source"] == "assigned", first
+assert second["status"] == "failed" and second["class_source"] == "heuristic" and second["lane"] == "claude-opus", second
+PY
+[ "$(rows_of "$AID")" = 1 ] || fail "the replay added a second row under the assignment id"
+
+# Two threads with one slug: the earlier-created one links whatever order the database returns them in.
+fresh linked-twins
+export AGENT_EVAL_T3_DB="$tmp/t3-twins.sqlite"
+rm -f "$AGENT_EVAL_T3_DB"
+mkdb "$AGENT_EVAL_T3_DB"
+write_assignments
+add_dispatched "$AID" "Later twin" failed 2026-10-23T11:30:00.000Z "$OPUS" 2026-10-23T11:00:00.000Z zzz
+add_dispatched "$AID" "Earlier twin" completed 2026-10-23T10:30:00.000Z "$OPUS" 2026-10-23T10:00:00.000Z abc
+run 0 collect
+python3 - "$(outcome_of "$AID")" "$(outcome_of "$(hash_of "$AID" zzz)")" "$(outcome_of "$(hash_of "$AID" abc)")" \
+    <<'PY' || fail "the earlier of two same-slug threads did not keep the link"
+import json, sys
+linked, later, earlier = sys.argv[1:4]
+linked, later = json.loads(linked), json.loads(later)
+assert linked["status"] == "completed" and linked["class_source"] == "assigned", linked
+assert later["status"] == "failed" and later["class_source"] == "heuristic", later
+assert earlier == "", "the linked thread also got a hashed row"
+PY
 
 # ── Ledger builder for statistics scenarios ──
 # Each spec: lane,class,risk,status,failure_kind,ci,touch,count,at-start (minutes after 2026-10-22T00:00Z).

@@ -653,20 +653,64 @@ def t3_id(thread_id):
     return "t3:" + hashlib.sha256(thread_id.encode()).hexdigest()[:16]
 
 
-def t3_outcomes(conn, cutoff, assignments):
+def run_model(conn, tid, run):
+    """(provider, model) a run used; the provider session names the model when the run payload does not."""
+    model = (json_or_empty(run["payload_json"]).get("modelSelection") or {}).get("model")
+    if not model:
+        sess = conn.execute("select model from orchestration_v2_projection_provider_sessions "
+                            "where thread_id=? limit 1", (tid,)).fetchone()
+        model = sess["model"] if sess else None
+    return run["provider"], model
+
+
+def lane_runs_as(lane_id, provider, model):
+    spec = load_lanes()["lanes"].get(lane_id)
+    return bool(spec) and spec.get("provider") == provider and spec.get("model") == model
+
+
+def link_claimants(conn, threads, runs, assignments, recorded):
+    """{assignment id: thread id}: the one thread each assignment may be credited to. A clientRequestId is
+    free text a task may reuse, so a thread claims an assignment only when it ran on the assignment's lane
+    and was created no earlier than the assignment. `threads` is in creation order and the first valid thread
+    keeps the claim, so a later reuse of the id cannot take it over. An assignment that already has a
+    hand-written outcome is claimed by nobody: that record stands and the thread keeps its own row."""
+    claims = {}
+    for th in threads:
+        tid = th["thread_id"]
+        slug = re.split(r"delegate-task(?:%3A|:)", tid)[-1]
+        assignment = assignments.get(slug) if ASSIGNMENT_ID_RE.fullmatch(slug) else None
+        run = runs.get(tid)
+        if assignment is None or run is None or slug in claims or slug in recorded:
+            continue
+        created, planned = parse_ts(th["created_at"]), parse_ts(assignment.get("at"))
+        if created is None or planned is None or created < planned:
+            continue
+        if lane_runs_as(assignment.get("lane"), *run_model(conn, tid, run)):
+            claims[slug] = tid
+    return claims
+
+
+def t3_outcomes(conn, cutoff, assignments, recorded=frozenset()):
     """(outcome records, running count, earlier ids) for every finished
     delegated task newer than `cutoff`. Early collects stored `t3:<thread id>`;
     the earlier-ids map lets those rows be found again by thread. A task whose
-    slug is an assignment id was dispatched with that id as its clientRequestId,
-    so it is recorded under the assignment id, which closes the assignment."""
+    slug is an assignment id and that passes `link_claimants` was dispatched
+    under that id, so it is recorded under the assignment id, which closes the
+    assignment; any other task is recorded under its thread hash."""
     conn.row_factory = sqlite3.Row
-    threads = conn.execute("select thread_id, title from orchestration_v2_projection_threads "
-                           "where thread_id like '%delegate-task%'").fetchall()
+    threads = conn.execute("select thread_id, title, created_at from orchestration_v2_projection_threads "
+                           "where thread_id like '%delegate-task%' order by created_at, thread_id").fetchall()
+    runs = {}
+    for th in threads:
+        run = conn.execute("select * from orchestration_v2_projection_runs where thread_id=? "
+                           "order by ordinal desc limit 1", (th["thread_id"],)).fetchone()
+        if run is not None:
+            runs[th["thread_id"]] = run
+    claims = link_claimants(conn, threads, runs, assignments, recorded)
     out, running, earlier = [], 0, {}
     for th in threads:
         tid = th["thread_id"]
-        run = conn.execute("select * from orchestration_v2_projection_runs where thread_id=? "
-                           "order by ordinal desc limit 1", (tid,)).fetchone()
+        run = runs.get(tid)
         if run is None:
             continue
         status = {"completed": "completed", "failed": "failed", "interrupted": "interrupted",
@@ -679,12 +723,7 @@ def t3_outcomes(conn, cutoff, assignments):
         if end is None or end < cutoff:
             continue
         start = parse_ts(payload.get("startedAt")) or parse_ts(run["requested_at"])
-        model = (payload.get("modelSelection") or {}).get("model")
-        if not model:
-            sess = conn.execute("select model from orchestration_v2_projection_provider_sessions "
-                                "where thread_id=? limit 1", (tid,)).fetchone()
-            model = sess["model"] if sess else None
-        provider = run["provider"]
+        provider, model = run_model(conn, tid, run)
         errors, items = [], 0
         for it in conn.execute("select type, payload_json from orchestration_v2_projection_turn_items "
                                "where thread_id=? and run_id=?", (tid, run["run_id"])):
@@ -708,7 +747,7 @@ def t3_outcomes(conn, cutoff, assignments):
         slug = re.split(r"delegate-task(?:%3A|:)", tid)[-1]
         retry = RETRY_RE.search(tid)
         ticket = TICKET_RE.search(title)
-        assignment = assignments.get(slug) if ASSIGNMENT_ID_RE.fullmatch(slug) else None
+        assignment = assignments.get(slug) if claims.get(slug) == tid else None
         rec = blank_outcome(slug if assignment else t3_id(tid))
         earlier[rec["id"]] = [i for i in (t3_id(tid), f"t3:{tid}") if i != rec["id"]]
         rec.update(at=iso(end), lane=lane_for(provider, model), provider=provider, model=model,
@@ -717,8 +756,7 @@ def t3_outcomes(conn, cutoff, assignments):
                    attempt=int(retry.group(1)) if retry else 1, ticket=ticket.group(0) if ticket else None,
                    source="t3", **{"class": classify_class(title, slug), "class_source": "heuristic"})
         if assignment:
-            # The dispatcher's choice outranks what the title suggests, and a lane it names stays even
-            # when T3 ran the task on another model.
+            # The dispatcher's choice outranks what the title suggests.
             for k in ("lane", "provider", "model", "risk", "ticket"):
                 if assignment.get(k):
                     rec[k] = assignment[k]
@@ -754,21 +792,30 @@ def merge_collected(old, new):
 def drop_outcomes(ids):
     """Remove every row with one of `ids` from the outcome ledger, in place under
     the append lock. The ledger only appends, but a thread recorded under two ids
-    would be counted twice by every statistic. Unreadable lines stay."""
+    would be counted twice by every statistic. Unreadable lines stay. The ledger
+    is left alone when nothing matches, and otherwise copied to one backup first
+    because the rewrite is not atomic."""
     if not ids:
         return
     path = ledger_path("outcomes.jsonl")
     try:
         with open(path, "r+", encoding="utf-8") as fh:
             fcntl.flock(fh, fcntl.LOCK_EX)
+            lines = fh.readlines()
             keep = []
-            for line in fh:
+            for line in lines:
                 try:
                     obj = json.loads(line)
                 except ValueError:
                     obj = None
                 if not (isinstance(obj, dict) and obj.get("id") in ids):
                     keep.append(line)
+            if len(keep) == len(lines):
+                return
+            backup = os.open(f"{path}.bak", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(backup, "w", encoding="utf-8") as bak:
+                os.fchmod(bak.fileno(), 0o600)
+                bak.writelines(lines)
             fh.seek(0)
             fh.writelines(keep)
             fh.truncate()
@@ -780,21 +827,18 @@ def cmd_collect(args):
     load_lanes()
     cutoff = now() - dt.timedelta(days=args.since)
     conn, tmp = open_t3()
+    existing = read_outcomes()
+    recorded = {i for i, o in existing.items() if o.get("source") == "record"}
     try:
         try:
-            found, running, earlier = t3_outcomes(conn, cutoff, read_assignments())
+            found, running, earlier = t3_outcomes(conn, cutoff, read_assignments(), recorded)
         except sqlite3.Error as e:
             die(EXIT_FAIL, f"unexpected T3 schema: {e}", "The table and column facts are at the top of agent-eval")
     finally:
         conn.close()
         if tmp:
             shutil.rmtree(tmp, ignore_errors=True)
-    existing = read_outcomes()
-    latest = {}
-    for rec in found:
-        # Two threads can carry the same assignment id; the later finish speaks for it.
-        if rec["id"] not in latest or rec["at"] >= latest[rec["id"]]["at"]:
-            latest[rec["id"]] = rec
+    latest = {rec["id"]: rec for rec in found}
     new_rows, stale, added, updated, unchanged = [], set(), 0, 0, 0
     for rec in latest.values():
         old = existing.get(rec["id"])

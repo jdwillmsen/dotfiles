@@ -32,6 +32,7 @@ STATE="$tmp/state"
 CFG="$tmp/merge-captain.toml"
 out="$tmp/out"
 err="$tmp/err"
+TOKDIR="$tmp/tokens"
 NOW="2026-10-23T20:00:00Z"
 mkdir -p "$bin" "$tmp/home" "$S"
 export STUB_DIR="$S"
@@ -39,7 +40,7 @@ export STUB_DIR="$S"
 # ── Stubs ──
 cat >"$bin/gh" <<'PY'
 #!/usr/bin/env python3
-import json, os, sys
+import hashlib, json, os, sys
 S = os.environ["STUB_DIR"]
 SELF = "captain-bot"
 args = sys.argv[1:]
@@ -47,7 +48,9 @@ stdin = sys.stdin.read() if "--body-file" in args else ""
 with open(f"{S}/gh.log", "a") as f:
     f.write(" ".join(args) + "\n")
 with open(f"{S}/gh.calls", "a") as f:
-    f.write(json.dumps({"argv": args, "stdin": stdin, "token": "GH_TOKEN" in os.environ}) + "\n")
+    # A hash, so no stub file ever holds a token and a grep for the real one over the temp dir stays meaningful.
+    sha = hashlib.sha256(os.environ["GH_TOKEN"].encode()).hexdigest() if "GH_TOKEN" in os.environ else None
+    f.write(json.dumps({"argv": args, "stdin": stdin, "token": "GH_TOKEN" in os.environ, "gh_token_sha": sha}) + "\n")
 
 
 def rd(name, default=None):
@@ -159,6 +162,15 @@ if head2 == ["repo", "view"]:
     say({"defaultBranchRef": {"name": "main"}})
 if args[:2] == ["api", "user"]:
     say({"login": SELF})
+if args[:3] == ["api", "-i", "user"]:
+    if rd("whoami_fail") is not None:
+        fail("gh: HTTP 401: Bad credentials for " + os.environ.get("GH_TOKEN", ""))
+    exp = rd("whoami_expiry")
+    head = "HTTP/2.0 200 OK\r\nContent-Type: application/json\r\n"
+    if exp:
+        head += "Github-Authentication-Token-Expiration: " + exp.strip() + "\r\n"
+    sys.stdout.write(head + "\r\n" + json.dumps({"login": (rd("whoami_login") or "jdwillmsen").strip()}) + "\n")
+    sys.exit(0)
 if args[:2] == ["api", "graphql"]:
     n = [a for a in args if a.startswith("n=")][0][2:]
     if rd(f"threads_bad_{n}") is not None:
@@ -181,9 +193,11 @@ fail("stub gh: unhandled: " + " ".join(args))
 PY
 cat >"$bin/change-class" <<'PY'
 #!/usr/bin/env python3
-import os, sys
+import hashlib, os, sys
 S = os.environ["STUB_DIR"]
 args = sys.argv[1:]
+open(f"{S}/envs.log", "a").write(os.path.basename(sys.argv[0]) + " " + " ".join(
+    hashlib.sha256(v.encode()).hexdigest() for v in os.environ.values()) + "\n")
 with open(f"{S}/class.log", "a") as f:
     f.write(" ".join(args) + "\n")
 n = args[args.index("--pr") + 1]
@@ -195,8 +209,10 @@ sys.stdout.write(open(p).read())
 PY
 cat >"$bin/agent-pace" <<'PY'
 #!/usr/bin/env python3
-import json, os, sys
+import hashlib, json, os, sys
 S = os.environ["STUB_DIR"]
+open(f"{S}/envs.log", "a").write(os.path.basename(sys.argv[0]) + " " + " ".join(
+    hashlib.sha256(v.encode()).hexdigest() for v in os.environ.values()) + "\n")
 with open(f"{S}/pace.log", "a") as f:
     f.write(" ".join(sys.argv[1:]) + "\n")
 k = int(open(f"{S}/pace.n").read()) + 1 if os.path.exists(f"{S}/pace.n") else 1
@@ -218,8 +234,11 @@ sys.exit(int(open(rc).read()) if os.path.exists(rc) else 0)
 PY
 cat >"$bin/agent-eval" <<'PY'
 #!/usr/bin/env python3
-import json, os, sys
+import hashlib, json, os, sys
 a = sys.argv[1:]
+S = os.environ["STUB_DIR"]
+open(f"{S}/envs.log", "a").write(os.path.basename(sys.argv[0]) + " " + " ".join(
+    hashlib.sha256(v.encode()).hexdigest() for v in os.environ.values()) + "\n")
 with open(os.environ["STUB_DIR"] + "/eval.log", "a") as f:
     f.write(" ".join(a) + "\n")
 if os.path.exists(os.environ["STUB_DIR"] + "/eval_fail"):
@@ -245,8 +264,10 @@ with open(state + "/outcomes.jsonl", "a") as f:
 PY
 cat >"$bin/claude" <<'PY'
 #!/usr/bin/env python3
-import json, os, subprocess, sys, time
+import hashlib, json, os, subprocess, sys, time
 S = os.environ["STUB_DIR"]
+open(f"{S}/envs.log", "a").write(os.path.basename(sys.argv[0]) + " " + " ".join(
+    hashlib.sha256(v.encode()).hexdigest() for v in os.environ.values()) + "\n")
 name = os.path.basename(sys.argv[0])
 k = int(open(f"{S}/{name}.n").read()) + 1 if os.path.exists(f"{S}/{name}.n") else 1
 open(f"{S}/{name}.n", "w").write(str(k))
@@ -389,20 +410,25 @@ cfg() {  # limit overrides as key=value; LIVE_MAX sets the live repo's ceiling
 }
 newcase() {
     [ -f "$S/gh.log" ] && cat "$S/gh.log" >>"$tmp/all_gh.log"
-    rm -rf "$S" "$STATE"
+    rm -rf "$S" "$STATE" "$TOKDIR"
     mkdir -p "$S"
     : >"$S/gh.log"
     cfg "$@"
 }
 : >"$tmp/all_gh.log"
+DEFAULT_TOKEN="${GP}testsecretvalue0000000000000"
+mc_env() {  # rebuilt per call: a test may point CFG somewhere else
+    MCENV=(MERGE_CAPTAIN_CONFIG="$CFG" MERGE_CAPTAIN_STATE="$STATE" MERGE_CAPTAIN_NOW="$NOW" MERGE_CAPTAIN_TOKENS="$TOKDIR"
+        MERGE_CAPTAIN_GH="$bin/gh" MERGE_CAPTAIN_CLASS="$bin/change-class" MERGE_CAPTAIN_PACE="$bin/agent-pace"
+        MERGE_CAPTAIN_EVAL="$bin/agent-eval" MERGE_CAPTAIN_CLAUDE="$bin/claude" MERGE_CAPTAIN_OPENCODE="$bin/opencode"
+        AGENT_PACE_LANES="$tmp/lanes.toml" STUB_DIR="$S" AGENT_EVAL_STATE="$S/evalstate" HOME="$tmp/home"
+        GH_TOKEN="$DEFAULT_TOKEN" SOME_API_KEY="${SK}testtesttesttesttest" PLATFORMCTL_JDWLABS_NVIDIA_API_KEY=nv-keep-me
+        PATH="/usr/bin:/bin")
+}
 mc() {
     rc=0
-    env MERGE_CAPTAIN_CONFIG="$CFG" MERGE_CAPTAIN_STATE="$STATE" MERGE_CAPTAIN_NOW="$NOW" \
-        MERGE_CAPTAIN_GH="$bin/gh" MERGE_CAPTAIN_CLASS="$bin/change-class" MERGE_CAPTAIN_PACE="$bin/agent-pace" \
-        MERGE_CAPTAIN_EVAL="$bin/agent-eval" MERGE_CAPTAIN_CLAUDE="$bin/claude" MERGE_CAPTAIN_OPENCODE="$bin/opencode" \
-        AGENT_PACE_LANES="$tmp/lanes.toml" STUB_DIR="$S" AGENT_EVAL_STATE="$S/evalstate" HOME="$tmp/home" GH_TOKEN="${GP}testsecretvalue0000000000000" \
-        SOME_API_KEY="${SK}testtesttesttesttest" PLATFORMCTL_JDWLABS_NVIDIA_API_KEY=nv-keep-me PATH="/usr/bin:/bin" \
-        "$tool" "$@" >"$out" 2>"$err" || rc=$?
+    mc_env
+    env "${MCENV[@]}" "$tool" "$@" >"$out" 2>"$err" || rc=$?
 }
 want() {  # $1 expected exit code, rest = merge-captain args
     local w="$1"
@@ -1824,6 +1850,414 @@ for needle in "^config: " "^paused: false" "^mode_live: 1" "^mode_dry: 1" "^mode
     "^last_runs\[1\]{at,result}:" "1 decisions, 1 merged"; do
     grep -qE -- "$needle" "$out" || fail "status lacks $needle" "$(cat "$out")"
 done
+
+# ── Per-owner tokens ──
+# Fake tokens are joined at runtime like the other credential fixtures. Stubs record only a hash of what they were
+# given, so a grep for the real string over the whole temp dir proves it was written nowhere.
+FP="github""_pat_"
+TOK_ACME="${FP}AcmeAcmeAcmeAcmeAcmeAcmeAcmeAcme"
+TOK_BETA="${FP}BetaBetaBetaBetaBetaBetaBetaBeta"
+TOK_NEW="${FP}NewNewNewNewNewNewNewNewNewNewNew"
+TOK_CLASSIC="${GP}ClassicClassicClassicClassicClassic"
+sha() { printf '%s' "$1" | sha256sum | cut -d' ' -f1; }
+mktok() {  # owner token [mode]
+    mkdir -p "$TOKDIR"
+    chmod 700 "$TOKDIR"
+    printf '%s\n' "$2" >"$TOKDIR/$1"
+    chmod "${3:-600}" "$TOKDIR/$1"
+}
+mkmeta() {  # owner login expires|null
+    local exp="\"$3\""
+    [ "$3" != null ] || exp=null
+    printf '{"login":"%s","saved_at":"2026-10-01T00:00:00Z","expires":%s}\n' "$2" "$exp" >"$TOKDIR/$1.meta"
+    chmod 600 "$TOKDIR/$1.meta"
+}
+two_owners() {  # beta/live beside the acme repositories, with an R0 pull request on each live repo
+    printf '[[repo]]\nname = "beta/live"\nmode = "live"\nmax_tier = "R2"\n' >>"$CFG"
+    fx pr 1
+    fx class 1 R0 tags=docs reasons=docs:R0:README.md
+    fx pr 2 repo=beta/live
+    fx class 2 R0 tags=docs reasons=docs:R0:README.md
+}
+token_strays() {  # files holding a token's text, other than the fixtures that are meant to
+    grep -rlF --exclude-dir=tokens --exclude-dir=realtokens --exclude-dir=unit-tokens --exclude=merge_fail -- "$1" "$tmp" || true
+}
+calls_use() {  # owner=sha ...: every gh call carried the credential of the owner it was about, and each owner was seen
+    python3 -I - "$S/gh.calls" "$@" <<'PY'
+import json, sys
+want = dict(a.split("=", 1) for a in sys.argv[2:])
+seen = set()
+for line in open(sys.argv[1]):
+    argv = json.loads(line)["argv"]
+    owner = argv[2].split("/")[0] if argv[:2] == ["repo", "view"] else None
+    if "--repo" in argv:
+        owner = argv[argv.index("--repo") + 1].split("/")[0]
+    for a in argv:
+        if a.startswith("repos/"):
+            owner = a.split("/")[1]
+        if a.startswith("o="):
+            owner = a[2:]
+    assert owner in want, f"call for {owner}: {argv}"
+    got = json.loads(line)["gh_token_sha"]
+    assert got == want[owner], f"{owner} call {argv} used {got}"
+    seen.add(owner)
+assert seen == set(want), f"saw {seen}, wanted {set(want)}"
+PY
+}
+
+# The stray-file search must be able to find something, or its silence proves nothing.
+printf '%s' "$TOK_ACME" >"$tmp/planted"
+[ "$(token_strays "$TOK_ACME")" = "$tmp/planted" ] || fail "the stray-token search is blind"
+rm -f "$tmp/planted"
+
+# Each owner's calls use that owner's token, and not the default login nor another owner's.
+newcase
+two_owners
+mktok acme "$TOK_ACME"
+mktok beta "$TOK_BETA"
+want 0 run
+expect 1 merged
+expect 2 merged
+calls_use "acme=$(sha "$TOK_ACME")" "beta=$(sha "$TOK_BETA")" || fail "a gh call used the wrong owner's credential" "$(cat "$S/gh.calls")"
+
+# No file for an owner: today's behaviour, the default login, and status says so.
+newcase
+two_owners
+mktok acme "$TOK_ACME"
+want 0 run
+expect 1 merged
+expect 2 merged
+calls_use "acme=$(sha "$TOK_ACME")" "beta=$(sha "$DEFAULT_TOKEN")" || fail "an owner without a file did not get the default login" "$(cat "$S/gh.calls")"
+want 0 status
+grep -qE '^  acme,token,-,-,-$' "$out" && grep -qE '^  beta,default,-,-,-$' "$out" || fail "status owners" "$(cat "$out")"
+grep -q '^warnings\[0\]:$' "$out" || fail "status has no definitive empty warnings" "$(cat "$out")"
+# A file that is owner-only but tighter than 0600 is fine.
+newcase
+two_owners
+mktok acme "$TOK_ACME" 400
+want 0 run
+expect 1 merged
+calls_use "acme=$(sha "$TOK_ACME")" "beta=$(sha "$DEFAULT_TOKEN")" || fail "a 0400 token file was refused" "$(cat "$S/gh.calls")"
+
+# A token file or directory another account can reach is not used, and the owner does not fall back to the default.
+insecure_case() {  # description; leaves the run's output in $out for the caller
+    want 0 run
+    cp "$out" "$tmp/run.out"
+    grep -qE '^  acme/live,-,-,skipped,insecure-token-file$' "$out" || fail "$1: acme/live not skipped" "$(cat "$out")"
+    grep -qE '^  acme/dry,-,-,skipped,insecure-token-file$' "$out" || fail "$1: acme/dry not skipped" "$(cat "$out")"
+    ! grep -q -- 'acme/' "$S/gh.log" || fail "$1: a gh call was made for the insecure owner" "$(cat "$S/gh.log")"
+    grep -q '"reason": "insecure-token-file"' "$STATE/log.jsonl" || fail "$1: not logged" "$(cat "$STATE/log.jsonl")"
+    want 0 status
+    grep -qE '^  acme,insecure,-,-,-$' "$out" || fail "$1: status identity" "$(cat "$out")"
+    grep -q 'acme token unusable' "$out" || fail "$1: status warning" "$(cat "$out")"
+    cp "$tmp/run.out" "$out"
+}
+for m in 640 604 644 660 666 620; do
+    newcase
+    two_owners
+    mktok acme "$TOK_ACME" "$m"
+    mktok beta "$TOK_BETA"
+    insecure_case "file mode $m"
+    expect 2 merged
+    ! grep -qF -- "$TOK_ACME" "$out" "$err" || fail "mode $m: the token was printed"
+done
+newcase
+two_owners
+mktok acme "$TOK_ACME"
+mktok beta "$TOK_BETA"
+chmod 755 "$TOKDIR"
+want 1 run
+[ ! -s "$S/gh.log" ] || fail "a gh call was made with a group-readable token directory" "$(cat "$S/gh.log")"
+grep -qE '^  beta/live,-,-,skipped,insecure-token-file$' "$out" || fail "a loose directory must stop every owner" "$(cat "$out")"
+newcase
+two_owners
+mkdir "$tmp/realtokens"
+chmod 700 "$tmp/realtokens"
+printf '%s\n' "$TOK_ACME" >"$tmp/realtokens/acme"
+chmod 600 "$tmp/realtokens/acme"
+ln -s "$tmp/realtokens" "$TOKDIR"
+want 1 run
+[ ! -s "$S/gh.log" ] || fail "a gh call was made through a symlinked token directory" "$(cat "$S/gh.log")"
+grep -q 'insecure-token-file' "$out" || fail "symlinked directory" "$(cat "$out")"
+newcase
+two_owners
+mktok beta "$TOK_BETA"
+printf '%s\n' "$TOK_ACME" >"$tmp/real-token"
+chmod 600 "$tmp/real-token"
+ln -s "$tmp/real-token" "$TOKDIR/acme"
+insecure_case "symlinked token file"
+expect 2 merged
+rm -f "$tmp/real-token"
+for bad in '' 'github_pat_has a space'; do
+    newcase
+    two_owners
+    mktok beta "$TOK_BETA"
+    printf '%s' "$bad" >"$TOKDIR/acme"
+    chmod 600 "$TOKDIR/acme"
+    insecure_case "token file holding '${bad:0:11}'"
+done
+
+# Expiry: the day it names is the last good one; after that the owner's repositories wait, never the default login.
+newcase
+two_owners
+mktok acme "$TOK_ACME"
+mktok beta "$TOK_BETA"
+mkmeta acme jdwillmsen 2026-10-22
+want 0 run
+grep -qE '^  acme/live,-,-,waiting,token-expired$' "$out" || fail "an expired token must make the owner wait" "$(cat "$out")"
+expect 2 merged
+! grep -q -- 'acme/' "$S/gh.log" || fail "an expired token fell back to another login" "$(cat "$S/gh.log")"
+want 0 status
+grep -qE '^  acme,token,jdwillmsen,2026-10-22,-1$' "$out" || fail "status of an expired token" "$(cat "$out")"
+grep -q 'acme token expired 1 day ago' "$out" || fail "status must warn of an expired token" "$(cat "$out")"
+calls_before="$(wc -l <"$S/gh.log")"
+want 0 explain acme/live#1
+grep -q '^would: waiting' "$out" && grep -q 'token-expired' "$out" || fail "explain with an expired token" "$(cat "$out")"
+[ "$(wc -l <"$S/gh.log")" = "$calls_before" ] || fail "explain called gh with an expired token"
+for spec in "2026-10-23:0:expires today" "2026-11-06:14:expires in 14 days" "2026-10-24:1:expires in 1 day"; do
+    IFS=: read -r day left words <<<"$spec"
+    newcase
+    two_owners
+    mktok acme "$TOK_ACME"
+    mkmeta acme jdwillmsen "$day"
+    want 0 run
+    expect 1 merged
+    want 0 status
+    grep -qE "^  acme,token,jdwillmsen,$day,$left\$" "$out" || fail "status for $day" "$(cat "$out")"
+    grep -qF -- "acme token $words" "$out" || fail "no warning for $day" "$(cat "$out")"
+done
+newcase
+two_owners
+mktok acme "$TOK_ACME"
+mkmeta acme jdwillmsen 2026-11-07
+want 0 status
+grep -q '^warnings\[0\]:$' "$out" || fail "15 days out is not a warning" "$(cat "$out")"
+mkmeta acme jdwillmsen null
+want 0 status
+grep -qE '^  acme,token,jdwillmsen,-,-$' "$out" && grep -q '^warnings\[0\]:$' "$out" || fail "a token with no known expiry" "$(cat "$out")"
+
+# The token goes to gh and nowhere else: not the reviewer, not the other tools, not a log, state file or comment.
+newcase
+approve_setup 2 R1
+mktok acme "$TOK_ACME"
+printf 'denied for %s' "$TOK_ACME" >"$S/merge_fail"
+want 0 run
+expect 2 blocked "merge refused"
+calls_use "acme=$(sha "$TOK_ACME")" || fail "gh did not get the owner's token" "$(cat "$S/gh.calls")"
+[ -s "$S/claude.calls" ] || fail "no reviewer ran, so nothing was proved"
+python3 -I - "$S" "$(sha "$TOK_ACME")" <<'PY' || fail "the token reached a process other than gh" "$(cat "$S/envs.log")"
+import json, sys
+S, tok = sys.argv[1:3]
+who = set()
+for line in open(f"{S}/envs.log"):
+    name, *hashes = line.split()
+    who.add(name)
+    assert tok not in hashes, f"{name} had the token in its environment"
+assert {"claude", "change-class", "agent-pace", "agent-eval"} <= who, who
+for line in open(f"{S}/claude.calls"):
+    assert not json.loads(line)["gh_token"], "the reviewer saw GH_TOKEN"
+PY
+if token_strays "$TOK_ACME" | grep -q .; then
+    fail "the token was written somewhere outside its file" "$(token_strays "$TOK_ACME")"
+fi
+grep -q 'merge refused: denied for \[redacted\]' "$STATE/log.jsonl" || fail "a token in gh's error was not scrubbed" "$(cat "$STATE/log.jsonl")"
+want 0 explain acme/live#2
+if token_strays "$TOK_ACME" | grep -q .; then fail "explain leaked the token" "$(token_strays "$TOK_ACME")"; fi
+python3 -I - "$tool" "$tmp" "$TOK_ACME" <<'PY' || fail "gh environment unit checks failed"
+import importlib.machinery, importlib.util, os, sys
+tool, tmp, tok = sys.argv[1:4]
+sys.dont_write_bytecode = True
+os.makedirs(tmp + "/unit-tokens", mode=0o700, exist_ok=True)
+os.chmod(tmp + "/unit-tokens", 0o700)
+with open(tmp + "/unit-tokens/acme", "w") as f:
+    os.chmod(f.name, 0o600)
+    f.write(tok + "\n")
+os.environ.update(MERGE_CAPTAIN_STATE=tmp + "/unit-state", MERGE_CAPTAIN_CONFIG=tmp + "/none.toml",
+                  MERGE_CAPTAIN_TOKENS=tmp + "/unit-tokens")
+spec = importlib.util.spec_from_loader("mc", importlib.machinery.SourceFileLoader("mc", tool))
+mc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mc)
+cap = mc.Captain({"limits": mc.LIMIT_DEFAULTS, "allow": []})
+cap.repo = "acme/live"
+env = cap.gh_env(["pr", "view", "1", "--repo", "acme/live"])
+assert env["GH_TOKEN"] == tok
+assert tok not in os.environ.values(), "the token was put in this process's environment"
+for bad in (["pr", "view", "1", "--repo", "beta/live"], ["pr", "view", "1", "--repo"]):
+    try:
+        cap.gh_env(bad)
+    except mc.Refused:
+        continue
+    raise SystemExit(f"a gh call for another owner was allowed: {bad}")
+cap.repo = None
+try:
+    cap.gh_env(["api", "user"])
+except mc.Refused:
+    pass
+else:
+    raise SystemExit("a gh call with no repository in hand was allowed")
+assert tok not in mc.scrub(f"failed with {tok} in the message") and "[redacted]" in mc.scrub(f"x {tok}")
+cap.close()
+PY
+
+# ── auth: a person at a terminal only ──
+cat >"$tmp/ptyrun.py" <<'PY'
+import os, pty, select, subprocess, sys, time
+mode, token, outfile = sys.argv[1:4]
+argv = sys.argv[4:]
+deadline = time.time() + 30
+if mode == "full":
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execv(argv[0], argv)
+    buf, sent = b"", False
+    while time.time() < deadline:
+        if not select.select([fd], [], [], 0.2)[0]:
+            continue
+        try:
+            data = os.read(fd, 4096)
+        except OSError:
+            break
+        if not data:
+            break
+        buf += data
+        if token != "-" and not sent and b"input hidden" in buf:
+            os.write(fd, token.encode() + b"\n")
+            sent = True
+    rc = os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1])
+else:
+    master, slave = pty.openpty()
+    kw = {"stdin": subprocess.DEVNULL, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE}
+    if mode == "stdin":
+        kw["stdin"] = slave
+    if mode == "stderr":
+        kw["stderr"] = slave
+    r = subprocess.run(argv, timeout=30, **kw)
+    rc, buf = r.returncode, r.stdout + (r.stderr or b"")
+open(outfile, "w").write(buf.decode(errors="replace"))
+open(outfile + ".rc", "w").write(str(rc))
+PY
+ptyrun() {  # mode token args...: `merge-captain auth <args>` on a pty (full), or short of one; fills pty_rc and pty_out
+    local mode="$1" token="$2"
+    shift 2
+    mc_env
+    env "${MCENV[@]}" python3 -I "$tmp/ptyrun.py" "$mode" "$token" "$tmp/pty.out" "$tool" "$@"
+    pty_rc="$(cat "$tmp/pty.out.rc")"
+    pty_out="$(tr -d '\r' <"$tmp/pty.out")"
+}
+mode_of() { stat -c %a "$1"; }
+
+newcase
+for mode in none stdin stderr; do
+    ptyrun "$mode" "$TOK_ACME" auth acme
+    [ "$pty_rc" = 2 ] || fail "auth with $mode as the only terminal exited $pty_rc, want 2" "$pty_out"
+    grep -q 'needs a person at a terminal' <<<"$pty_out" || fail "auth refusal ($mode) is unclear" "$pty_out"
+    [ ! -e "$TOKDIR" ] || fail "auth ($mode) touched the token directory"
+    [ ! -s "$S/gh.log" ] || fail "auth ($mode) called gh"
+    ! grep -qF -- "$TOK_ACME" <<<"$pty_out" || fail "auth ($mode) printed the token"
+done
+ptyrun none - auth acme --remove
+[ "$pty_rc" = 2 ] || fail "auth --remove must also need a terminal" "$pty_out"
+
+# Success on a pty: the token is typed, never shown, and ends up as an owner-only file next to its metadata.
+newcase
+printf '2026-12-01 08:00:00 UTC' >"$S/whoami_expiry"
+ptyrun full "$TOK_ACME" auth acme
+[ "$pty_rc" = 0 ] || fail "auth failed" "$pty_out"
+grep -q '^owner: acme$' <<<"$pty_out" && grep -q '^login: jdwillmsen$' <<<"$pty_out" && grep -q '^expires: 2026-12-01$' <<<"$pty_out" ||
+    fail "auth output" "$pty_out"
+! grep -qF -- "$TOK_ACME" <<<"$pty_out" || fail "auth echoed the token" "$pty_out"
+! grep -qF -- "${FP}" <<<"$pty_out" || fail "auth echoed part of the token" "$pty_out"
+[ "$(mode_of "$TOKDIR")" = 700 ] && [ "$(mode_of "$TOKDIR/acme")" = 600 ] && [ "$(mode_of "$TOKDIR/acme.meta")" = 600 ] ||
+    fail "token files need 0700/0600" "$(stat -c '%n %a' "$TOKDIR" "$TOKDIR"/*)"
+[ "$(cat "$TOKDIR/acme")" = "$TOK_ACME" ] || fail "the file must hold exactly the token"
+[ "$(find "$TOKDIR" -mindepth 1 -printf '%f\n' | sort | tr '\n' ' ')" = "acme acme.meta " ] ||
+    fail "stray files in the token directory" "$(find "$TOKDIR" -mindepth 1)"
+python3 -I - "$TOKDIR/acme.meta" <<'PY' || fail "meta content" "$(cat "$TOKDIR/acme.meta")"
+import json, sys
+m = json.load(open(sys.argv[1]))
+assert m["login"] == "jdwillmsen" and m["expires"] == "2026-12-01" and m["saved_at"], m
+assert set(m) == {"login", "saved_at", "expires"}, m
+PY
+grep -q '"argv": \["api", "-i", "user"\]' "$S/gh.calls" || fail "auth did not ask gh who the token is" "$(cat "$S/gh.calls")"
+python3 -I - "$S/gh.calls" "$(sha "$TOK_ACME")" <<'PY' || fail "gh ran with the wrong credential during auth"
+import json, sys
+calls = [json.loads(line) for line in open(sys.argv[1])]
+assert len(calls) == 1 and calls[0]["gh_token_sha"] == sys.argv[2], calls
+PY
+if token_strays "$TOK_ACME" | grep -q .; then fail "auth wrote the token outside its file" "$(token_strays "$TOK_ACME")"; fi
+mc status
+grep -qE '^  acme,token,jdwillmsen,2026-12-01,39$' "$out" || fail "status after auth" "$(cat "$out")"
+! grep -qF -- "$TOK_ACME" "$out" "$err" || fail "status printed the token"
+# The saved token is what the next run uses.
+two_owners
+want 0 run
+expect 1 merged
+grep -qF "$(sha "$TOK_ACME")" "$S/gh.calls" || fail "run did not use the saved token"
+
+# A second auth replaces the file; --expires wins over the header; a loose directory is tightened.
+chmod 755 "$TOKDIR"
+printf 'otherlogin' >"$S/whoami_login"
+ptyrun full "$TOK_NEW" auth acme --expires 2027-01-01
+[ "$pty_rc" = 0 ] || fail "second auth failed" "$pty_out"
+grep -q '^login: otherlogin$' <<<"$pty_out" && grep -q '^expires: 2027-01-01$' <<<"$pty_out" || fail "second auth output" "$pty_out"
+[ "$(cat "$TOKDIR/acme")" = "$TOK_NEW" ] || fail "the second auth did not replace the token"
+[ "$(mode_of "$TOKDIR")" = 700 ] || fail "a loose token directory was not tightened"
+! grep -qF -- "$TOK_NEW" <<<"$pty_out" || fail "second auth echoed the token"
+
+# No expiry from the header or the flag is recorded as none, and says so.
+newcase
+printf '[[repo]]\nname = "beta/live"\nmode = "live"\nmax_tier = "R2"\n' >>"$CFG"
+ptyrun full "$TOK_BETA" auth beta
+[ "$pty_rc" = 0 ] || fail "auth without an expiry failed" "$pty_out"
+grep -q '^expires: none$' <<<"$pty_out" || fail "auth without an expiry" "$pty_out"
+mc status
+grep -qE '^  beta,token,jdwillmsen,-,-$' "$out" || fail "status of a token with no expiry" "$(cat "$out")"
+
+# What auth refuses to save, and what it says: never the token, never a file.
+refused() {  # description, wanted exit, wanted words, token, auth args...
+    local what="$1" want_rc="$2" words="$3" token="$4"
+    shift 4
+    newcase
+    printf '[[repo]]\nname = "beta/live"\nmode = "live"\nmax_tier = "R2"\n' >>"$CFG"
+    [ "$token" != fail ] || echo x >"$S/whoami_fail"
+    ptyrun full "${token/fail/$TOK_ACME}" "$@"
+    [ "$pty_rc" = "$want_rc" ] || fail "$what: exited $pty_rc, want $want_rc" "$pty_out"
+    grep -qF -- "$words" <<<"$pty_out" || fail "$what: no '$words' in the message" "$pty_out"
+    ! grep -qF -- "${token/fail/$TOK_ACME}" <<<"$pty_out" || fail "$what: the token was printed" "$pty_out"
+    [ ! -e "$TOKDIR/acme" ] && [ ! -e "$TOKDIR/acme.meta" ] || fail "$what: a file was written"
+}
+refused "classic token" 1 "classic token" "$TOK_CLASSIC" auth acme
+! grep -q 'ClassicClassic' <<<"$pty_out" || fail "classic token: part of it was printed"
+[ ! -s "$S/gh.log" ] || fail "a refused token was still sent to gh"
+refused "not a token" 1 "fine-grained" "hunter2hunter2hunter2hunter2hunter2" auth acme
+refused "gho_ login token" 1 "not a personal access token" "${GP/p_/o_}OAuthOAuthOAuthOAuthOAuthOAuth" auth acme
+refused "gh rejects the token" 1 "did not accept" fail auth acme
+grep -q 'redacted' <<<"$pty_out" || fail "the token in gh's error was not cut" "$pty_out"
+refused "unknown owner" 2 "owns no repository" "$TOK_ACME" auth nobody
+refused "bad owner name" 2 "not a GitHub owner name" "$TOK_ACME" auth '../x'
+refused "bad expiry" 2 "YYYY-MM-DD" "$TOK_ACME" auth acme --expires tomorrow
+refused "impossible expiry" 2 "YYYY-MM-DD" "$TOK_ACME" auth acme --expires 2026-13-45
+refused "past expiry" 2 "already in the past" "$TOK_ACME" auth acme --expires 2026-10-22
+[ ! -s "$S/gh.log" ] || fail "an invalid request still reached gh"
+# Nothing typed at all.
+newcase
+ptyrun full "" auth acme
+[ "$pty_rc" = 1 ] && grep -q 'no token entered' <<<"$pty_out" || fail "an empty token" "$pty_out"
+
+# --remove deletes the file and its metadata, and says whether there was one.
+newcase
+mktok acme "$TOK_ACME"
+mkmeta acme jdwillmsen 2026-12-01
+ptyrun full - auth acme --remove
+[ "$pty_rc" = 0 ] && grep -q '^removed: true$' <<<"$pty_out" || fail "remove" "$pty_out"
+[ ! -e "$TOKDIR/acme" ] && [ ! -e "$TOKDIR/acme.meta" ] || fail "remove left files"
+ptyrun full - auth acme --remove
+[ "$pty_rc" = 0 ] && grep -q '^removed: false$' <<<"$pty_out" || fail "a second remove" "$pty_out"
+ptyrun full - auth acme --remove --expires 2027-01-01
+[ "$pty_rc" = 2 ] || fail "--remove with --expires" "$pty_out"
+two_owners
+want 0 run
+calls_use "acme=$(sha "$DEFAULT_TOKEN")" "beta=$(sha "$DEFAULT_TOKEN")" || fail "after a remove the owner is back on the default login"
 
 # ── Safety guards, at the source ──
 python3 -I - "$tool" "$tmp" <<'PY' || fail "guard unit checks failed"

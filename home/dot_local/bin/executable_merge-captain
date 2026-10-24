@@ -5,17 +5,20 @@ Walks the configured repositories, classifies each open pull request with
 change-class, applies the repository's own gates (checks, review threads,
 code scanning), asks the lane agent-pace picks for a review where the tier
 needs one, and merges with the head commit pinned. R3 is never merged. Only a
-`live` repository is ever written to. Agent-facing: stdout is TOON,
-diagnostics go to stderr.
+`live` repository is ever written to. Each owner's gh calls use that owner's
+fine-grained token when one is saved (`auth`), else the default gh login.
+Agent-facing: stdout is TOON, diagnostics go to stderr.
 """
 import argparse
 import datetime as dt
 import fcntl
+import getpass
 import json
 import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -41,6 +44,10 @@ STATE = Path(os.environ.get("MERGE_CAPTAIN_STATE")
 # files, never imported, so an approval is checked against records this tool does not write.
 EVAL_STATE = Path(os.environ.get("AGENT_EVAL_STATE")
                   or Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "agent-eval")
+# One file per owner, named exactly the owner, holding only that owner's fine-grained token; `<owner>.meta` beside it
+# holds what status may show. A fine-grained token is bound to one resource owner, hence one file each.
+TOKENS = Path(os.environ.get("MERGE_CAPTAIN_TOKENS")
+              or Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "merge-captain/tokens")
 PAUSED = STATE / "PAUSED"
 LOG = STATE / "log.jsonl"
 REVIEWS = STATE / "reviews.jsonl"
@@ -73,6 +80,14 @@ MAX_FAILED_ATTEMPTS = 2
 BACKOFF_S = 6 * HOUR_S
 LOG_MAX_BYTES = 5 * 1024 * 1024
 REVIEW_BUDGET_USD = "1.00"
+EXPIRY_WARN_DAYS = 14
+EXPIRY_HEADER = "github-authentication-token-expiration"
+OWNER = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}")
+FINE_GRAINED = re.compile(r"github_pat_[A-Za-z0-9_]{20,240}")
+# What a saved token must look like to be sent anywhere: no whitespace or control character could ride along into
+# a header.
+TOKEN_SHAPE = re.compile(r"[A-Za-z0-9_]{20,255}")
+DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 SHA = re.compile(r"[0-9a-f]{40}")
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 TICKET = re.compile(r"[A-Z][A-Z0-9]*-[0-9]+")
@@ -117,7 +132,7 @@ PROMPT_SECRETS = (
                 r"(?:\"[^\"\n]{6,}\"|'[^'\n]{6,}'|[A-Za-z0-9_+/=@%^*!~:-]{8,})"), r"\1[redacted]"),
 )
 
-USAGE_SHORT = "merge-captain [run | status | pause | resume | explain] [--help]"
+USAGE_SHORT = "merge-captain [run | status | pause | resume | explain | auth] [--help]"
 
 
 def log(msg):
@@ -184,7 +199,13 @@ def scrub_prompt(text):
     return text
 
 
+# Every token this process has loaded, so a message that somehow carries one is cut before it is printed or logged.
+KNOWN_SECRETS = set()
+
+
 def scrub(text):
+    for secret in KNOWN_SECRETS:
+        text = text.replace(secret, "[redacted]")
     for pat in CRED_PATTERNS:
         text = pat.sub("[redacted]", text)
     return text
@@ -314,6 +335,110 @@ def find_tool(env_name, name, *home_dirs):
         if os.access(HOME / d / name, os.X_OK):
             return str(HOME / d / name)
     return str(HOME / ".local/bin" / name)
+
+
+# ── Per-owner identity ───────────────────────────────────────────────────────
+
+def days_until(expires, now):
+    """Whole days from today (UTC) to the last valid day; negative once it has passed."""
+    try:
+        last = dt.date.fromisoformat(expires)
+    except (TypeError, ValueError):
+        return None
+    return (last - dt.datetime.fromtimestamp(now, dt.timezone.utc).date()).days
+
+
+def read_meta(owner):
+    try:
+        fd = os.open(TOKENS / f"{owner}.meta", os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd) as f:
+            meta = json.loads(f.read(4096))
+    except (OSError, ValueError):
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def private_problem(st, what):
+    """Why a token directory or file may not be used, or None. A secret another account can open is not one."""
+    if stat.S_ISLNK(st.st_mode):
+        return f"{what} is a symlink"
+    right_kind = stat.S_ISDIR(st.st_mode) if what == "token directory" else stat.S_ISREG(st.st_mode)
+    if not right_kind:
+        return f"{what} is the wrong kind of file"
+    if st.st_uid != os.getuid():
+        return f"{what} belongs to another user"
+    if st.st_mode & 0o077:
+        return f"{what} mode {st.st_mode & 0o777:04o} is group or world accessible"
+    return None
+
+
+def read_token(path, before):
+    """The token in a file that passed `private_problem`, or None. Opened without following a link and compared with
+    what was checked, so the file cannot be swapped between the check and the read."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    with os.fdopen(fd) as f:
+        after = os.fstat(f.fileno())
+        if (after.st_ino, after.st_dev) != (before.st_ino, before.st_dev):
+            return None
+        raw = f.read(4096).strip()
+    return raw if TOKEN_SHAPE.fullmatch(raw) else None
+
+
+def owner_identity(owner, now):
+    """Which credential this owner's gh calls use: a saved token, the default gh login (no file), or nothing
+    ('insecure'; a token that cannot be trusted never falls back to the default). The token itself is returned
+    only in the `token` key and never goes anywhere but a gh child's environment."""
+    ident = {"owner": owner, "kind": "default", "token": None, "login": None, "expires": None, "days_left": None,
+             "problem": None}
+
+    def insecure(problem):
+        return {**ident, "kind": "insecure", "problem": problem}
+
+    if not OWNER.fullmatch(owner):
+        return ident
+    try:
+        dst = os.lstat(TOKENS)
+    except FileNotFoundError:
+        return ident
+    except OSError:
+        return insecure("token directory unreadable")
+    problem = private_problem(dst, "token directory")
+    if problem:
+        return insecure(problem)
+    path = TOKENS / owner
+    try:
+        fst = os.lstat(path)
+    except FileNotFoundError:
+        return ident
+    except OSError:
+        return insecure("token file unreadable")
+    problem = private_problem(fst, "token file")
+    if problem:
+        return insecure(problem)
+    token = read_token(path, fst)
+    if token is None:
+        return insecure("token file empty or malformed")
+    meta = read_meta(owner)
+    expires = meta.get("expires") if isinstance(meta.get("expires"), str) and DATE.fullmatch(meta["expires"]) else None
+    login = meta.get("login")
+    return {**ident, "kind": "token", "token": token, "login": clean(login, 40) if isinstance(login, str) else None,
+            "expires": expires, "days_left": days_until(expires, now) if expires else None}
+
+
+def token_expired(ident):
+    return ident["kind"] == "token" and ident["days_left"] is not None and ident["days_left"] < 0
+
+
+def identity_block(ident):
+    """(action, reason) when this owner's pull requests must not be touched, else None."""
+    if ident["kind"] == "insecure":
+        return "skipped", "insecure-token-file"
+    if token_expired(ident):
+        return "waiting", "token-expired"
+    return None
 
 
 class Result:
@@ -628,6 +753,7 @@ class Captain:
         self.deadline_logged = False
         self.default_branch = {}
         self.label_cache = {}
+        self.identities = {}
         self.trace = []
         self.repo = None
         self.live = False
@@ -689,8 +815,38 @@ class Captain:
         # A comment is exempt: it publishes a review that is already paid for and recorded nowhere else.
         if write and args[:2] != ["pr", "comment"] and self.past_deadline():
             raise Stop("waiting", "deadline")
-        env = dict(os.environ, GH_PROMPT_DISABLED="1", NO_COLOR="1", GH_NO_UPDATE_NOTIFIER="1", GH_PAGER="cat")
+        env = self.gh_env(args)
         return run_cmd([self.gh_bin, *args], stdin=stdin, timeout=GH_TIMEOUT_S, cwd=self.scratch, env=env)
+
+    def identity(self, owner):
+        if owner not in self.identities:
+            ident = owner_identity(owner, self.now)
+            if ident["token"]:
+                KNOWN_SECRETS.add(ident["token"])
+            self.identities[owner] = ident
+        return self.identities[owner]
+
+    def owner_block(self, repo):
+        return identity_block(self.identity(repo.split("/")[0]))
+
+    def gh_env(self, args):
+        """The environment for one gh child. The owner's token is added here and to no other process: not the
+        reviewer, not change-class, agent-pace or agent-eval, and not this process's own environment."""
+        owner = (self.repo or "").split("/")[0]
+        if not owner:
+            raise Refused("gh call with no repository in hand")
+        if "--repo" in args:
+            i = args.index("--repo")
+            if i + 1 >= len(args) or args[i + 1].split("/")[0].lower() != owner.lower():
+                raise Refused("gh call names another owner than the repository in hand")
+        block = self.owner_block(self.repo)
+        if block:
+            raise Stop(*block)
+        env = dict(os.environ, GH_PROMPT_DISABLED="1", NO_COLOR="1", GH_NO_UPDATE_NOTIFIER="1", GH_PAGER="cat")
+        token = self.identity(owner)["token"]
+        if token:
+            env["GH_TOKEN"] = token
+        return env
 
     def gh_json(self, args, what):
         r = self.gh(args)
@@ -1410,6 +1566,14 @@ def cmd_run(args):
             head.update(paused=True, pause_reason=clean(PAUSED.read_text() or "no reason given", 120))
         else:
             for rc in repos:
+                block = cap.owner_block(rc["name"])
+                if block:
+                    # Nothing can be listed without the owner's credential, so the repository gets one row.
+                    failed_lists += 1
+                    d = {**nothing, "repo": rc["name"], "action": block[0], "mode": rc["mode"], "reason": block[1]}
+                    cap.write_log(run_id, d)
+                    decisions.append(d)
+                    continue
                 try:
                     prs = list_prs(cap, rc, args)
                 except (Stop, Refused) as e:
@@ -1462,10 +1626,29 @@ def list_prs(cap, rc, args):
     return [r for r in rows if isinstance(r, dict) and positive_int(r.get("number"))]
 
 
+def owner_report(repos, now):
+    """Per-owner identity rows and the warnings worth acting on. Nothing here can carry a token."""
+    rows, warnings = [], []
+    for owner in dict.fromkeys(r["name"].split("/")[0] for r in repos):
+        ident = owner_identity(owner, now)
+        left = ident["days_left"]
+        rows.append({"owner": owner, "identity": ident["kind"], "login": ident["login"] or "-",
+                     "expires": ident["expires"] or "-", "days_left": left if left is not None else "-"})
+        if ident["kind"] == "insecure":
+            warnings.append(f"{owner} token unusable ({ident['problem']}) so its repositories are skipped")
+        elif token_expired(ident):
+            warnings.append(f"{owner} token expired {-left} day{'s' if left != -1 else ''} ago "
+                            "so its repositories wait")
+        elif left is not None and left <= EXPIRY_WARN_DAYS:
+            warnings.append(f"{owner} token expires " + ("today" if left == 0 else
+                                                          f"in {left} day{'s' if left != 1 else ''}"))
+    return rows, warnings
+
+
 def cmd_status(args):
     cfg = load_config()
     live, dry = mode_counts(cfg["repos"])
-    out = {"config": tilde(CONFIG), "state": tilde(STATE), "paused": PAUSED.exists()}
+    out = {"config": tilde(CONFIG), "state": tilde(STATE), "tokens": tilde(TOKENS), "paused": PAUSED.exists()}
     if PAUSED.exists():
         try:
             out["pause_reason"] = clean(PAUSED.read_text() or "no reason given", 120)
@@ -1478,6 +1661,7 @@ def cmd_status(args):
                 "limits": cfg["limits"], "authors": cfg["allow"], "reviewers": cfg["providers"],
                 "checks_ignored": cfg["ignore"]})
     out["repos"] = [{"name": r["name"], "mode": r["mode"], "max_tier": r["max_tier"]} for r in cfg["repos"]]
+    out["owners"], out["warnings"] = owner_report(cfg["repos"], now_epoch())
     runs = [r for r in read_log() if r.get("action") == "run"][-5:]
     out["last_runs"] = [{"at": r.get("at"), "result": r.get("reason")} for r in reversed(runs)]
     emit(out)
@@ -1516,6 +1700,12 @@ def cmd_explain(args):
     cap = Captain(cfg, explain=True)
     try:
         cap.repo, cap.live = repo, False
+        block = cap.owner_block(repo)
+        if block:
+            emit({"pr": f"{repo}#{n}", "mode": rc["mode"], "max_tier": rc["max_tier"], "head": None, "tier": None,
+                  "tags": [], "would": block[0], "reason": block[1], "paused": PAUSED.exists(),
+                  "steps": [{"step": "identity", "result": block[1]}]})
+            return 0
         try:
             j = cap.gh_json(["pr", "view", str(n), "--repo", repo, "--json", pr_fields()], "pull request")
         except Stop as s:
@@ -1527,6 +1717,138 @@ def cmd_explain(args):
     finally:
         cap.close()
     emit(out)
+    return 0
+
+
+def token_dir_ready():
+    """The token directory, created 0700 or tightened to it, and refused when it is not a plain directory of ours."""
+    os.umask(0o077)
+    try:
+        st = os.lstat(TOKENS)
+    except FileNotFoundError:
+        try:
+            TOKENS.mkdir(parents=True, mode=0o700)
+            os.chmod(TOKENS, 0o700)
+        except OSError as e:
+            die(EXIT_FAIL, f"cannot create {tilde(TOKENS)}: {e.strerror}", "Set MERGE_CAPTAIN_TOKENS")
+        return
+    except OSError as e:
+        die(EXIT_FAIL, f"cannot inspect {tilde(TOKENS)}: {e.strerror}")
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        die(EXIT_FAIL, f"{tilde(TOKENS)} is not a directory of yours", "Move it aside and run auth again")
+    if st.st_mode & 0o077:
+        try:
+            os.chmod(TOKENS, 0o700)
+        except OSError as e:
+            die(EXIT_FAIL, f"cannot tighten {tilde(TOKENS)}: {e.strerror}")
+
+
+def write_private(path, data):
+    """Write then rename, so a reader sees the old file or the whole new one and never a partial token."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def token_check(token):
+    """None for a fine-grained token; otherwise why not. Never repeats any of the text it was given."""
+    if token.startswith("ghp_"):
+        return ("a classic token reaches every repository its user can, which is exactly what per-owner tokens "
+                "avoid; create a fine-grained token")
+    if token.startswith(("gho_", "ghu_", "ghs_", "ghr_")):
+        return "that is not a personal access token; create a fine-grained token"
+    if not FINE_GRAINED.fullmatch(token):
+        return "that does not look like a fine-grained token (github_pat_...)"
+    return None
+
+
+def whoami(token):
+    """(login, expiry date or None) of a token, from one `gh api -i user` with the token in that child alone."""
+    env = dict(os.environ, GH_TOKEN=token, GH_PROMPT_DISABLED="1", NO_COLOR="1", GH_NO_UPDATE_NOTIFIER="1",
+               GH_PAGER="cat")
+    r = run_cmd([find_tool("MERGE_CAPTAIN_GH", "gh"), "api", "-i", "user"], timeout=GH_TIMEOUT_S, env=env)
+    if not r.ok:
+        reason = clean(r.err.splitlines()[0], 120) if r.err.strip() else "no reason given"
+        die(EXIT_FAIL, f"GitHub did not accept that token ({reason})", "Check the token, its resource owner and expiry")
+    parts = re.split(r"\r?\n\r?\n", r.out, maxsplit=1)
+    head, body = (parts[0], parts[1]) if len(parts) == 2 else ("", r.out)
+    try:
+        login = json.loads(body).get("login")
+    except (ValueError, AttributeError):
+        login = None
+    if not isinstance(login, str) or not OWNER.fullmatch(login.removesuffix("[bot]")):
+        die(EXIT_FAIL, "GitHub accepted the token but reported no login")
+    expires = None
+    for line in head.splitlines():
+        name, _, value = line.partition(":")
+        if name.strip().lower() == EXPIRY_HEADER and DATE.match(value.strip()):
+            expires = value.strip()[:10]
+    return login, expires
+
+
+def cmd_auth(args):
+    """Save or remove one owner's token. The only command that ever sees a token typed by a person."""
+    if not (sys.stdin.isatty() and sys.stderr.isatty()):
+        usage_error("auth needs a person at a terminal: stdin and stderr must both be one",
+                    "Run it in a normal terminal outside any agent session")
+    owner = args.owner
+    if not OWNER.fullmatch(owner):
+        usage_error(f"not a GitHub owner name: {clean(owner, 60)}")
+    if args.remove:
+        if args.expires:
+            usage_error("--expires does not go with --remove")
+        removed = False
+        for name in (owner, f"{owner}.meta"):
+            try:
+                os.unlink(TOKENS / name)
+                removed = removed or name == owner
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                die(EXIT_FAIL, f"cannot remove {name}: {e.strerror}")
+        emit({"owner": owner, "removed": removed})
+        return 0
+    expires = args.expires
+    if expires is not None:
+        left = days_until(expires, now_epoch()) if DATE.fullmatch(expires) else None
+        if left is None:
+            usage_error(f"--expires must be a date as YYYY-MM-DD, got {clean(expires, 30)}")
+        if left < 0:
+            usage_error("--expires is already in the past")
+    owners = list(dict.fromkeys(r["name"].split("/")[0] for r in load_config()["repos"]))
+    if owner not in owners:
+        usage_error(f"{owner} owns no repository in {tilde(CONFIG)}", "Owners: " + ",".join(owners))
+    try:
+        token = getpass.getpass(f"Fine-grained token for {owner} (input hidden): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        die(EXIT_FAIL, "no token entered")
+    if not token:
+        die(EXIT_FAIL, "no token entered")
+    KNOWN_SECRETS.add(token)
+    why = token_check(token)
+    if why:
+        die(EXIT_FAIL, why, "Create one at https://github.com/settings/personal-access-tokens")
+    login, header_expiry = whoami(token)
+    expires = expires or header_expiry
+    token_dir_ready()
+    meta = json.dumps({"login": login, "saved_at": iso(now_epoch()), "expires": expires})
+    try:
+        write_private(TOKENS / f"{owner}.meta", meta + "\n")
+        write_private(TOKENS / owner, token + "\n")
+    except OSError as e:
+        die(EXIT_FAIL, f"cannot save the token for {owner}: {e.strerror}")
+    emit({"owner": owner, "login": login, "expires": expires or "none"})
     return 0
 
 
@@ -1584,6 +1906,12 @@ def build_parser():
     e = sub.add_parser("explain", help="what a run would do for one pull request, no side effects")
     e.set_defaults(func=cmd_explain)
     e.add_argument("target", metavar="O/R#N")
+
+    a = sub.add_parser("auth", help="save or remove one owner's token (a person at a terminal only)")
+    a.set_defaults(func=cmd_auth)
+    a.add_argument("owner", metavar="OWNER")
+    a.add_argument("--expires", metavar="YYYY-MM-DD", help="when the token expires, if GitHub does not say")
+    a.add_argument("--remove", action="store_true", help="delete the saved token instead")
     return p
 
 

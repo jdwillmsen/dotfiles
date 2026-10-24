@@ -83,7 +83,7 @@ alias ccub='npx "ccusage@^20" blocks --active'
 
 # Agent delivery: where the week stands, what the captain did, how the models score
 alias pace='agent-pace status'
-alias mcs='merge-captain status'
+alias mcap='merge-captain status'
 alias mclog='tail -n 20 "${MERGE_CAPTAIN_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/merge-captain}/log.jsonl"'
 alias scoreboard='agent-eval scoreboard'
 

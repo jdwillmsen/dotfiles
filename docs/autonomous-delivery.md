@@ -100,7 +100,10 @@ agent-eval scoreboard                      # how each model is doing per task cl
 An assignment from `agent-pace assign` stays open until an outcome with the same
 id exists. It closes when the task's `clientRequestId` equals the assignment id
 (`agent-eval collect` then records the task under it, with the assignment's lane,
-class and risk) or when `agent-eval record --id <assignment>` is called. An
+class and risk) or when `agent-eval record --id <assignment>` is called. The
+link holds only for the first thread created at or after the assignment that ran
+on its lane's model; any other thread reusing the id is recorded under its own
+hash, and so is the thread of an assignment that was closed by hand. An
 unclosed assignment holds its lane's concurrency for 4 hours, so a dispatch that
 skips both can fill a lane and leave the merge captain with no review lane.
 

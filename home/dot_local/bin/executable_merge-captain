@@ -1129,8 +1129,12 @@ class Captain:
             if not res or res.get("result") != "assigned":
                 if tried:
                     break
-                raise Stop("waiting", {"defer": "quota", "none": "no-review-lane"}.get(
-                    (res or {}).get("result"), "review-unavailable"))
+                label = {"defer": "quota", "none": "no-review-lane"}.get(
+                    (res or {}).get("result"), "review-unavailable")
+                # agent-pace says whether a lane is at its cap or none lists the class; the label alone hides it.
+                why = clean(res["reason"], 120) if label != "review-unavailable" and isinstance(
+                    res.get("reason"), str) else ""
+                raise Stop("waiting", f"{label}: {why}" if why else label)
             lane, provider, model, aid = (str(res.get(k) or "") for k in ("lane", "provider", "model", "assignment"))
             if IDENT.fullmatch(aid):
                 self.open_assignment = (aid, tier)

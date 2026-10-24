@@ -97,6 +97,13 @@ agent-pace status                          # where the week should be, and the m
 agent-eval scoreboard                      # how each model is doing per task class
 ```
 
+An assignment from `agent-pace assign` stays open until an outcome with the same
+id exists. It closes when the task's `clientRequestId` equals the assignment id
+(`agent-eval collect` then records the task under it, with the assignment's lane,
+class and risk) or when `agent-eval record --id <assignment>` is called. An
+unclosed assignment holds its lane's concurrency for 4 hours, so a dispatch that
+skips both can fill a lane and leave the merge captain with no review lane.
+
 Stop it at once with `merge-captain pause --reason "why"`; `resume` undoes it.
 To take another repo live, change its `mode` in `merge-captain.toml` in the
 dotfiles source (a change to that file is R3, so a person approves it).

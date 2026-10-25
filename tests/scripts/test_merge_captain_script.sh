@@ -1996,6 +1996,36 @@ for bad in '' 'github_pat_has a space'; do
     chmod 600 "$TOKDIR/acme"
     insecure_case "token file holding '${bad:0:11}'"
 done
+# A file that is not text: only that owner is skipped, nothing crashes, and none of its bytes reach a message or log.
+newcase
+two_owners
+mktok beta "$TOK_BETA"
+printf 'BINARYMARKER\377\376\200\201' >"$TOKDIR/acme"
+chmod 600 "$TOKDIR/acme"
+insecure_case "binary token file"
+expect 2 merged
+grep -q 'acme token unusable (unreadable token file)' "$out" || mc status
+grep -q 'unreadable token file' "$out" || fail "a binary token file has no reason in status" "$(cat "$out")"
+want 0 explain acme/live#1
+grep -q '^would: skipped' "$out" || fail "explain with a binary token file" "$(cat "$out")"
+! grep -rqF 'BINARYMARKER' "$out" "$err" "$STATE" "$S/gh.log" || fail "a binary token file's content reached a message or log"
+! grep -q 'Traceback' "$err" || fail "a binary token file crashed the tool" "$(cat "$err")"
+
+# GitHub owners are case-insensitive: a token is saved and found under the lower-case name.
+newcase
+printf '[[repo]]\nname = "Beta/live"\nmode = "live"\nmax_tier = "R2"\n' >>"$CFG"
+mktok beta "$TOK_BETA"
+want 0 status
+grep -qE '^  Beta,token,-,-,-$' "$out" || fail "a mixed-case config owner did not find its lower-case token" "$(cat "$out")"
+grep -q '^warnings\[0\]:$' "$out" || fail "a found token must not warn" "$(cat "$out")"
+newcase
+printf '[[repo]]\nname = "beta/live"\nmode = "live"\nmax_tier = "R2"\n' >>"$CFG"
+mktok Beta "$TOK_BETA"
+want 0 status
+grep -qE '^  beta,default,-,-,-$' "$out" || fail "a differently-cased token file was used" "$(cat "$out")"
+grep -q 'beta has a token file named Beta, which is never used' "$out" || fail "no warning for a token file that differs by case" "$(cat "$out")"
+grep -q 'merge-captain auth beta' "$out" || fail "the warning does not say how to fix it" "$(cat "$out")"
+! grep -qF -- "$TOK_BETA" "$out" "$err" || fail "status printed a token"
 
 # Expiry: the day it names is the last good one; after that the owner's repositories wait, never the default login.
 newcase
@@ -2258,6 +2288,38 @@ ptyrun full - auth acme --remove --expires 2027-01-01
 two_owners
 want 0 run
 calls_use "acme=$(sha "$DEFAULT_TOKEN")" "beta=$(sha "$DEFAULT_TOKEN")" || fail "after a remove the owner is back on the default login"
+
+# auth stores the lower-cased owner, whatever case was typed or configured.
+newcase
+printf '[[repo]]\nname = "Beta/live"\nmode = "live"\nmax_tier = "R2"\n' >>"$CFG"
+ptyrun full "$TOK_BETA" auth BETA
+[ "$pty_rc" = 0 ] && grep -q '^owner: beta$' <<<"$pty_out" || fail "auth with another case" "$pty_out"
+[ "$(find "$TOKDIR" -mindepth 1 -printf '%f\n' | sort | tr '\n' ' ')" = "beta beta.meta " ] ||
+    fail "auth did not store the lower-case name" "$(find "$TOKDIR" -mindepth 1)"
+ptyrun full - auth Beta --remove
+[ "$pty_rc" = 0 ] && grep -q '^removed: true$' <<<"$pty_out" || fail "remove with another case" "$pty_out"
+[ ! -e "$TOKDIR/beta" ] || fail "remove with another case left the file"
+
+# --remove never follows a link: not a symlinked directory, not a symlinked file.
+newcase
+rm -rf "$tmp/realtokens"
+mkdir "$tmp/realtokens"
+chmod 700 "$tmp/realtokens"
+printf '%s\n' "$TOK_ACME" >"$tmp/realtokens/acme"
+chmod 600 "$tmp/realtokens/acme"
+ln -s "$tmp/realtokens" "$TOKDIR"
+ptyrun full - auth acme --remove
+[ "$pty_rc" = 1 ] && grep -q 'is a symlink' <<<"$pty_out" || fail "remove through a symlinked directory" "$pty_out"
+[ "$(cat "$tmp/realtokens/acme")" = "$TOK_ACME" ] || fail "remove deleted a token through a symlinked directory"
+rm -rf "$tmp/realtokens" "$TOKDIR"
+newcase
+mktok beta "$TOK_BETA"
+printf '%s\n' "$TOK_ACME" >"$tmp/real-token"
+ln -s "$tmp/real-token" "$TOKDIR/acme"
+ptyrun full - auth acme --remove
+[ "$pty_rc" = 1 ] && grep -q 'is a symlink' <<<"$pty_out" || fail "remove of a symlinked file" "$pty_out"
+[ -L "$TOKDIR/acme" ] && [ "$(cat "$tmp/real-token")" = "$TOK_ACME" ] || fail "remove touched a symlinked token file"
+rm -f "$tmp/real-token"
 
 # ── Safety guards, at the source ──
 python3 -I - "$tool" "$tmp" <<'PY' || fail "guard unit checks failed"

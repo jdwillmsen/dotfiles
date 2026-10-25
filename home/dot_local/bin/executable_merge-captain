@@ -372,6 +372,10 @@ def private_problem(st, what):
     return None
 
 
+class UnreadableToken(Exception):
+    """A token file that could not be read or decoded."""
+
+
 def read_token(path, before):
     """The token in a file that passed `private_problem`, or None. Opened without following a link and compared with
     what was checked, so the file cannot be swapped between the check and the read."""
@@ -379,11 +383,15 @@ def read_token(path, before):
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError:
         return None
-    with os.fdopen(fd) as f:
-        after = os.fstat(f.fileno())
-        if (after.st_ino, after.st_dev) != (before.st_ino, before.st_dev):
-            return None
-        raw = f.read(4096).strip()
+    try:
+        with os.fdopen(fd) as f:
+            after = os.fstat(f.fileno())
+            if (after.st_ino, after.st_dev) != (before.st_ino, before.st_dev):
+                return None
+            raw = f.read(4096).strip()
+    except (OSError, ValueError):
+        # UnicodeDecodeError is a ValueError. Nothing from the file may reach a message: it may be a token.
+        raise UnreadableToken from None
     return raw if TOKEN_SHAPE.fullmatch(raw) else None
 
 
@@ -399,6 +407,7 @@ def owner_identity(owner, now):
 
     if not OWNER.fullmatch(owner):
         return ident
+    owner = owner.lower()
     try:
         dst = os.lstat(TOKENS)
     except FileNotFoundError:
@@ -418,7 +427,10 @@ def owner_identity(owner, now):
     problem = private_problem(fst, "token file")
     if problem:
         return insecure(problem)
-    token = read_token(path, fst)
+    try:
+        token = read_token(path, fst)
+    except UnreadableToken:
+        return insecure("unreadable token file")
     if token is None:
         return insecure("token file empty or malformed")
     meta = read_meta(owner)
@@ -1626,11 +1638,25 @@ def list_prs(cap, rc, args):
     return [r for r in rows if isinstance(r, dict) and positive_int(r.get("number"))]
 
 
+def misnamed_token_files():
+    """Token file names (never contents) that differ from their lower-case form, so no lookup would find them."""
+    try:
+        return [e.name for e in os.scandir(TOKENS)
+                if e.name != e.name.lower() and not e.name.startswith(".") and not e.name.endswith(".meta")]
+    except OSError:
+        return []
+
+
 def owner_report(repos, now):
     """Per-owner identity rows and the warnings worth acting on. Nothing here can carry a token."""
     rows, warnings = [], []
+    misnamed = {n.lower(): n for n in misnamed_token_files()}
     for owner in dict.fromkeys(r["name"].split("/")[0] for r in repos):
         ident = owner_identity(owner, now)
+        stray = misnamed.get(owner.lower())
+        if stray:
+            warnings.append(f"{owner} has a token file named {clean(stray, 40)}, which is never used; "
+                            f"names are lower-case, so save it again with `merge-captain auth {owner.lower()}`")
         left = ident["days_left"]
         rows.append({"owner": owner, "identity": ident["kind"], "login": ident["login"] or "-",
                      "expires": ident["expires"] or "-", "days_left": left if left is not None else "-"})
@@ -1797,6 +1823,21 @@ def whoami(token):
     return login, expires
 
 
+def refuse_linked_removal(owner):
+    """A symlinked token directory would make the unlink act on its target, and a symlinked file is not ours to
+    judge: removal only ever touches plain files in a plain directory."""
+    for path in (TOKENS, TOKENS / owner, TOKENS / f"{owner}.meta"):
+        try:
+            linked = stat.S_ISLNK(os.lstat(path).st_mode)
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            die(EXIT_FAIL, f"cannot inspect {tilde(path)}: {e.strerror}")
+        if linked:
+            die(EXIT_FAIL, f"{tilde(path)} is a symlink; nothing was removed",
+                "Remove the link by hand if you meant to")
+
+
 def cmd_auth(args):
     """Save or remove one owner's token. The only command that ever sees a token typed by a person."""
     if not (sys.stdin.isatty() and sys.stderr.isatty()):
@@ -1805,9 +1846,11 @@ def cmd_auth(args):
     owner = args.owner
     if not OWNER.fullmatch(owner):
         usage_error(f"not a GitHub owner name: {clean(owner, 60)}")
+    owner = owner.lower()
     if args.remove:
         if args.expires:
             usage_error("--expires does not go with --remove")
+        refuse_linked_removal(owner)
         removed = False
         for name in (owner, f"{owner}.meta"):
             try:
@@ -1826,7 +1869,7 @@ def cmd_auth(args):
             usage_error(f"--expires must be a date as YYYY-MM-DD, got {clean(expires, 30)}")
         if left < 0:
             usage_error("--expires is already in the past")
-    owners = list(dict.fromkeys(r["name"].split("/")[0] for r in load_config()["repos"]))
+    owners = list(dict.fromkeys(r["name"].split("/")[0].lower() for r in load_config()["repos"]))
     if owner not in owners:
         usage_error(f"{owner} owns no repository in {tilde(CONFIG)}", "Owners: " + ",".join(owners))
     try:

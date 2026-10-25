@@ -130,11 +130,14 @@ For each of the three owners:
 Rules the captain enforces:
 
 - Tokens live in `~/.config/merge-captain/tokens/` (`MERGE_CAPTAIN_TOKENS`): the
-  directory 0700, one file per owner named exactly the owner (`jdwillmsen`,
+  directory 0700, one file per owner named by the owner in lower case (`jdwillmsen`,
   `jdwlabs`, `dotablaze-tech`) at 0600, plus `<owner>.meta` with the login and
-  expiry. `auth` creates them that way.
-- A token file or directory that is a symlink, belongs to someone else or is
-  readable by group or others is **not used and does not fall back**: that owner's
+  expiry. `auth` creates them that way. GitHub owner names are case-insensitive, so
+  `auth Acme` saves `acme` and a config owner `Acme` finds it; a hand-made file whose
+  name differs only by case is never used, and `status` warns about it by name.
+- A token file or directory that is a symlink, belongs to someone else, is
+  readable by group or others, or cannot be read as text is **not used and does not
+  fall back** (`status` names the reason, never the file's content): that owner's
   repositories show `skipped insecure-token-file` in the run and `status` shows
   `identity: insecure`. Fix the mode (`chmod 700` the directory, `chmod 600` the
   file) or save the token again. A loose directory stops every owner.
@@ -150,7 +153,8 @@ warning 14 days before expiry (`warnings`); at expiry the owner's repositories s
 time.
 
 Removing: `merge-captain auth <owner> --remove` (also needs a terminal) deletes the
-file and its metadata; revoke the token on GitHub as well. The owner then goes back
+file and its metadata, and refuses when the directory or either file is a symlink;
+revoke the token on GitHub as well. The owner then goes back
 to the default login. To stop the captain for that owner instead, set its repositories
 to `mode = "off"` or `merge-captain pause`.
 

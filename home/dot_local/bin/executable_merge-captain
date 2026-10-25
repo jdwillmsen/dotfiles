@@ -327,11 +327,14 @@ def load_config():
         no_checks = row.get("allow_no_checks", False)
         if not isinstance(no_checks, bool):
             die(EXIT_FAIL, f"repo {name}: allow_no_checks must be true or false, got {no_checks!r}")
+        need_token = row.get("require_token", False)
+        if not isinstance(need_token, bool):
+            die(EXIT_FAIL, f"repo {name}: require_token must be true or false, got {need_token!r}")
         per_repo = row.get("max_prs_per_repo", limits["max_prs_per_repo"])
         if not positive_int(per_repo):
             die(EXIT_FAIL, f"repo {name}: max_prs_per_repo must be a positive integer, got {per_repo!r}")
         repos.append({"name": name, "mode": mode, "max_tier": ceiling, "allow_no_checks": no_checks,
-                      "max_prs_per_repo": per_repo})
+                      "require_token": need_token, "max_prs_per_repo": per_repo})
     return {"limits": limits, "allow": allow, "ignore": ignore, "providers": providers, "repos": repos}
 
 
@@ -779,6 +782,7 @@ class Captain:
         self.default_branch = {}
         self.label_cache = {}
         self.identities = {}
+        self.token_required = {r["name"] for r in cfg.get("repos", []) if r.get("require_token")}
         self.trace = []
         self.repo = None
         self.live = False
@@ -852,7 +856,10 @@ class Captain:
         return self.identities[owner]
 
     def owner_block(self, repo):
-        return identity_block(self.identity(repo.split("/")[0]))
+        ident = self.identity(repo.split("/")[0])
+        # Only ever withholds: a token that is present but unusable keeps the block its own reason gives.
+        return identity_block(ident) or (
+            ("waiting", "token-required") if repo in self.token_required and ident["kind"] == "default" else None)
 
     def gh_env(self, args):
         """The environment for one gh child. The owner's token is added here and to no other process: not the
@@ -1667,7 +1674,10 @@ def check_api_budget(run, repos):
     cap = run["cap"]
     first = {}
     for rc in repos:
-        first.setdefault(rc["name"].split("/")[0], rc["name"])
+        owner = rc["name"].split("/")[0]
+        # A repository withheld for want of a token cannot be asked about its owner's budget.
+        if owner not in first or (cap.owner_block(first[owner]) and not cap.owner_block(rc["name"])):
+            first[owner] = rc["name"]
     for owner, repo in first.items():
         if not cap.owner_block(repo) and cap.api_low(repo):
             run["low_owners"].add(owner)
@@ -1709,8 +1719,10 @@ def walk_group(run, key, group, start, budget):
         owner = repo.split("/")[0]
         block = cap.owner_block(repo)
         if block:
-            # Nothing can be listed without the owner's credential, so the repository gets one row.
-            run["failed_lists"] += 1
+            # Nothing can be listed without the owner's credential, so the repository gets one row. A repository
+            # that is only waiting for a token it is configured to need is not a failure of the run.
+            if block[1] != "token-required":
+                run["failed_lists"] += 1
             note(run, {**nothing, "repo": repo, "action": block[0], "mode": rc["mode"], "reason": block[1]})
             continue
         if owner in run["low_owners"]:
@@ -1867,6 +1879,7 @@ def owner_report(repos, now):
     """Per-owner identity rows and the warnings worth acting on. Nothing here can carry a token."""
     rows, warnings = [], []
     misnamed = {n.lower(): n for n in misnamed_token_files()}
+    needy = {r["name"].split("/")[0] for r in repos if r.get("require_token") and r["mode"] != "off"}
     for owner in dict.fromkeys(r["name"].split("/")[0] for r in repos):
         ident = owner_identity(owner, now)
         stray = misnamed.get(owner.lower())
@@ -1876,6 +1889,8 @@ def owner_report(repos, now):
         left = ident["days_left"]
         rows.append({"owner": owner, "identity": ident["kind"], "login": ident["login"] or "-",
                      "expires": ident["expires"] or "-", "days_left": left if left is not None else "-"})
+        if owner in needy and ident["kind"] == "default":
+            warnings.append(f"{owner}: token required but missing")
         if ident["kind"] == "insecure":
             warnings.append(f"{owner} token unusable ({ident['problem']}) so its repositories are skipped")
         elif token_expired(ident):
@@ -1909,6 +1924,9 @@ def cmd_status(args):
                        "deferred_last_run": rot["deferred"], "as_of": rot["at"] or "-",
                        "examined_tracked": len(load_examined(now_epoch()))}
     out["owners"], out["warnings"] = owner_report(cfg["repos"], now_epoch())
+    kinds = {o["owner"]: o["identity"] for o in out["owners"]}
+    out["token_required"] = [{"repo": r["name"], "require_token": "yes", "identity": kinds[r["name"].split("/")[0]]}
+                             for r in cfg["repos"] if r.get("require_token")]
     runs = [r for r in read_log() if r.get("action") == "run"][-5:]
     out["last_runs"] = [{"at": r.get("at"), "result": r.get("reason")} for r in reversed(runs)]
     emit(out)

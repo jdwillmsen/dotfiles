@@ -193,7 +193,10 @@ Inside a repository, pull requests are taken least-recently-examined first, from
 `examined.json` (`repo#number` to the time the captain last spent a decision on it,
 oldest first for PRs it has never seen), so an old PR is not starved by newer ones.
 Entries are dropped when a PR closes, when its repository leaves the config, and
-past 2000 entries. `merge-captain run --dry-run`, `--repo` and `--pr` read both
+past 2000 entries. A time that is not a finite, readable moment drops its entry, and
+one dated in the future is read as now, so a damaged or hand-edited file can neither
+hide a PR for ever nor stop a run; unreadable or absurdly nested state reads as empty.
+`merge-captain run --dry-run`, `--repo` and `--pr` read both
 files but never write them, so a manual run does not disturb the schedule.
 
 Pull requests the run did not get to are listed in its output as `skipped` with the

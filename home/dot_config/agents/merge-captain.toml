@@ -8,9 +8,17 @@
 # merged, whatever is written here.
 # allow_no_checks: true lets a repository with no CI at all merge; otherwise a
 # pull request that reports no checks waits.
+# max_prs_per_repo: optional; overrides [limits] max_prs_per_repo for this repository.
 
 [limits]
-max_prs_per_run = 6
+# Caps count only pull requests that need a decision: a draft, a held one or one
+# from an author not listed below costs nothing. Live repositories are walked
+# before dry-run ones, each group starting where the last run left off, so a
+# repository late in this file still gets its turn.
+max_prs_per_run = 20
+# A separate budget, so reporting on dry-run repositories never starves live work.
+max_dry_prs_per_run = 8
+max_prs_per_repo = 4
 max_reviews_per_run = 2
 max_merges_per_hour = 6
 review_timeout_s = 300

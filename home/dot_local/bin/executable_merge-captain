@@ -1734,11 +1734,13 @@ def walk_group(run, key, group, start, budget):
                 todo.append(pr)
         used, behind = 0, False
         for pr in sorted(todo, key=lambda p: lru_key(run, repo, p)):
-            if spent >= budget:
+            # The repository's own cap comes first: a pull request it would have turned away anyway was not
+            # left over by the run, and marking its repository behind would hand it the next run as well.
+            if used >= rc["max_prs_per_repo"]:
+                defer(run, cap.deferral(rc, pr, "repo-cap"))
+            elif spent >= budget:
                 defer(run, cap.deferral(rc, pr, "run-cap" if key == "live" else "dry-cap"))
                 behind = True
-            elif used >= rc["max_prs_per_repo"]:
-                defer(run, cap.deferral(rc, pr, "repo-cap"))
             else:
                 note(run, cap.process(rc, pr))
                 if cap.consumed:

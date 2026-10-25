@@ -190,7 +190,9 @@ A cap alone favours whatever comes first in the config, so the walk rotates.
 `rotation.json` in the state directory keeps, per group (live, dry-run), the
 repository the next run starts at; the walk wraps round the list and the cursor
 ends on the first repository that still had work the run could not reach (one
-stopped only by its own `max_prs_per_repo` has had its turn and is passed over).
+stopped only by its own `max_prs_per_repo` has had its turn and is passed over; the
+repository's cap is checked before the run's, so a repository that used its share
+exactly as the run budget ran out is not counted as left behind).
 Inside a repository, pull requests are taken least-recently-examined first, from
 `examined.json` (`repo#number` to the time the captain last spent a decision on it,
 oldest first for PRs it has never seen), so an old PR is not starved by newer ones.

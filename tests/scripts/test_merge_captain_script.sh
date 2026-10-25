@@ -2252,6 +2252,21 @@ want 0 run
 { [ "$(examined_count acme/b)" = 2 ] && [ "$(examined_count acme/c)" = 2 ]; } || fail "the flood starved its neighbours" "$(cat "$out")"
 [ "$(count ',repo-cap$' "$out")" = 26 ] || fail "26 of the flood should wait for another run" "$(cat "$out")"
 grep -q '^deferred: 26' "$out" || fail "deferred count" "$(cat "$out")"
+# A repository stopped by its own cap when the run budget ends has had its turn: the next run starts elsewhere.
+newcase
+REPOS="acme/a:live acme/b:live acme/c:live" fair_cfg max_prs_per_run=6 max_prs_per_repo=3 max_merges_per_hour=1000
+flood acme/a 1 6
+flood acme/b 21 26
+flood acme/c 41 46
+firsts=""
+for i in 1 2 3; do
+    at_minute "$i"
+    want 0 run
+    firsts="$firsts $(first_repo)"
+done
+[ "$firsts" = " acme/a acme/c acme/b" ] || fail "each repository should be first in line once, the one left out first" "$firsts"
+[ "$(examined_count acme/a)" = 6 ] || fail "acme/a should have been served in two of the three runs" "$(cat "$S/gh.log")"
+
 # A per-repository override beats the default.
 newcase
 REPOS="acme/a:live:7 acme/b:live" fair_cfg max_merges_per_hour=1000

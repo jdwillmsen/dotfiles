@@ -36,22 +36,48 @@ print(json.dumps({"session_id": "s", "cwd": cwd, "hook_event_name": "PreToolUse"
                   "tool_input": {key: value, "content": "x"} if key == "file_path" else {key: value}}))
 PY
 }
+payload_json() {  # tool cwd tool_input-as-JSON: for a call that needs more than one key
+    python3 -I - "$@" <<'PY'
+import json, sys
+tool, cwd, tool_input = sys.argv[1:4]
+print(json.dumps({"session_id": "s", "cwd": cwd, "hook_event_name": "PreToolUse", "tool_name": tool,
+                  "tool_input": json.loads(tool_input)}))
+PY
+}
+expect_blocked() {  # description; the call is in $tmp/in
+    run_hook_stdin <"$tmp/in"
+    [ "$rc" = 2 ] || fail "$1 should be blocked, exit $rc" "$(cat "$errf")"
+    grep -q '^guard-delivery-state: blocked' "$errf" || fail "$1: no explanation on stderr" "$(cat "$errf")"
+    [ ! -s "$tmp/out" ] || fail "$1: a block must not print on stdout"
+}
+expect_allowed() {
+    run_hook_stdin <"$tmp/in"
+    [ "$rc" = 0 ] || fail "$1 should be allowed, exit $rc" "$(cat "$errf")"
+    [ ! -s "$errf" ] || fail "$1: allowed calls are silent" "$(cat "$errf")"
+}
 blocked() {  # description, tool, key, value [cwd]
     local what="$1"
     shift
     payload "$@" >"$tmp/in"
-    run_hook_stdin <"$tmp/in"
-    [ "$rc" = 2 ] || fail "$what should be blocked, exit $rc" "$(cat "$errf")"
-    grep -q '^guard-delivery-state: blocked' "$errf" || fail "$what: no explanation on stderr" "$(cat "$errf")"
-    [ ! -s "$tmp/out" ] || fail "$what: a block must not print on stdout"
+    expect_blocked "$what"
 }
 allowed() {
     local what="$1"
     shift
     payload "$@" >"$tmp/in"
-    run_hook_stdin <"$tmp/in"
-    [ "$rc" = 0 ] || fail "$what should be allowed, exit $rc" "$(cat "$errf")"
-    [ ! -s "$errf" ] || fail "$what: allowed calls are silent" "$(cat "$errf")"
+    expect_allowed "$what"
+}
+blockedj() {  # description, tool, cwd, tool_input JSON
+    local what="$1"
+    shift
+    payload_json "$@" >"$tmp/in"
+    expect_blocked "$what"
+}
+allowedj() {
+    local what="$1"
+    shift
+    payload_json "$@" >"$tmp/in"
+    expect_allowed "$what"
 }
 run_hook_stdin() {
     rc=0
@@ -207,15 +233,132 @@ allowed "status with an absolute tool path" Bash command "$H/.local/bin/merge-ca
 allowed "Read of another config file" Read file_path "$H/.config/agents/lanes.toml"
 allowed "Read of a lookalike directory" Read file_path "$H/.config/merge-captain-notes/x"
 allowed "Grep in a project" Grep path "$H/projects"
-allowed "Grep of the home directory" Grep path "$H"
-allowed "Grep for the words" Grep pattern "merge-captain/tokens"
-allowed "Grep with an unrelated glob" Grep glob "*.sh"
+allowed "Grep for the words" Grep pattern "merge-captain/tokens" "$tmp/work"
+allowed "Grep with an unrelated glob" Grep glob "*.sh" "$tmp/work"
 allowed "Glob in a project" Glob pattern "**/*.sh" "$tmp/work"
 allowed "Glob with a path elsewhere" Glob path "$H/.config/agents"
 allowed "a doc that mentions the tool" Bash command 'cat docs/merge-captain.md'
 allowed "searching for the tool's name" Bash command 'grep -rn merge-captain ~/projects'
 allowed "state, which is not the token directory" Bash command "ls $H/.local/state/merge-captain"
 allowed "a commit about the tool" Bash command 'git commit -m "feat(merge-captain): one token per owner"'
+
+# ── A line is split at every operator that starts a new command, including a lone & ──
+S2="$H/.local/state/merge-captain"
+blocked "auth then a backgrounded read" Bash command "merge-captain auth acme & cat $T/acme"
+blocked "status then a backgrounded read" Bash command "merge-captain status & cat ~/.config/merge-captain/tokens/acme"
+blocked "a backgrounded command then a state write" Bash command "true & rm ~/.local/state/merge-captain/log.jsonl"
+blocked "no spaces around &" Bash command "true&rm $S2/log.jsonl"
+blocked "a backgrounded command then a redirect" Bash command "sleep 1 & echo x >> $S2/reviews.jsonl"
+blocked "a read after |&" Bash command "true |& cat $T/acme"
+blocked "a write after |&" Bash command "echo x |& tee $S2/log.jsonl"
+blocked "status then a read on the next line" Bash command $'merge-captain status\ncat '"$T/acme"
+blocked "auth then a write on the next line" Bash command $'merge-captain auth acme\nrm '"$S2/log.jsonl"
+blocked "status & then a read on a later line" Bash command $'merge-captain status &\ncat '"$T/acme"
+blocked "a read after &> on the same line" Bash command "merge-captain status &> /tmp/o & cat $T/acme"
+allowed "a backgrounded sleep" Bash command 'sleep 1 & echo ok'
+allowed "status in the background" Bash command 'merge-captain status &'
+allowed "status with both streams to a file" Bash command 'merge-captain status &> /tmp/status.out'
+allowed "both streams appended" Bash command 'merge-captain status &>> /tmp/status.out'
+allowed "stderr to the null device" Bash command 'ls /tmp >& /dev/null'
+allowed "stderr joined, backgrounded" Bash command 'merge-captain status 2>&1 &'
+allowed "a pipe with stderr" Bash command 'echo hi |& cat'
+allowed "status then another harmless line" Bash command $'merge-captain status\necho done'
+
+# ── Paths that reach a protected location through a symlink ──
+mkdir -p "$tmp/via"
+ln -s "$H/.config/merge-captain" "$tmp/via/mc"
+ln -s "$H/.config/merge-captain/tokens" "$tmp/via/tk"
+ln -s "$H/.local/state/merge-captain" "$tmp/via/st"
+ln -s "$H/.config" "$tmp/via/cfg"
+ln -s "$H" "$tmp/via/home"
+ln -s "$H/.config/agents" "$tmp/via/agents"
+for tool in Read Write Edit MultiEdit; do
+    blocked "$tool through a link to the config directory" "$tool" file_path "$tmp/via/mc/tokens/jdwlabs"
+    blocked "$tool through a link to the tokens" "$tool" file_path "$tmp/via/tk/jdwlabs"
+    blocked "$tool by a relative path through a link" "$tool" file_path "via/mc/tokens/jdwlabs" "$tmp"
+    blocked "$tool through a link and .." "$tool" file_path "$tmp/via/tk/../tokens/jdwlabs"
+    blocked "$tool through a link to the config root" "$tool" file_path "$tmp/via/cfg/merge-captain/tokens/jdwlabs"
+done
+for tool in Write Edit MultiEdit; do
+    blocked "$tool through a link to the state directory" "$tool" file_path "$tmp/via/st/reviews.jsonl"
+done
+allowed "Read through a link to something harmless" Read file_path "$tmp/via/agents/other.toml"
+allowed "Read of a plain path" Read file_path "$tmp/work/notes.txt"
+allowed "Write through a link to the home directory" Write file_path "$tmp/via/home/projects/x.txt"
+blocked "Grep through a link to the config root" Grep path "$tmp/via/cfg"
+blocked "Glob through a link to the home directory" Glob path "$tmp/via/home"
+
+# ── A recursive search from the config directory or above reaches the tokens ──
+for cmd in \
+    'grep -r foo ~/.config' 'grep -rn foo ~/.config/' 'grep -R secret "$HOME/.config"' 'grep --recursive foo ~' \
+    'grep -r foo ~' 'grep -r foo $HOME' 'grep -ri foo ${HOME}' "grep -r foo $tmp" 'grep -r foo /' \
+    "grep -r -e foo $H/.config" 'egrep -r foo ~' 'rg foo ~' 'rg -l secret ~/.config' 'ag foo ~' 'fd token ~' \
+    'find ~ -name x' 'find ~/.config -exec cat {} +' "find $H/.config -print" "find $H -name '*.toml'" \
+    'find -L ~ -type f' 'find / -name x' \
+    'tar czf /tmp/x.tgz ~/.config' 'tar -czf /tmp/x.tgz ~' "tar cf - $H/.config" 'tar --create -f /tmp/x ~' \
+    'rsync -a ~/.config/ /tmp/backup' 'rsync --recursive ~ /tmp/b' 'cp -r ~/.config /tmp/x' 'cp -a ~ /tmp/x' \
+    'cp --recursive -t /tmp/x ~/.config' 'ls -R ~' "ls -laR $H/.config" 'du -sh ~' 'du ~/.config' 'tree ~' \
+    'zip -r /tmp/x.zip ~/.config' 'grep -r foo ~/.config/*' 'grep -r foo ~/.c*' "grep -r foo $H/.[a-z]*" \
+    "grep -r foo $tmp/*" "bash -c 'grep -r foo ~/.config'" 'sudo grep -r foo ~' 'time find ~ -name x' \
+    'true && grep -r foo ~' 'true & grep -r foo ~'; do
+    blocked "recursive: $cmd" Bash command "$cmd" "$tmp/work"
+done
+grep -q 'aim it at the project directory' "$errf" || fail "the block does not say how to search instead" "$(cat "$errf")"
+for cmd in 'rg foo' 'rg foo .' 'grep -r foo' 'grep -r foo .' 'find . -name x' 'find' 'du -sh' 'tree' 'ls -R' \
+    'cd ~ && grep -r foo .' 'cd && rg foo' 'cd ~/.config; find . -type f' 'cd $HOME/.config && grep -r pw *' \
+    'cd .. && tree'; do
+    blocked "no path from the home directory: $cmd" Bash command "$cmd" "$H"
+done
+blocked "after cd into the config directory" Bash command 'cd .config && rg foo' "$H"
+blocked "after cd .. to the home directory" Bash command 'cd .. && grep -r foo' "$H/projects"
+blocked "no path from a directory above the home directory" Bash command 'grep -r foo' "$tmp"
+allowed "no path from a project" Bash command 'rg foo' "$H/projects/app"
+allowed "a project path from the home directory" Bash command 'grep -r foo ./src' "$H"
+allowed "a find in a project from the home directory" Bash command "find ./src -name '*.ts'" "$H"
+allowed "grep -r in a project" Bash command 'grep -r foo ./src' "$tmp/work"
+allowed "grep -rn in a project by absolute path" Bash command "grep -rn foo $H/projects/app/src"
+allowed "rg in a project" Bash command 'rg foo ./src' "$tmp/work"
+allowed "rg with a project directory" Bash command "rg -l foo $H/projects"
+allowed "find in a project" Bash command "find $H/projects -name '*.ts' -exec ls {} +" "$tmp/work"
+allowed "find with no path in a project" Bash command "find . -name '*.ts'" "$tmp/work"
+allowed "du in a project" Bash command 'du -sh ./build' "$tmp/work"
+allowed "tree in a project" Bash command 'tree ./src' "$tmp/work"
+allowed "ls -R in a project" Bash command 'ls -R' "$tmp/work"
+allowed "cp -r a project directory" Bash command 'cp -r ./src /tmp/copy' "$tmp/work"
+allowed "cp -r into the home directory" Bash command 'cp -r ./src ~' "$tmp/work"
+allowed "rsync a project into the home directory" Bash command 'rsync -a ./src/ ~/backup/' "$tmp/work"
+allowed "tar a project" Bash command 'tar czf /tmp/out.tgz ./src' "$tmp/work"
+allowed "tar extracted into the home directory" Bash command 'tar xzf /tmp/in.tgz -C ~' "$tmp/work"
+allowed "a flat listing of the home directory" Bash command 'ls -la ~' "$tmp/work"
+allowed "a flat listing of ~/.config" Bash command 'ls ~/.config' "$tmp/work"
+allowed "grep of one file under ~/.config" Bash command 'grep foo ~/.config/agents/lanes.toml' "$tmp/work"
+allowed "a recursive search of the non-hidden entries of ~" Bash command 'grep -r foo ~/*' "$tmp/work"
+allowed "git grep" Bash command 'git grep foo' "$H"
+allowed "a commit message that names the tools" Bash command 'git commit -m "fix: grep -r ~ was slow"' "$H"
+
+# ── Grep and Glob rooted at or above the token directory, with no scope, reach it ──
+blocked "Grep with no path from the home directory" Grep pattern foo "$H"
+blocked "Grep with no path from above the home directory" Grep pattern foo "$tmp"
+blocked "Grep with no path from the config directory" Grep pattern foo "$H/.config"
+blocked "Grep of the home directory" Grep path "$H" "$tmp/work"
+blocked "Grep of ~" Grep path "~" "$tmp/work"
+blocked "Grep of \$HOME" Grep path '$HOME' "$tmp/work"
+blocked "Grep of the root" Grep path "/" "$tmp/work"
+blocked "Glob with no path from the home directory" Glob pattern "**/*.sh" "$H"
+blocked "Glob of the home directory" Glob path "$H" "$tmp/work"
+blockedj "Grep of ~ with a glob that is everywhere" Grep "$tmp/work" "{\"path\":\"$H\",\"glob\":\"*.sh\",\"pattern\":\"x\"}"
+blockedj "Grep of ~ with a glob into the config" Grep "$tmp/work" "{\"path\":\"$H\",\"glob\":\".config/**\"}"
+blockedj "Grep with no path and an unscoped glob" Grep "$H" '{"glob":"**/*.toml","pattern":"x"}'
+blockedj "Glob of ~ with a recursive pattern" Glob "$tmp/work" "{\"path\":\"$H\",\"pattern\":\"**/*\"}"
+blockedj "Glob of ~ into the config" Glob "$tmp/work" "{\"path\":\"$H\",\"pattern\":\".config/**/*\"}"
+blockedj "Glob with an absolute pattern over ~" Glob "$H" "{\"pattern\":\"$H/*\"}"
+allowed "Grep with no path from a project" Grep pattern foo "$H/projects/app"
+allowedj "Grep of ~ scoped to projects" Grep "$tmp/work" "{\"path\":\"$H\",\"glob\":\"projects/**/*.ts\",\"pattern\":\"x\"}"
+allowedj "Grep of ~ scoped to one file" Grep "$tmp/work" "{\"path\":\"$H\",\"glob\":\"src/a.ts\",\"pattern\":\"x\"}"
+allowedj "Glob of ~ scoped to projects" Glob "$tmp/work" "{\"path\":\"$H\",\"pattern\":\"projects/**/*.sh\"}"
+allowedj "Glob with an absolute pattern in projects" Glob "$H" "{\"pattern\":\"$H/projects/**/*.sh\"}"
+allowed "Grep of a project" Grep path "$H/projects" "$tmp/work"
+allowed "Glob of a project" Glob path "$H/projects/app" "$H"
 
 # XDG_CONFIG_HOME moves the config directory, and with it the tokens.
 mkdir -p "$tmp/xdgc/merge-captain/tokens"
@@ -253,6 +396,26 @@ mkdir -p "$tmp/empty"
 allowed "an ordinary Bash call, builtins only" Bash command 'ls -la /tmp'
 allowed "an ordinary Write, builtins only" Write file_path /tmp/x
 allowed "an ordinary Edit, builtins only" Edit file_path "$H/projects/app/src/main.ts"
+unset HOOK_PATH
+
+# ── ...and a file tool resolves links only when it has to ──
+mkdir -p "$tmp/stubbin"
+cat >"$tmp/stubbin/realpath" <<STUB
+#!/bin/sh
+echo call >>"$tmp/realpath.calls"
+exec /usr/bin/realpath "\$@"
+STUB
+chmod +x "$tmp/stubbin/realpath"
+HOOK_PATH="$tmp/stubbin:/usr/bin:/bin"
+forks() { if [ -f "$tmp/realpath.calls" ]; then wc -l <"$tmp/realpath.calls"; else echo 0; fi; }
+rm -f "$tmp/realpath.calls"
+allowed "an ordinary Bash call" Bash command 'ls -la ./src && git status' "$tmp/work"
+allowed "a Bash call that names a project path" Bash command "cat $H/projects/app/src/main.ts" "$tmp/work"
+allowed "a Bash call that searches a project" Bash command 'grep -rn foo ./src' "$tmp/work"
+allowed "an ordinary Read" Read file_path "$tmp/work/notes.txt"
+allowed "an ordinary relative Edit" Edit file_path "src/main.ts" "$tmp/work"
+[ "$(forks)" = 0 ] || fail "an ordinary call started realpath $(forks) time(s)"
+blocked "a Read through a link" Read file_path "$tmp/via/mc/tokens/jdwlabs"
 unset HOOK_PATH
 
 # ── A large payload that names a protected word is still judged quickly and correctly ──

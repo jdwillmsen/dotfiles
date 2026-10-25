@@ -225,15 +225,30 @@ A `waiting` for `quota` or `review-unavailable` costs nothing; `blocked` with
   those paths, and shell redirects, `tee`, `sed -i`, `cp`, `mv`, `rm` and similar
   aimed at them. It also refuses Read, Write, Edit, Grep and Glob on the token
   directory (`~/.config/merge-captain`, `MERGE_CAPTAIN_TOKENS`, and `XDG_CONFIG_HOME`
-  where set), a Grep or Glob rooted at `~/.config`, and any Bash command that mentions
-  the directory in any way (`cat`, `cp`, `ls`, `grep`, `tar`, `find`, `echo >` ...),
-  except a plain `merge-captain auth` or `merge-captain status`. It reads command
-  text, so it stops accidents and prompt-injected shortcuts inside Claude Code only.
-  It does not stop a determined process running as the same user (a script, another
-  tool, a glob or variable that hides the path, a search rooted at `~`), and nothing
-  in these files can: a separate unix account for the captain, its state and its
-  tokens is the real fix (JDW-209). Pause and resume go through
-  `merge-captain pause|resume`, which the hook allows.
+  where set), and any Bash command that mentions the directory in any way (`cat`,
+  `cp`, `ls`, `grep`, `tar`, `find`, `echo >` ...), except a plain
+  `merge-captain auth` or `merge-captain status`. A line is split at newlines, `;`,
+  `&&`, `||`, `|`, `|&` and a lone `&` before each part is judged, so a backgrounded
+  `status & cat <token>` is refused; `&>`, `>&` and `2>&1` stay redirects. Paths are
+  resolved through symlinks before they are judged, so a link into the token directory
+  or the state directory does not hide it.
+- The same hook also refuses anything that would search *into* the token directory
+  without naming it: a recursive Bash command (`grep -r|-R`, `rg`, `ag`, `fd`, `find`,
+  `du`, `tree`, `ls -R`, `cp -r`, `rsync -r`, `zip -r`, `tar` when creating) whose
+  target is `~/.config`, the token directory, `~`, a parent of `~` or `/`, whether
+  spelled out, as a wildcard that could match one of them (`~/.c*`, `~/.config/*`) or
+  implied by running from there with no path (also after a `cd`). Grep and Glob are
+  treated the same way: no `path`, or a `path` of `~`, `$HOME` or any parent of the
+  token directory, is refused unless the call's `glob` (Grep) or `pattern` (Glob) starts
+  with a literal directory that stays inside a project (`projects/**/*.ts`). The
+  trade-off is that a Grep or Glob with a bare `*.ts` glob cannot start at `~`; give it
+  the project directory instead. Plain `grep -r foo ./src` and a search rooted in any
+  project directory are untouched. It reads command text, so it stops accidents and
+  prompt-injected shortcuts inside Claude Code only. It does not stop a determined
+  process running as the same user (a script, another tool, a variable or command
+  substitution that hides the path), and nothing in these files can: a separate unix
+  account for the captain, its state and its tokens is the real fix (JDW-209). Pause
+  and resume go through `merge-captain pause|resume`, which the hook allows.
 - If the repository's ruleset requires an approving review, the merge is refused
   and shows as `blocked`; the captain does not approve its own reviews.
 - `opencode` reviewers are off by default. Findings, 2026-10-23: a plain

@@ -10,13 +10,19 @@ Design: `docs/superpowers/specs/2026-10-23-merge-captain-design.md`.
 `merge-captain.timer` fires every 15 minutes and runs `merge-captain run`. Every `gh`
 call for a repository uses its owner's saved token, or the default `gh` login when
 that owner has none (see "Giving the captain its own tokens"); an owner whose token
-file is unsafe or expired is skipped or waits before any call is made. For each open
-pull request in a configured repository, in order, and ending at the first step that
-fails:
+file is unsafe or expired is skipped or waits before any call is made. Before
+anything else a run reads `gh api rate_limit` (free) for each owner; an owner with
+under 500 REST or GraphQL calls left is skipped as `skipped` `api-budget` (logged
+once), and a run in which every owner is low does nothing.
 
-1. Skip drafts, `hold` / `no-agent-merge` labels, authors outside the allow-list,
-   a base that is not the default branch, and anything past a cap or the run
-   deadline.
+Repositories are walked live first, then dry-run, each group starting where the
+last run left off (see "Fair rotation"). For each open pull request in a
+configured repository, ending at the first step that fails:
+
+1. Skip drafts, `hold` / `no-agent-merge` labels, authors outside the allow-list
+   and a base that is not the default branch. This runs on the list data alone,
+   before any per-PR call, and costs no cap. Anything past a cap or the run
+   deadline waits too (`run-cap`, `dry-cap`, `repo-cap`, `deadline`).
 2. Classify with `change-class`; a failed classification skips the PR. The head is
    read again afterwards and must be the one the gates evaluated, otherwise the PR
    waits (`head moved during classification`).
@@ -55,8 +61,15 @@ failure, because a failure kind feeds the lane cooldown that all dispatch shares
 ## Config
 
 `~/.config/agents/merge-captain.toml` (source `home/dot_config/agents/merge-captain.toml`).
-`[limits]` holds the caps: PRs per run (6), reviewer calls per run (2, failed
-calls included), merges per hour (6), review timeout (300 s), largest diff read.
+`[limits]` holds the caps: PRs per run (`max_prs_per_run`, 20), dry-run PRs per run
+(`max_dry_prs_per_run`, 8), PRs per repository per run (`max_prs_per_repo`, 4, and a
+`[[repo]]` may set its own), reviewer calls per run (2, failed calls included),
+merges per hour (6), review timeout (300 s), largest diff read. The PR caps count
+only pull requests that went through classification, gates, review or merge, so a
+draft or a held PR never uses them; the run cap counts live repositories only and
+the dry cap dry-run ones, so reporting on dry-run repositories cannot starve live
+work. Under `--dry-run` everything is dry and `--max-prs` (default
+`max_prs_per_run`) is its one budget.
 After 20 minutes a run starts no reviewer call, label write, merge or new PR
 (`deadline`; a review that finished is still commented and recorded, and merged
 next run). At 25 minutes an alarm ends the run: the running child is killed, the
@@ -169,6 +182,26 @@ to `mode = "off"` or `merge-captain pause`.
 
 Flipping back is the same edit; the next run obeys it.
 
+## Fair rotation
+
+A cap alone favours whatever comes first in the config, so the walk rotates.
+`rotation.json` in the state directory keeps, per group (live, dry-run), the
+repository the next run starts at; the walk wraps round the list and the cursor
+ends on the first repository that still had work the run could not reach (one
+stopped only by its own `max_prs_per_repo` has had its turn and is passed over).
+Inside a repository, pull requests are taken least-recently-examined first, from
+`examined.json` (`repo#number` to the time the captain last spent a decision on it,
+oldest first for PRs it has never seen), so an old PR is not starved by newer ones.
+Entries are dropped when a PR closes, when its repository leaves the config, and
+past 2000 entries. `merge-captain run --dry-run`, `--repo` and `--pr` read both
+files but never write them, so a manual run does not disturb the schedule.
+
+Pull requests the run did not get to are listed in its output as `skipped` with the
+cap that held them and counted in `deferred:`, but are not written to the log; the
+final `run` line carries the count. `merge-captain status` shows the cursors
+(`rotation`), the per-repository caps (`repo_caps`) and the deferred count of the
+last run.
+
 ## Reading the log
 
 `~/.local/state/merge-captain/log.jsonl`: one line per decision with `at, run,
@@ -183,6 +216,9 @@ Other files in the state directory, all written by the captain only:
   together with the ledgers (below).
 - `attempts.jsonl`: failed review calls, for the 6-hour backoff.
 - `human.jsonl`: which `needs-human` comments were posted, so each head gets one.
+- `rotation.json` and `examined.json`: the fair-rotation cursors and examination
+  times above; each is replaced whole and kept 0600. Deleting either only resets the
+  rotation.
 
 ```
 tail -n 20 ~/.local/state/merge-captain/log.jsonl

@@ -53,7 +53,9 @@ executable), `MERGE_CAPTAIN_PACE` (agent-pace), `MERGE_CAPTAIN_EVAL`
 
 ```toml
 [limits]
-max_prs_per_run = 6
+max_prs_per_run = 20       # live PRs that reach classification, gates, review or merge
+max_dry_prs_per_run = 8    # the same for dry-run repos, a budget of its own
+max_prs_per_repo = 4       # per repo per run; a [[repo]] may override it
 max_reviews_per_run = 2   # reviewer calls, failed ones included
 max_merges_per_hour = 6
 review_timeout_s = 300
@@ -89,8 +91,9 @@ what would have happened and why. A repo not listed is ignored.
 ### Per pull request (in this order; the first failing step ends it)
 
 1. Skip when: draft; label `hold` or `no-agent-merge`; author not allow-listed;
-   base is not the default branch; the kill switch exists; a per-run or hourly
-   cap is spent; the 20 minute soft run deadline has passed. Record the reason in
+   base is not the default branch (all judged from the list data before any per-PR
+   call, and none of them spends a cap); the kill switch exists; a per-run,
+   per-repo or hourly cap is spent; the 20 minute soft run deadline has passed. Record the reason in
    the run output. After the soft deadline no reviewer call, label write or merge
    starts either (`waiting` `deadline`); a comment for a review already paid for
    is still posted. At 25 minutes an alarm kills whatever is running, writes the
@@ -256,6 +259,25 @@ account that owns them; the guard hook stops Claude Code's file tools and shell
 commands from touching the directory by accident or injection, and a separate
 unix account for the captain is the stronger fix.
 
+### Fair rotation and the API budget
+
+Live repositories are walked before dry-run ones; each group has its own budget
+(`max_prs_per_run`, `max_dry_prs_per_run`) and its own cursor in `rotation.json`
+(repo name per group, plus the last run's deferred count), written atomically and
+0600. A run starts at the cursor, wraps, and leaves the cursor on the first repo
+that still had reachable work; a repo stopped only by `max_prs_per_repo` counts as
+serviced. Within a repo PRs run least-recently-examined first
+(`examined.json`, `repo#number` to time; never-seen first, then by `updatedAt`;
+pruned of closed PRs and unconfigured repos, at most 2000 entries). PRs the run
+could not reach are shown as `skipped` (`run-cap`, `dry-cap`, `repo-cap`) and
+counted as `deferred`, not logged. Manual `--dry-run`, `--repo` and `--pr` runs
+never write either file.
+
+Before walking, `gh api rate_limit` is read once per owner (it is free). A budget
+belongs to a token, so an owner whose REST or GraphQL `remaining` is under 500 is
+skipped (`skipped` `api-budget`, one log line), and only a run with every owner low
+stops outright. An unreadable answer is not treated as low.
+
 ### State and log
 
 `MERGE_CAPTAIN_STATE` (default `~/.local/state/merge-captain/`): `PAUSED`
@@ -264,7 +286,8 @@ unix account for the captain is the stronger fix.
 `log.jsonl.1` above 5 MB, one previous file kept), `reviews.jsonl` (the only
 review evidence a merge trusts, and only with the ledgers behind it: `repo, pr,
 head, tier, verdict, lane, assignment, at`, written with fsync), `attempts.jsonl` (failed review calls, for the backoff),
-`human.jsonl` (`needs-human` comments already posted), `lock` (flock; a second
+`human.jsonl` (`needs-human` comments already posted), `rotation.json` and
+`examined.json` (fair rotation, below), `lock` (flock; a second
 run exits 0 quietly with `busy`). Rate caps count `merged` lines in the last 60
 minutes across both log files. No diff text, comment bodies or credentials in
 the log. The directory is created 0700 and its files 0600 (tightened if they were
@@ -285,6 +308,7 @@ says.
 run: 2026-10-23T20:00:00Z
 mode_live: 1
 mode_dry: 11
+deferred: 0
 decisions[N]{repo,pr,tier,action,reason}:
   jdwillmsen/dotfiles,150,R1,merged,"review approve by claude-sonnet"
 ```
@@ -327,7 +351,11 @@ exact repo, PR and head is required; a head that moves during classification
 waits; any failing check blocks unless ignored and no checks waits; reviewer
 calls (not invocations; a provider that cannot run takes none) are capped, the
 soft deadline stops new reviews, labels and merges, the hard deadline kills a hung
-reviewer yet still logs the run and frees the lock, failed reviews are
+reviewer yet still logs the run and frees the lock, pre-filtered PRs spend no cap
+and cost no per-PR call, a flood in one repo cannot starve the others, dry-run
+repos never use the live budget, the rotation cursor survives a restart and
+every PR is examined within enough runs, `examined.json` is pruned and bounded, the
+API-budget guard stops the run, failed reviews are
 `interrupted` and back off after two per head; the review comment precedes the
 record and a failed comment records nothing; an approval line without a matching
 assignment and completed `record` outcome is reviewed again; the implementer

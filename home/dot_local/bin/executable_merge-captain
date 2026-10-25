@@ -1698,10 +1698,12 @@ def lru_key(run, repo, pr):
 def walk_group(run, key, group, start, budget):
     """Service one group of repositories from `start`, wrapping round, within `budget` expensive decisions. The
     cursor ends at the first repository that still had work the run could not reach, so each run picks up where
-    the last one ran out. A repository stopped only by its own cap has had its turn and is passed over."""
+    the last one ran out. A repository stopped by its own cap, or cut short by the run cap after being served, has
+    had its turn and is passed over."""
     cap, nothing = run["cap"], run["nothing"]
     resume, spent = None, 0
-    for rc in rotate(group, start):
+    walk = rotate(group, start)
+    for index, rc in enumerate(walk):
         repo = rc["name"]
         run["cursor"][key] = resume or repo
         owner = repo.split("/")[0]
@@ -1732,7 +1734,7 @@ def walk_group(run, key, group, start, budget):
                 note(run, cap.process(rc, pr))
             else:
                 todo.append(pr)
-        used, behind = 0, False
+        used, behind, run_limited = 0, False, False
         for pr in sorted(todo, key=lambda p: lru_key(run, repo, p)):
             # The repository's own cap comes first: a pull request it would have turned away anyway was not
             # left over by the run, and marking its repository behind would hand it the next run as well.
@@ -1740,7 +1742,7 @@ def walk_group(run, key, group, start, budget):
                 defer(run, cap.deferral(rc, pr, "repo-cap"))
             elif spent >= budget:
                 defer(run, cap.deferral(rc, pr, "run-cap" if key == "live" else "dry-cap"))
-                behind = True
+                behind = run_limited = True
             else:
                 note(run, cap.process(rc, pr))
                 if cap.consumed:
@@ -1752,8 +1754,11 @@ def walk_group(run, key, group, start, budget):
                     run["deferred_n"] += 1
                     behind = True
         if behind and resume is None:
-            resume = repo
-    run["cursor"][key] = resume or (rotate(group, start)[0]["name"] if group else None)
+            # A repository the shared cap cut short after serving some of it has had its turn; one it got
+            # none of (the budget was already spent) keeps the cursor, and so do the hourly cap, the deadline
+            # and the kill switch, which stop the run rather than ration it.
+            resume = walk[(index + 1) % len(walk)]["name"] if run_limited and used else repo
+    run["cursor"][key] = resume or (walk[0]["name"] if walk else None)
 
 
 def cmd_run(args):

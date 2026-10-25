@@ -2183,6 +2183,20 @@ cursor() {  # group: the repository the next walk of that group starts at
     python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], "-"))' "$STATE/rotation.json" "$1"
 }
 
+# A repository that eats the shared cap after being served moves the cursor on, so it cannot hold the walk.
+newcase
+REPOS="acme/a:live acme/b:live acme/c:live" fair_cfg max_prs_per_run=4 max_prs_per_repo=100 max_merges_per_hour=1000
+flood acme/a 1 6
+flood acme/b 21 22
+flood acme/c 31 32
+at_minute 1
+want 0 run
+[ "$(examined_count acme/a)" = 4 ] || fail "the shared cap did not stop the first repository at 4" "$(cat "$out")"
+[ "$(cursor live)" = acme/b ] || fail "a repository the shared cap cut short kept the cursor" "$(cat "$STATE/rotation.json")"
+at_minute 2
+want 0 run
+[ "$(first_repo)" = acme/b ] || fail "the next run did not start at the next repository" "$(cat "$out")"
+
 # Twelve, three and two open pull requests, caps too small for one run to reach them all.
 newcase
 REPOS="acme/a:live acme/b:live acme/c:live" fair_cfg max_prs_per_run=5 max_prs_per_repo=3 max_merges_per_hour=1000
@@ -2197,14 +2211,14 @@ want 0 run
 grep -qE '^deferred: [1-9]' "$out" || fail "a run with work left over should say how much" "$(cat "$out")"
 expect 4 skipped repo-cap
 expect 23 skipped run-cap
-[ "$(cursor live)" = acme/b ] || fail "the cursor should rest on the repository the run ran out in" "$(cat "$STATE/rotation.json")"
+[ "$(cursor live)" = acme/c ] || fail "the cursor should pass the repository the shared cap cut short" "$(cat "$STATE/rotation.json")"
 [ "$(stat -c %a "$STATE/rotation.json" "$STATE/examined.json" | sort -u)" = 600 ] || fail "fairness state is not 0600"
 [ -z "$(find "$STATE" -name '*.tmp')" ] || fail "an atomic write left a temporary file behind"
 if grep -qE 'repo-cap|run-cap' "$STATE/log.jsonl"; then fail "a deferred pull request was written to the log"; fi
-# A new process reads the cursor: the second run opens with the repository the first ran out in.
+# A new process reads the cursor: the second run opens with the repository after the one the first ran out in.
 at_minute 2
 want 0 run
-[ "$(first_repo)" = acme/b ] || fail "the cursor did not survive a restart" "$(cat "$out")"
+[ "$(first_repo)" = acme/c ] || fail "the cursor did not survive a restart" "$(cat "$out")"
 for i in 3 4 5 6 7 8 9 10 11 12; do
     at_minute "$i"
     want 0 run

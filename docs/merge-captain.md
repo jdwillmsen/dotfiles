@@ -89,8 +89,18 @@ by default); every lane on another provider is passed to `agent-pace assign` as
 other-family lane is left for an R1 review it asks once more with
 `--allow-same-family` and the comment says "same-family reviewer". Each
 `[[repo]]` has `mode` (`live`, `dry-run`, `off`), `max_tier` (`R0`..`R2`) and
-optionally `allow_no_checks`. A repo not listed is ignored. A malformed file
-stops the run with an error, never a default.
+optionally `allow_no_checks` and `require_token` (a boolean, default `false`). A repo
+not listed is ignored. A malformed file stops the run with an error, never a default.
+
+`require_token = true` holds a repository until its owner has a token file: with
+none, the repository is never touched (no `gh` call, not even a listing) and gets
+one `waiting` `token-required` row per run, live or dry-run, which does not make
+the run exit 1. `status` lists it under `token_required` with `require_token: yes`
+and the owner's identity, and warns `<owner>: token required but missing`. Save the
+owner's token (below) and the next run processes the repository, with no config
+edit. The option only withholds: an insecure or expired token keeps its own
+`insecure-token-file` / `token-expired` row, and a repository without it behaves as
+before, on the default login.
 
 ## Kill switch
 

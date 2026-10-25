@@ -50,6 +50,8 @@ TOKENS = Path(os.environ.get("MERGE_CAPTAIN_TOKENS")
               or Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "merge-captain/tokens")
 PAUSED = STATE / "PAUSED"
 LOG = STATE / "log.jsonl"
+ROTATION = STATE / "rotation.json"
+EXAMINED = STATE / "examined.json"
 REVIEWS = STATE / "reviews.jsonl"
 ATTEMPTS = STATE / "attempts.jsonl"
 HUMAN = STATE / "human.jsonl"
@@ -61,9 +63,15 @@ MODES = ("live", "dry-run", "off")
 CEILINGS = ("R0", "R1", "R2")
 # Providers this tool can run headless. Which of them a review may use is the [reviewers] config.
 PROVIDERS = ("claudeAgent", "opencode")
-LIMIT_DEFAULTS = {"max_prs_per_run": 6, "max_reviews_per_run": 2, "max_merges_per_hour": 6,
-                  "review_timeout_s": 300, "max_diff_bytes": 150000}
+LIMIT_DEFAULTS = {"max_prs_per_run": 20, "max_dry_prs_per_run": 8, "max_prs_per_repo": 4, "max_reviews_per_run": 2,
+                  "max_merges_per_hour": 6, "review_timeout_s": 300, "max_diff_bytes": 150000}
+# Below this many calls left in either the REST or the GraphQL budget a run does nothing, so the captain never
+# spends the budget other tools on the same login are waiting on.
+API_BUDGET_MIN = 500
+# Enough for every open pull request of every listed repository many times over; past it the oldest entries go.
+EXAMINED_MAX = 2000
 SKIP_LABELS = ("hold", "no-agent-merge")
+LIST_LIMIT = 100
 SETTLE_S = 120
 GH_TIMEOUT_S = 60
 TOOL_TIMEOUT_S = 60
@@ -318,7 +326,11 @@ def load_config():
         no_checks = row.get("allow_no_checks", False)
         if not isinstance(no_checks, bool):
             die(EXIT_FAIL, f"repo {name}: allow_no_checks must be true or false, got {no_checks!r}")
-        repos.append({"name": name, "mode": mode, "max_tier": ceiling, "allow_no_checks": no_checks})
+        per_repo = row.get("max_prs_per_repo", limits["max_prs_per_repo"])
+        if not positive_int(per_repo):
+            die(EXIT_FAIL, f"repo {name}: max_prs_per_repo must be a positive integer, got {per_repo!r}")
+        repos.append({"name": name, "mode": mode, "max_tier": ceiling, "allow_no_checks": no_checks,
+                      "max_prs_per_repo": per_repo})
     return {"limits": limits, "allow": allow, "ignore": ignore, "providers": providers, "repos": repos}
 
 
@@ -754,7 +766,7 @@ class Captain:
         self.eval_bin = find_tool("MERGE_CAPTAIN_EVAL", "agent-eval")
         self.claude_bin = find_tool("MERGE_CAPTAIN_CLAUDE", "claude")
         self.opencode_bin = find_tool("MERGE_CAPTAIN_OPENCODE", "opencode", ".local/npm-bin")
-        self.examined = 0
+        self.consumed = False
         self.review_calls = 0
         self.started = time.monotonic()
         self.deadline_s = deadline_from_env("MERGE_CAPTAIN_DEADLINE_S", RUN_DEADLINE_S)
@@ -908,6 +920,46 @@ class Captain:
     def author_allowed(author, allow):
         login = Captain.author_login(author)
         return bool(login) and login in {entry.lower() for entry in allow}
+
+    def cheap_skip(self, repo, pr):
+        """Why a pull request needs no work, from the list data alone, or None. The run walks this before it
+        spends any of its caps, so a draft or a held pull request can never crowd out one that needs a decision.
+        The only call it may make is the repository's default branch, once per repository."""
+        if pr.get("isDraft"):
+            return "draft"
+        labels = {x.get("name") for x in pr.get("labels") or [] if isinstance(x, dict)}
+        for hold in SKIP_LABELS:
+            if hold in labels:
+                return f"label {hold}"
+        if not self.author_allowed(pr.get("author"), self.cfg["allow"]):
+            return "author-not-allowed"
+        if pr.get("baseRefName") != self.default_of(repo):
+            return "base-not-default"
+        return None
+
+    def deferral(self, rc, pr, reason):
+        """The decision row for a pull request the run did not get to. Shown, never logged: it is the same
+        outcome run after run until its turn comes, and logging it is what filled the log before."""
+        mode = "dry-run" if self.force_dry else rc["mode"]
+        return {"repo": rc["name"], "pr": pr["number"], "head": pr.get("headRefOid"), "tier": None,
+                "action": "skipped", "reason": reason, "mode": mode, "lane": None, "tags": []}
+
+    def api_low(self, repo):
+        """True when the owner's REST or GraphQL budget is under API_BUDGET_MIN. Reading it costs nothing. An
+        unreadable answer is not low: if GitHub is down the run's own calls will say so."""
+        self.repo, self.live = repo, False
+        try:
+            r = self.gh(["api", "rate_limit"])
+        except (Stop, Refused):
+            return False
+        try:
+            res = json.loads(r.out)["resources"]
+        except (ValueError, KeyError, TypeError):
+            return False
+        if not r.ok or not isinstance(res, dict):
+            return False
+        left = [(res.get(k) or {}).get("remaining") for k in ("core", "graphql")]
+        return any(isinstance(x, int) and not isinstance(x, bool) and x < API_BUDGET_MIN for x in left)
 
     def ticket_of(self, *texts):
         for t in texts:
@@ -1390,6 +1442,7 @@ class Captain:
              "mode": mode, "lane": None, "tags": []}
         self.trace = []
         self.pending = d
+        self.consumed = False
         try:
             self.decide(rc, pr, mode, d)
         except Stop as s:
@@ -1408,23 +1461,14 @@ class Captain:
             raise Stop("skipped", "repo-off")
         if PAUSED.exists():
             raise Stop("skipped", "paused")
-        if pr.get("isDraft"):
-            raise Stop("skipped", "draft")
-        labels = {x.get("name") for x in pr.get("labels") or [] if isinstance(x, dict)}
-        for hold in SKIP_LABELS:
-            if hold in labels:
-                raise Stop("skipped", f"label {hold}")
-        if not self.author_allowed(pr.get("author"), self.cfg["allow"]):
-            raise Stop("skipped", "author-not-allowed")
-        if pr.get("baseRefName") != self.default_of(repo):
-            raise Stop("skipped", "base-not-default")
+        skip = self.cheap_skip(repo, pr)
+        if skip:
+            raise Stop("skipped", skip)
         if self.live and self.merges_last_hour() >= self.limits["max_merges_per_hour"]:
             raise Stop("skipped", "hourly-cap")
         if self.past_deadline():
             raise Stop("skipped", "deadline")
-        if self.examined >= self.max_prs:
-            raise Stop("skipped", "run-cap")
-        self.examined += 1
+        self.consumed = True
 
         details = self.gh_json(["pr", "view", str(n), "--repo", repo, "--json",
                                 "number,title,state,isDraft,labels,author,baseRefName,headRefName,headRefOid,updatedAt,"
@@ -1531,7 +1575,7 @@ def ensure_state():
 
 
 def pr_fields():
-    return "number,title,state,isDraft,labels,author,baseRefName,headRefName,headRefOid"
+    return "number,title,state,isDraft,labels,author,baseRefName,headRefName,headRefOid,updatedAt"
 
 
 def mode_counts(repos, force_dry=False):
@@ -1545,6 +1589,152 @@ def decisions_block(rows):
     if not rows:
         return f"decisions[0]{{{keys}}}:\nsummary: 0 pull requests acted on"
     return toon({"decisions": rows})
+
+
+def read_state_json(path):
+    try:
+        j = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return j if isinstance(j, dict) else {}
+
+
+def load_rotation():
+    """The repository each group's next walk starts at, by name so a reordered config cannot misplace it."""
+    j = read_state_json(ROTATION)
+    out = {k: j[k] for k in ("live", "dry") if isinstance(j.get(k), str)}
+    out["deferred"] = j["deferred"] if isinstance(j.get("deferred"), int) and j["deferred"] >= 0 else 0
+    out["at"] = j.get("at") if isinstance(j.get("at"), str) else None
+    return out
+
+
+def load_examined():
+    """repo#number -> when the captain last spent a decision on it, as epoch seconds."""
+    out = {}
+    for k, v in read_state_json(EXAMINED).items():
+        t = parse_time(v)
+        if isinstance(k, str) and re.fullmatch(r"[^#\s]+#[0-9]+", k) and t is not None:
+            out[k] = t
+    return out
+
+
+def rotate(group, start):
+    names = [r["name"] for r in group]
+    i = names.index(start) if start in names else 0
+    return group[i:] + group[:i]
+
+
+def save_fairness(run, state):
+    """Rotation cursors and examination times, each swapped in whole. A pull request that is no longer open is
+    forgotten, and only for a repository whose whole list was read: a failed or truncated list says nothing
+    about what closed."""
+    examined = run["examined"]
+    configured = {r["name"] for r in run["cap"].cfg["repos"]}
+    for key in list(examined):
+        repo, _, n = key.rpartition("#")
+        if repo not in configured or (repo in run["open"] and int(n) not in run["open"][repo]):
+            del examined[key]
+    newest = sorted(examined.items(), key=lambda kv: kv[1], reverse=True)[:EXAMINED_MAX]
+    rot = {"live": run["cursor"].get("live") or state.get("live"), "dry": run["cursor"].get("dry") or state.get("dry"),
+           "deferred": run["deferred_n"], "at": run["id"]}
+    try:
+        write_private(EXAMINED, json.dumps({k: iso(v) for k, v in sorted(newest)}, indent=0) + "\n")
+        write_private(ROTATION, json.dumps({k: v for k, v in rot.items() if v is not None}) + "\n")
+    except OSError as e:
+        log(f"fairness state not saved: {e.strerror}")
+
+
+def check_api_budget(run, repos):
+    """True when the whole run is called off for want of API budget. A budget belongs to a token, and each owner
+    has its own, so an owner that is low is skipped alone and only a run with every owner low stops."""
+    cap = run["cap"]
+    first = {}
+    for rc in repos:
+        first.setdefault(rc["name"].split("/")[0], rc["name"])
+    for owner, repo in first.items():
+        if not cap.owner_block(repo) and cap.api_low(repo):
+            run["low_owners"].add(owner)
+            log(f"api budget low for {owner}")
+    if not first or run["low_owners"] != set(first):
+        return False
+    d = {**run["nothing"], "action": "skipped", "reason": "api-budget"}
+    cap.write_log(run["id"], d)
+    run["decisions"].append(d)
+    return True
+
+
+def note(run, d):
+    run["cap"].write_log(run["id"], d)
+    run["decisions"].append(d)
+
+
+def defer(run, d):
+    """A row for the output only: it is never logged, and counts as deferred."""
+    run["deferred"].append(d)
+    run["deferred_n"] += 1
+
+
+def lru_key(run, repo, pr):
+    return (run["examined"].get(f"{repo}#{pr['number']}", 0), str(pr.get("updatedAt") or ""), pr["number"])
+
+
+def walk_group(run, key, group, start, budget):
+    """Service one group of repositories from `start`, wrapping round, within `budget` expensive decisions. The
+    cursor ends at the first repository that still had work the run could not reach, so each run picks up where
+    the last one ran out. A repository stopped only by its own cap has had its turn and is passed over."""
+    cap, nothing = run["cap"], run["nothing"]
+    resume, spent = None, 0
+    for rc in rotate(group, start):
+        repo = rc["name"]
+        run["cursor"][key] = resume or repo
+        owner = repo.split("/")[0]
+        block = cap.owner_block(repo)
+        if block:
+            # Nothing can be listed without the owner's credential, so the repository gets one row.
+            run["failed_lists"] += 1
+            note(run, {**nothing, "repo": repo, "action": block[0], "mode": rc["mode"], "reason": block[1]})
+            continue
+        if owner in run["low_owners"]:
+            if owner not in run["budget_logged"]:
+                run["budget_logged"].add(owner)
+                note(run, {**nothing, "repo": repo, "action": "skipped", "mode": rc["mode"], "reason": "api-budget"})
+            continue
+        try:
+            prs = list_prs(cap, rc, run["args"])
+            skips = [cap.cheap_skip(repo, pr) for pr in prs]
+        except (Stop, Refused) as e:
+            run["failed_lists"] += 1
+            note(run, {**nothing, "repo": repo, "action": "error", "mode": rc["mode"],
+                       "reason": f"list-failed: {getattr(e, 'reason', e)}"})
+            continue
+        if run["args"].pr is None and len(prs) < LIST_LIMIT:
+            run["open"][repo] = {pr["number"] for pr in prs}
+        todo = []
+        for pr, skip in zip(prs, skips):
+            if skip:
+                note(run, cap.process(rc, pr))
+            else:
+                todo.append(pr)
+        used, behind = 0, False
+        for pr in sorted(todo, key=lambda p: lru_key(run, repo, p)):
+            if spent >= budget:
+                defer(run, cap.deferral(rc, pr, "run-cap" if key == "live" else "dry-cap"))
+                behind = True
+            elif used >= rc["max_prs_per_repo"]:
+                defer(run, cap.deferral(rc, pr, "repo-cap"))
+            else:
+                note(run, cap.process(rc, pr))
+                if cap.consumed:
+                    spent += 1
+                    used += 1
+                    run["examined"][f"{repo}#{pr['number']}"] = cap.now
+                else:
+                    # Held back by the hourly cap, the deadline or the kill switch: it was seen, not served.
+                    run["deferred_n"] += 1
+                    behind = True
+        if behind and resume is None:
+            resume = repo
+    run["cursor"][key] = resume or (rotate(group, start)[0]["name"] if group else None)
 
 
 def cmd_run(args):
@@ -1570,35 +1760,29 @@ def cmd_run(args):
     live, dry = mode_counts(repos, args.dry_run)
     head = {"run": run_id, "mode_live": live, "mode_dry": dry}
     nothing = {"repo": None, "pr": None, "head": None, "tier": None, "mode": None, "lane": None}
-    decisions, failed_lists, hard = [], 0, False
+    # A run that is narrowed by hand, or that only pretends, must not move the rotation or make a pull request look
+    # examined to the scheduled run that follows it.
+    persist = not (args.dry_run or args.repo or args.pr is not None)
+    run = {"cap": cap, "id": run_id, "args": args, "nothing": nothing, "decisions": [], "deferred": [], "deferred_n": 0,
+           "failed_lists": 0, "examined": load_examined(), "open": {}, "cursor": {}, "walked": False,
+           "low_owners": set(), "budget_logged": set()}
+    state = load_rotation()
+    groups = [("live", [r for r in repos if r["mode"] == "live" and not args.dry_run]),
+              ("dry", [r for r in repos if r["mode"] != "live" or args.dry_run])]
+    budgets = {"live": cap.max_prs,
+               "dry": cap.max_prs if args.dry_run else cap.limits["max_dry_prs_per_run"]}
+    hard = False
     arm_hard_deadline(cap.hard_deadline_s)
     try:
         if PAUSED.exists():
             cap.write_log(run_id, {**nothing, "action": "skipped", "reason": "paused"})
             head.update(paused=True, pause_reason=clean(PAUSED.read_text() or "no reason given", 120))
         else:
-            for rc in repos:
-                block = cap.owner_block(rc["name"])
-                if block:
-                    # Nothing can be listed without the owner's credential, so the repository gets one row.
-                    failed_lists += 1
-                    d = {**nothing, "repo": rc["name"], "action": block[0], "mode": rc["mode"], "reason": block[1]}
-                    cap.write_log(run_id, d)
-                    decisions.append(d)
-                    continue
-                try:
-                    prs = list_prs(cap, rc, args)
-                except (Stop, Refused) as e:
-                    failed_lists += 1
-                    d = {**nothing, "repo": rc["name"], "action": "error", "mode": rc["mode"],
-                         "reason": f"list-failed: {getattr(e, 'reason', e)}"}
-                    cap.write_log(run_id, d)
-                    decisions.append(d)
-                    continue
-                for pr in prs:
-                    d = cap.process(rc, pr)
-                    cap.write_log(run_id, d)
-                    decisions.append(d)
+            if not check_api_budget(run, repos):
+                run["walked"] = True
+                for key, group in groups:
+                    run["cursor"][key] = state.get(key)
+                    walk_group(run, key, group, state.get(key), budgets[key])
     except HardDeadline:
         hard = True
         log("hard deadline")
@@ -1609,14 +1793,22 @@ def cmd_run(args):
             d = cap.pending
             d["action"], d["reason"] = "waiting", "hard-deadline: stopped mid-way, check whether it merged"
             cap.write_log(run_id, d)
-            decisions.append(d)
+            run["decisions"].append(d)
     finally:
         disarm_hard_deadline()
+        decisions = run["decisions"]
         merged = sum(1 for d in decisions if d["action"] == "merged")
+        if persist and run["walked"]:
+            save_fairness(run, state)
         cap.write_log(run_id, {**nothing, "action": "run", "reason": f"{len(decisions)} decisions, {merged} merged"
+                                                                     + (f", {run['deferred_n']} deferred"
+                                                                        if run["deferred_n"] else "")
                                                                      + ("; hard deadline" if hard else "")})
         cap.close()
         lock.close()
+    failed_lists = run["failed_lists"]
+    decisions = decisions + run["deferred"]
+    head["deferred"] = run["deferred_n"]
     if hard:
         head["hard_deadline"] = True
     rows = [{"repo": d["repo"], "pr": d["pr"] if d["pr"] is not None else "-", "tier": d["tier"] or "-",
@@ -1632,8 +1824,8 @@ def list_prs(cap, rc, args):
         j = cap.gh_json(["pr", "view", str(args.pr), "--repo", repo, "--json", pr_fields()], "pull request")
         rows = [j] if isinstance(j, dict) else []
     else:
-        j = cap.gh_json(["pr", "list", "--repo", repo, "--state", "open", "--limit", "100", "--json", pr_fields()],
-                        "pull request list")
+        j = cap.gh_json(["pr", "list", "--repo", repo, "--state", "open", "--limit", str(LIST_LIMIT), "--json",
+                         pr_fields()], "pull request list")
         rows = j if isinstance(j, list) else []
     return [r for r in rows if isinstance(r, dict) and positive_int(r.get("number"))]
 
@@ -1687,6 +1879,11 @@ def cmd_status(args):
                 "limits": cfg["limits"], "authors": cfg["allow"], "reviewers": cfg["providers"],
                 "checks_ignored": cfg["ignore"]})
     out["repos"] = [{"name": r["name"], "mode": r["mode"], "max_tier": r["max_tier"]} for r in cfg["repos"]]
+    out["repo_caps"] = [{"name": r["name"], "max_prs_per_repo": r["max_prs_per_repo"]} for r in cfg["repos"]]
+    rot = load_rotation()
+    out["rotation"] = {"live_next": rot.get("live", "-"), "dry_next": rot.get("dry", "-"),
+                       "deferred_last_run": rot["deferred"], "as_of": rot["at"] or "-",
+                       "examined_tracked": len(load_examined())}
     out["owners"], out["warnings"] = owner_report(cfg["repos"], now_epoch())
     runs = [r for r in read_log() if r.get("action") == "run"][-5:]
     out["last_runs"] = [{"at": r.get("at"), "result": r.get("reason")} for r in reversed(runs)]
@@ -1934,7 +2131,8 @@ def build_parser():
     r.add_argument("--repo", action="append", metavar="O/R", help="only this configured repository (repeatable)")
     r.add_argument("--pr", type=positive, metavar="N", help="only this pull request (needs one --repo)")
     r.add_argument("--dry-run", action="store_true", help="treat every repository as dry-run")
-    r.add_argument("--max-prs", type=positive, metavar="N", help="override max_prs_per_run")
+    r.add_argument("--max-prs", type=positive, metavar="N", help="override max_prs_per_run (and the dry budget "
+                   "under --dry-run)")
 
     s = sub.add_parser("status", help="config in force, caps used this hour, last runs, paused?")
     s.set_defaults(func=cmd_status)

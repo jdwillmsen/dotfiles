@@ -160,6 +160,16 @@ if head2 == ["label", "create"]:
     sys.exit(0)
 if head2 == ["repo", "view"]:
     say({"defaultBranchRef": {"name": "main"}})
+if args[:2] == ["api", "rate_limit"]:
+    # rate_limit.json is {"core": n, "graphql": n} for every token; rate_limit_<sha256 of a token>.json overrides it
+    # for the one owner whose token that is.
+    tok = hashlib.sha256(os.environ.get("GH_TOKEN", "").encode()).hexdigest()
+    if rd("rate_limit_bad") is not None:
+        print("not json")
+        sys.exit(0)
+    left = jload(f"rate_limit_{tok}.json", jload("rate_limit.json", {"core": 4000, "graphql": 4000}))
+    say({"resources": {"core": {"limit": 5000, "remaining": left["core"]},
+                       "graphql": {"limit": 5000, "remaining": left["graphql"]}}})
 if args[:2] == ["api", "user"]:
     say({"login": SELF})
 if args[:3] == ["api", "-i", "user"]:
@@ -398,6 +408,8 @@ cfg() {  # limit overrides as key=value; LIVE_MAX sets the live repo's ceiling
         echo "[limits]"
         local kv
         for kv in "$@"; do echo "$kv"; done
+        # Older cases pile many pull requests into one repository; the per-repository cap has its own cases below.
+        case " $* " in *" max_prs_per_repo="*) ;; *) echo "max_prs_per_repo = 100" ;; esac
         printf '[checks]\nignore = [%s]\n' "${CHECK_IGNORE:-}"
         printf '[reviewers]\nproviders = [%s]\n' "${PROVIDERS:-\"claudeAgent\"}"
         echo '[authors]'
@@ -1595,7 +1607,7 @@ expect 92 needs-human "not commented"
 python3 -I - "$S/gh.calls" <<'PY' || fail "dry-run made a call outside the read-only set"
 import json, sys
 ok = [("pr", "list"), ("pr", "view"), ("pr", "diff"), ("pr", "checks"), ("repo", "view"), ("label", "list"),
-      ("api", "user"), ("api", "graphql")]
+      ("api", "user"), ("api", "graphql"), ("api", "rate_limit")]
 for line in open(sys.argv[1]):
     a = json.loads(line)["argv"]
     assert tuple(a[:2]) in ok or (a[0] == "api" and "code-scanning" in a[1]), a
@@ -1846,7 +1858,7 @@ approve_setup 120 R1
 want 0 run
 want 0 status
 for needle in "^config: " "^paused: false" "^mode_live: 1" "^mode_dry: 1" "^mode_off: 1" "^merges_last_hour: 1" \
-    "^max_merges_per_hour: 6" "^  max_prs_per_run: 6" "^repos\[3\]{name,mode,max_tier}:" "^  acme/live,live,R2" \
+    "^max_merges_per_hour: 6" "^  max_prs_per_run: 20" "^repos\[3\]{name,mode,max_tier}:" "^  acme/live,live,R2" \
     "^last_runs\[1\]{at,result}:" "1 decisions, 1 merged"; do
     grep -qE -- "$needle" "$out" || fail "status lacks $needle" "$(cat "$out")"
 done
@@ -1889,6 +1901,10 @@ want = dict(a.split("=", 1) for a in sys.argv[2:])
 seen = set()
 for line in open(sys.argv[1]):
     argv = json.loads(line)["argv"]
+    if argv == ["api", "rate_limit"]:
+        # Names no repository; the credential it carries must still be some owner's own.
+        assert json.loads(line)["gh_token_sha"] in want.values(), argv
+        continue
     owner = argv[2].split("/")[0] if argv[:2] == ["repo", "view"] else None
     if "--repo" in argv:
         owner = argv[argv.index("--repo") + 1].split("/")[0]
@@ -2128,6 +2144,274 @@ else:
 assert tok not in mc.scrub(f"failed with {tok} in the message") and "[redacted]" in mc.scrub(f"x {tok}")
 cap.close()
 PY
+
+# ── Fairness: caps count only real work, repositories take turns, the API budget is respected ──
+fair_cfg() {  # limits as arguments; REPOS="name:mode[:cap] ..."
+    {
+        echo "[limits]"
+        local kv r name mode rest
+        for kv in "$@"; do echo "$kv"; done
+        printf '[checks]\nignore = []\n[reviewers]\nproviders = ["claudeAgent"]\n'
+        echo '[authors]'
+        echo 'allow = ["jdwillmsen", "renovate[bot]"]'
+        for r in $REPOS; do
+            name="${r%%:*}"
+            rest="${r#*:}"
+            mode="${rest%%:*}"
+            printf '[[repo]]\nname = "%s"\nmode = "%s"\nmax_tier = "R2"\n' "$name" "$mode"
+            if [ "$rest" != "$mode" ]; then printf 'max_prs_per_repo = %s\n' "${rest#*:}"; fi
+        done
+    } >"$CFG"
+}
+flood() {  # repo first last [fx args]: open pull requests that stay open (they conflict), each needing a decision
+    local repo="$1" n
+    for n in $(seq "$2" "$3"); do
+        fx pr "$n" repo="$repo" mergeable=CONFLICTING "${@:4}"
+        fx class "$n" R0
+    done
+}
+examined_count() {  # repo: pull requests of that repo the run read in full
+    { grep -E "^pr view [0-9]+ --repo $1 --json number,title" "$S/gh.log" || true; } | wc -l
+}
+decision_repos() { sed -n '/^decisions/,$p' "$out" | tail -n +2 | cut -d, -f1 | tr -d ' ' | uniq; }
+first_repo() { decision_repos | sed -n 1p; }
+at_minute() { NOW="2026-10-23T20:$(printf '%02d' "$1"):00Z"; }
+cursor() {  # group: the repository the next walk of that group starts at
+    python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2], "-"))' "$STATE/rotation.json" "$1"
+}
+
+# Twelve, three and two open pull requests, caps too small for one run to reach them all.
+newcase
+REPOS="acme/a:live acme/b:live acme/c:live" fair_cfg max_prs_per_run=5 max_prs_per_repo=3 max_merges_per_hour=1000
+flood acme/a 1 12
+flood acme/b 21 23
+flood acme/c 31 32
+at_minute 1
+want 0 run
+[ "$(examined_count acme/a)" = 3 ] || fail "the per-repository cap of 3 was not held on the first repository" "$(cat "$out")"
+[ "$(examined_count acme/b)" = 2 ] || fail "the run cap of 5 was not held" "$(cat "$out")"
+[ "$(first_repo)" = acme/a ] || fail "the first run did not start at the top of the list" "$(cat "$out")"
+grep -qE '^deferred: [1-9]' "$out" || fail "a run with work left over should say how much" "$(cat "$out")"
+expect 4 skipped repo-cap
+expect 23 skipped run-cap
+[ "$(cursor live)" = acme/b ] || fail "the cursor should rest on the repository the run ran out in" "$(cat "$STATE/rotation.json")"
+[ "$(stat -c %a "$STATE/rotation.json" "$STATE/examined.json" | sort -u)" = 600 ] || fail "fairness state is not 0600"
+[ -z "$(find "$STATE" -name '*.tmp')" ] || fail "an atomic write left a temporary file behind"
+if grep -qE 'repo-cap|run-cap' "$STATE/log.jsonl"; then fail "a deferred pull request was written to the log"; fi
+# A new process reads the cursor: the second run opens with the repository the first ran out in.
+at_minute 2
+want 0 run
+[ "$(first_repo)" = acme/b ] || fail "the cursor did not survive a restart" "$(cat "$out")"
+for i in 3 4 5 6 7 8 9 10 11 12; do
+    at_minute "$i"
+    want 0 run
+done
+python3 -I - "$S/gh.log" "$STATE/examined.json" <<'PY' || fail "a pull request went unexamined, or one was examined twice before its neighbours"
+import json, re, sys
+views = [(int(m.group(1)), m.group(2)) for line in open(sys.argv[1])
+         if (m := re.match(r"pr view (\d+) --repo (\S+) --json number,title", line))]
+seen = {n for n, _ in views}
+want = set(range(1, 13)) | {21, 22, 23, 31, 32}
+assert seen == want, sorted(want - seen)
+a_views = [n for n, r in views if r == "acme/a"]
+assert len(set(a_views[:12])) == 12, f"acme/a repeated before all twelve were seen: {a_views[:12]}"
+assert set(json.load(open(sys.argv[2]))) == {f"{r}#{n}" for n, r in views}
+PY
+want 0 status
+for needle in "^rotation:" "^  live_next: " "^  deferred_last_run: " "^  examined_tracked: 17" "^  max_prs_per_repo: 3" \
+    "^repo_caps\[3\]{name,max_prs_per_repo}:" "^  acme/a,3"; do
+    grep -qE -- "$needle" "$out" || fail "status lacks $needle" "$(cat "$out")"
+done
+# A damaged cursor starts the walk at the top again instead of failing the run.
+printf 'not json' >"$STATE/rotation.json"
+at_minute 13
+want 0 run
+[ "$(first_repo)" = acme/a ] || fail "a damaged rotation file should start at the top" "$(cat "$out")"
+# Narrowed and pretend runs leave the rotation and the examination times alone.
+cp "$STATE/rotation.json" "$tmp/rot.before"
+cp "$STATE/examined.json" "$tmp/exam.before"
+at_minute 14
+want 0 run --dry-run
+want 0 run --repo acme/c
+if ! cmp -s "$STATE/rotation.json" "$tmp/rot.before" || ! cmp -s "$STATE/examined.json" "$tmp/exam.before"; then
+    fail "a --dry-run or --repo run moved the fairness state"
+fi
+
+# A flood of Renovate pull requests in one repository cannot use the whole run.
+newcase
+REPOS="acme/a:live acme/b:live acme/c:live" fair_cfg max_merges_per_hour=1000
+flood acme/a 1 30 'author={"login":"app/renovate","is_bot":true}'
+flood acme/b 41 42
+flood acme/c 51 52
+at_minute 1
+want 0 run
+[ "$(examined_count acme/a)" = 4 ] || fail "the flooded repository went past its cap of 4" "$(cat "$out")"
+{ [ "$(examined_count acme/b)" = 2 ] && [ "$(examined_count acme/c)" = 2 ]; } || fail "the flood starved its neighbours" "$(cat "$out")"
+[ "$(count ',repo-cap$' "$out")" = 26 ] || fail "26 of the flood should wait for another run" "$(cat "$out")"
+grep -q '^deferred: 26' "$out" || fail "deferred count" "$(cat "$out")"
+# A per-repository override beats the default.
+newcase
+REPOS="acme/a:live:7 acme/b:live" fair_cfg max_merges_per_hour=1000
+flood acme/a 1 20
+flood acme/b 41 50
+want 0 run
+{ [ "$(examined_count acme/a)" = 7 ] && [ "$(examined_count acme/b)" = 4 ]; } || fail "the per-repository override or default" "$(cat "$out")"
+newcase
+REPOS="acme/a:live:0" fair_cfg
+want 1 run
+grep -q 'max_prs_per_repo must be a positive integer' "$out" || fail "a zero repository cap was accepted" "$(cat "$out")"
+
+# Dry-run repositories have a budget of their own and are walked after the live ones.
+newcase
+REPOS="acme/dry:dry-run acme/live:live" fair_cfg max_prs_per_run=3 max_dry_prs_per_run=2 max_prs_per_repo=50 max_merges_per_hour=1000
+flood acme/dry 1 20
+flood acme/live 61 63
+at_minute 1
+want 0 run
+[ "$(examined_count acme/live)" = 3 ] || fail "dry-run work took the live budget" "$(cat "$out")"
+[ "$(examined_count acme/dry)" = 2 ] || fail "the dry budget was not its own" "$(cat "$out")"
+[ "$(first_repo)" = acme/live ] || fail "a dry-run repository was walked before the live one" "$(cat "$out")"
+[ "$(count 'acme/dry,[0-9]+,-,skipped,dry-cap' "$out")" = 18 ] || fail "dry overflow should be dry-cap" "$(cat "$out")"
+if grep -q 'acme/live.*run-cap' "$out"; then fail "live work hit the run cap" "$(cat "$out")"; fi
+# --dry-run is one pretend run over everything, on the run budget.
+at_minute 2
+want 0 run --dry-run --max-prs 4
+[ "$(count 'blocked' "$out")" = 4 ] || fail "--dry-run should honour --max-prs" "$(cat "$out")"
+
+# Pull requests that need no work consume no cap and cost no call.
+newcase
+REPOS="acme/live:live" fair_cfg max_prs_per_run=2 max_prs_per_repo=2 max_merges_per_hour=1000
+fx pr 1 isDraft=true
+fx pr 2 isDraft=true
+fx pr 3 'labels=[{"name":"hold"}]'
+fx pr 4 'labels=[{"name":"no-agent-merge"}]'
+fx pr 5 'author={"login":"stranger","is_bot":false}'
+fx pr 6 baseRefName=dev
+for n in 1 2 3 4 5 6; do fx class "$n" R0; done
+flood acme/live 7 8
+want 0 run
+expect 1 skipped draft
+expect 3 skipped "label hold"
+expect 4 skipped "label no-agent-merge"
+expect 5 skipped author-not-allowed
+expect 6 skipped base-not-default
+expect 7 blocked
+expect 8 blocked
+grep -q '^deferred: 0' "$out" || fail "pre-filtered pull requests were counted as deferred" "$(cat "$out")"
+{ [ "$(count '^pr view [1-6] ' "$S/gh.log")" = 0 ] && [ "$(count '--pr [1-6] ' "$S/class.log")" = 0 ]; } ||
+    fail "a pre-filtered pull request cost a per-PR call" "$(cat "$S/gh.log")"
+[ "$(count '^pr list' "$S/gh.log")" = 1 ] || fail "more than one list call per repository"
+grep '^pr list' "$S/gh.log" | grep -q updatedAt || fail "the list call does not ask for updatedAt"
+python3 -I -c 'import json,sys; k=json.load(open(sys.argv[1])); assert set(k)=={"acme/live#7","acme/live#8"}, k' "$STATE/examined.json" ||
+    fail "a pre-filtered pull request was marked examined"
+
+# examined.json forgets pull requests that closed, repositories that are gone, and is bounded.
+newcase
+REPOS="acme/a:live acme/b:live" fair_cfg max_merges_per_hour=1000
+flood acme/a 1 4
+flood acme/b 21 22
+touch "$S/list_fail_acme_b"
+mkdir -p "$STATE"
+python3 -I - "$STATE/examined.json" <<'PY'
+import json, sys
+rows = {"gone/repo#9": "2026-10-01T00:00:00Z", "junk": "2026-10-01T00:00:00Z", "acme/a#4": "2026-10-01T00:00:00Z",
+        "acme/a#99": "2026-10-01T00:00:00Z"}
+rows.update({f"acme/b#{1000 + i}": f"2026-10-0{1 + i % 9}T00:{i // 60 % 60:02d}:{i % 60:02d}Z" for i in range(2500)})
+json.dump(rows, open(sys.argv[1], "w"))
+PY
+at_minute 1
+want 0 run
+python3 -I - "$STATE/examined.json" <<'PY' || fail "examined.json was not pruned or bounded" "$(head -c 600 "$STATE/examined.json")"
+import json, sys
+k = json.load(open(sys.argv[1]))
+assert "gone/repo#9" not in k and "junk" not in k, "unknown repository or malformed key kept"
+assert "acme/a#99" not in k, "a closed pull request was kept"
+assert all(f"acme/a#{n}" in k for n in (1, 2, 3, 4)), "a fresh examination is missing"
+assert len(k) == 2000, len(k)
+assert any(x.startswith("acme/b#") for x in k), "entries of a repo that failed to list must survive"
+PY
+rm -f "$S/list_fail_acme_b"
+python3 -I - "$S/list_acme_a.json" <<'PY'
+import json, sys
+json.dump([1, 2], open(sys.argv[1], "w"))
+PY
+at_minute 2
+want 0 run
+python3 -I - "$STATE/examined.json" <<'PY' || fail "closed pull requests stayed in examined.json" "$(head -c 400 "$STATE/examined.json")"
+import json, sys
+k = json.load(open(sys.argv[1]))
+assert {x for x in k if x.startswith("acme/a#")} == {"acme/a#1", "acme/a#2"}, sorted(k)[:6]
+assert not [x for x in k if x.startswith("acme/b#1")], "the repo that listed this time keeps only open pull requests"
+PY
+
+# The API budget: low in either pool stops the run once; exactly the floor is enough; an unreadable answer is not low.
+newcase
+REPOS="acme/live:live acme/dry:dry-run" fair_cfg max_merges_per_hour=1000
+fx pr 1
+fx class 1 R0 tags=docs reasons=docs:R0:README.md
+fx pr 2 repo=acme/dry
+fx class 2 R0
+echo '{"core": 499, "graphql": 4000}' >"$S/rate_limit.json"
+want 0 run
+grep -qE '^  null,-,-,skipped,api-budget$' "$out" || fail "a low REST budget should stop the run" "$(cat "$out")"
+grep -q '^decisions\[1\]' "$out" || fail "the stop should be one row" "$(cat "$out")"
+[ "$(count '^pr (list|view|merge)' "$S/gh.log")" = 0 ] || fail "a run called off for budget still touched pull requests" "$(cat "$S/gh.log")"
+[ "$(count 'api-budget' "$STATE/log.jsonl")" = 1 ] || fail "the stop should be logged once" "$(cat "$STATE/log.jsonl")"
+grep -q 'api budget low' "$err" || fail "the reason is not on stderr" "$(cat "$err")"
+[ ! -e "$STATE/rotation.json" ] || fail "a stopped run touched the rotation"
+echo '{"core": 4000, "graphql": 120}' >"$S/rate_limit.json"
+want 0 run
+grep -qE '^  null,-,-,skipped,api-budget$' "$out" || fail "a low GraphQL budget should stop the run" "$(cat "$out")"
+echo '{"core": 500, "graphql": 500}' >"$S/rate_limit.json"
+want 0 run
+expect 1 merged
+newcase
+REPOS="acme/live:live" fair_cfg max_merges_per_hour=1000
+fx pr 1
+fx class 1 R0 tags=docs reasons=docs:R0:README.md
+touch "$S/rate_limit_bad"
+want 0 run
+expect 1 merged
+# One owner low does not stop the others: each owner's token has a budget of its own.
+newcase
+two_owners
+mktok acme "$TOK_ACME"
+mktok beta "$TOK_BETA"
+echo '{"core": 10, "graphql": 4000}' >"$S/rate_limit_$(sha "$TOK_BETA").json"
+want 0 run
+expect 1 merged
+grep -qE '^  beta/live,-,-,skipped,api-budget$' "$out" || fail "the low owner should be skipped alone" "$(cat "$out")"
+if grep -q -- '--repo beta/live' "$S/gh.log"; then fail "a call was made for the owner with no budget" "$(cat "$S/gh.log")"; fi
+[ "$(count '^api rate_limit' "$S/gh.log")" = 2 ] || fail "one budget read per owner" "$(cat "$S/gh.log")"
+
+# The kill switch and the deadline behave as they did.
+newcase
+REPOS="acme/a:live acme/dry:dry-run" fair_cfg max_merges_per_hour=1000
+flood acme/a 1 3
+flood acme/dry 41 42
+at_minute 1
+want 0 run
+cp "$STATE/rotation.json" "$tmp/rot.before"
+want 0 pause
+at_minute 2
+want 0 run
+grep -q '^paused: true' "$out" || fail "a paused run should say so" "$(cat "$out")"
+[ "$(count '^api rate_limit|^pr list' "$S/gh.log")" = 3 ] || fail "a paused run called the API" "$(cat "$S/gh.log")"
+cmp -s "$STATE/rotation.json" "$tmp/rot.before" || fail "a paused run moved the cursor"
+want 0 resume
+newcase
+REPOS="acme/a:live acme/b:live" fair_cfg max_merges_per_hour=1000
+flood acme/a 1 3
+flood acme/b 21 22
+mkdir -p "$STATE"
+echo '{"live": "acme/b"}' >"$STATE/rotation.json"
+MERGE_CAPTAIN_DEADLINE_S=0.001 want 0 run
+expect 21 skipped deadline
+grep -q '^deferred: [1-9]' "$out" || fail "work held back by the deadline should count as deferred" "$(cat "$out")"
+[ "$(count 'merge-captain: deadline' "$err")" = 1 ] || fail "the deadline was not logged once" "$(cat "$err")"
+[ "$(cursor live)" = acme/b ] || fail "a deadline must leave the cursor on the repository it could not finish" "$(cat "$STATE/rotation.json")"
+[ "$(first_repo)" = acme/b ] || fail "the walk should have started at the cursor" "$(cat "$out")"
+NOW="2026-10-23T20:00:00Z"
 
 # ── auth: a person at a terminal only ──
 cat >"$tmp/ptyrun.py" <<'PY'

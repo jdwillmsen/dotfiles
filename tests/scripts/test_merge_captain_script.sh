@@ -530,7 +530,9 @@ for r in jdwillmsen/gameops jdwillmsen/jdw-deployments jdwillmsen/fwb-minecraft 
     if grep -qE "^  $r,yes," "$out"; then fail "$r must not require a token"; fi
 done
 want 0 run --dry-run
-grep -q '0 pull requests acted on' "$out" || fail "empty run has no definitive empty state" "$(cat "$out")"
+# No repository has a pull request, and the six whose owner has no token say so instead of staying silent.
+grep -q '^decisions\[6\]' "$out" || fail "the token-gated repositories gave no row" "$(cat "$out")"
+[ "$(grep -c ',waiting,token-required$' "$out")" = 6 ] || fail "each org repository should wait for its token" "$(cat "$out")"
 [ -z "$(writes)" ] || fail "an empty dry run wrote" "$(writes)"
 CFG="$MERGE_CAPTAIN_CONFIG_SAVE"
 

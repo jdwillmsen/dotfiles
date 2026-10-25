@@ -79,7 +79,10 @@ DEFAULTS='{
 # not defaulted: a defaulted hooks list is replaced wholesale by whatever is on
 # disk, and a guard that one local hook can switch off guards nothing. Lists are
 # unioned, so the rtk hook and any hook added by hand stay. $HOME is left for
-# the hook's shell to expand, so the entry is the same on every machine.
+# the hook's shell to expand, so the entry is the same on every machine. Reading
+# tools are a second entry beside the first rather than a wider matcher: a
+# machine that already has the first entry on disk would otherwise keep it and
+# gain a near-duplicate.
 #
 # CLAUDE_CODE_PLUGIN_DIRS loads the skill-trim mod in every session, including
 # ones started by apps that take no --plugin-dir flag. It is enforced because
@@ -115,6 +118,12 @@ ENFORCED='{
     "PreToolUse": [
       {
         "matcher": "Write|Edit|MultiEdit|Bash",
+        "hooks": [
+          { "type": "command", "command": "$HOME/.claude/hooks/guard-delivery-state.sh" }
+        ]
+      },
+      {
+        "matcher": "Read|Grep|Glob",
         "hooks": [
           { "type": "command", "command": "$HOME/.claude/hooks/guard-delivery-state.sh" }
         ]

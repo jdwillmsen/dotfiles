@@ -7,9 +7,12 @@ Design: `docs/superpowers/specs/2026-10-23-merge-captain-design.md`.
 
 ## What a run does
 
-`merge-captain.timer` fires every 15 minutes and runs `merge-captain run`. For
-each open pull request in a configured repository, in order, and ending at the
-first step that fails:
+`merge-captain.timer` fires every 15 minutes and runs `merge-captain run`. Every `gh`
+call for a repository uses its owner's saved token, or the default `gh` login when
+that owner has none (see "Giving the captain its own tokens"); an owner whose token
+file is unsafe or expired is skipped or waits before any call is made. For each open
+pull request in a configured repository, in order, and ending at the first step that
+fails:
 
 1. Skip drafts, `hold` / `no-agent-merge` labels, authors outside the allow-list,
    a base that is not the default branch, and anything past a cap or the run
@@ -84,6 +87,73 @@ merge-captain resume
 While it exists a run makes no GitHub call at all, and a run already in flight
 re-checks it before every write and before starting a review. `status` shows it.
 
+## Giving the captain its own tokens
+
+Until you do this, every `gh` call runs as your own `gh` login, a full-scope token.
+GitHub binds a fine-grained token to one resource owner, and the captain works across
+three (`jdwillmsen`, a user; `jdwlabs` and `dotablaze-tech`, organizations), so it
+gets one token per owner. These steps are yours: the captain, and any agent, never
+sees or handles a token.
+
+For each of the three owners:
+
+1. On GitHub: Settings > Developer settings > Personal access tokens > Fine-grained
+   tokens > Generate new token.
+2. **Resource owner**: that owner (your user for `jdwillmsen`, the organization for
+   the others). A token can name only one.
+3. **Repository access**: Only select repositories, and pick exactly the repositories
+   listed for that owner in `merge-captain.toml` (`merge-captain status` lists them
+   under `repos`), whatever their mode.
+4. **Expiration**: 90 days.
+5. **Repository permissions**, and nothing else (no Administration, no Workflows
+   write):
+   - Contents: Read and write
+   - Pull requests: Read and write
+   - Issues: Read and write
+   - Metadata: Read
+   - Checks: Read
+   - Commit statuses: Read
+   - Actions: Read
+   - Code scanning alerts: Read
+6. Generate it. An organization can require an owner to approve a fine-grained token
+   before it works; if the organization asks for that, approve it under the
+   organization's Settings > Personal access tokens.
+7. In a normal terminal **outside any agent session** (a separate SSH login, a tmux
+   pane), run `merge-captain auth <owner>` and paste the token at the hidden prompt.
+   It must be a terminal: the command refuses to run otherwise. It checks the token
+   with GitHub, saves it, and prints only `owner`, `login` and `expires`. If GitHub
+   does not report the expiry, add `--expires YYYY-MM-DD`.
+8. `merge-captain status` lists each owner as `identity: token` with its login and
+   days to expiry. Repeat for the other owners; one owner can be done at a time, and
+   an owner without a token keeps using the default login.
+
+Rules the captain enforces:
+
+- Tokens live in `~/.config/merge-captain/tokens/` (`MERGE_CAPTAIN_TOKENS`): the
+  directory 0700, one file per owner named exactly the owner (`jdwillmsen`,
+  `jdwlabs`, `dotablaze-tech`) at 0600, plus `<owner>.meta` with the login and
+  expiry. `auth` creates them that way.
+- A token file or directory that is a symlink, belongs to someone else or is
+  readable by group or others is **not used and does not fall back**: that owner's
+  repositories show `skipped insecure-token-file` in the run and `status` shows
+  `identity: insecure`. Fix the mode (`chmod 700` the directory, `chmod 600` the
+  file) or save the token again. A loose directory stops every owner.
+- The token is passed to `gh` for that owner's repositories and to nothing else; it
+  is never in a log, state file, comment or message.
+- `change-class` still reads pull request diffs with the default `gh` login, so keep
+  that login signed in for now; it only reads.
+
+Rotating: make a new token for the owner as above, run `merge-captain auth <owner>`
+again (it replaces the file), then delete the old token on GitHub. `status` starts
+warning 14 days before expiry (`warnings`); at expiry the owner's repositories show
+`waiting token-expired` rather than falling back to the default login, so rotate in
+time.
+
+Removing: `merge-captain auth <owner> --remove` (also needs a terminal) deletes the
+file and its metadata; revoke the token on GitHub as well. The owner then goes back
+to the default login. To stop the captain for that owner instead, set its repositories
+to `mode = "off"` or `merge-captain pause`.
+
 ## Flipping a repo to live
 
 1. Read its dry-run decisions for a few days (below); the table should match what
@@ -112,7 +182,7 @@ Other files in the state directory, all written by the captain only:
 
 ```
 tail -n 20 ~/.local/state/merge-captain/log.jsonl
-merge-captain status          # caps used this hour, last five runs, paused?
+merge-captain status          # caps used this hour, last five runs, paused?, each owner's token
 merge-captain explain O/R#N   # what a run would do for one PR, no side effects
 journalctl --user -u merge-captain -n 50
 ```
@@ -144,16 +214,22 @@ A `waiting` for `quota` or `review-unavailable` costs nothing; `blocked` with
   again. A `changes` line blocks regardless, since a forged one only stops a
   merge. The state directory is created 0700 with 0600 files and tightened if it
   was looser.
-- `~/.claude/hooks/guard-delivery-state.sh` (a PreToolUse hook on `Write|Edit|MultiEdit|Bash`,
-  enforced in `settings.json`) refuses Claude Code tool calls that write the
-  captain's state, the agent-eval ledgers or the deployed `change-risk.toml`,
-  `lanes.toml` and `merge-captain.toml`: Write/Edit on those paths, and shell
-  redirects, `tee`, `sed -i`, `cp`, `mv`, `rm` and similar aimed at them. It reads
-  command text, so it stops accidents and prompt-injected shortcuts inside Claude
-  Code only. It does not stop a determined process running as the same user (a
-  script, another tool, an obfuscated path), and nothing in these files can: a
-  separate uid for the captain and its state is the real fix (JDW-209). Pause and
-  resume go through `merge-captain pause|resume`, which the hook allows.
+- `~/.claude/hooks/guard-delivery-state.sh` (a PreToolUse hook on `Write|Edit|MultiEdit|Bash`
+  and, as a second entry, `Read|Grep|Glob`, both enforced in `settings.json`) refuses
+  Claude Code tool calls that write the captain's state, the agent-eval ledgers or the
+  deployed `change-risk.toml`, `lanes.toml` and `merge-captain.toml`: Write/Edit on
+  those paths, and shell redirects, `tee`, `sed -i`, `cp`, `mv`, `rm` and similar
+  aimed at them. It also refuses Read, Write, Edit, Grep and Glob on the token
+  directory (`~/.config/merge-captain`, `MERGE_CAPTAIN_TOKENS`, and `XDG_CONFIG_HOME`
+  where set), a Grep or Glob rooted at `~/.config`, and any Bash command that mentions
+  the directory in any way (`cat`, `cp`, `ls`, `grep`, `tar`, `find`, `echo >` ...),
+  except a plain `merge-captain auth` or `merge-captain status`. It reads command
+  text, so it stops accidents and prompt-injected shortcuts inside Claude Code only.
+  It does not stop a determined process running as the same user (a script, another
+  tool, a glob or variable that hides the path, a search rooted at `~`), and nothing
+  in these files can: a separate unix account for the captain, its state and its
+  tokens is the real fix (JDW-209). Pause and resume go through
+  `merge-captain pause|resume`, which the hook allows.
 - If the repository's ruleset requires an approving review, the merge is refused
   and shows as `blocked`; the captain does not approve its own reviews.
 - `opencode` reviewers are off by default. Findings, 2026-10-23: a plain

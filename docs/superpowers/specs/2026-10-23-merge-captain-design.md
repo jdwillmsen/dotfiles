@@ -38,10 +38,12 @@ merge-captain status              # config in force, caps used this hour, last r
 merge-captain pause [--reason T]  # creates the kill switch
 merge-captain resume
 merge-captain explain O/R#N       # what a run would do for one PR, no side effects
+merge-captain auth OWNER [--expires YYYY-MM-DD | --remove]   # save/remove one owner's token; a person at a terminal
 ```
 
 Env overrides for tests: `MERGE_CAPTAIN_CONFIG`, `MERGE_CAPTAIN_STATE`,
-`MERGE_CAPTAIN_NOW`, `MERGE_CAPTAIN_DEADLINE_S` (soft run deadline, default 1200),
+`MERGE_CAPTAIN_NOW`, `MERGE_CAPTAIN_TOKENS` (token directory),
+`MERGE_CAPTAIN_DEADLINE_S` (soft run deadline, default 1200),
 `MERGE_CAPTAIN_HARD_DEADLINE_S` (default 1500),
 `MERGE_CAPTAIN_GH`, `MERGE_CAPTAIN_CLASS` (change-class
 executable), `MERGE_CAPTAIN_PACE` (agent-pace), `MERGE_CAPTAIN_EVAL`
@@ -207,6 +209,53 @@ and nothing else. The prompt includes the tier, the tags and reasons from
 `change-class`, the PR title and the diff. A diff that tries to alter the
 verdict is evidence for `changes`.
 
+### Identity: one token per owner
+
+Until now every `gh` call ran as the owner's own login, a full-scope OAuth token: a
+bug or a hostile diff in this tool could do anything that login can. GitHub binds a
+fine-grained token to one resource owner, and the captain spans three (the
+`jdwillmsen` user and the `jdwlabs` and `dotablaze-tech` organizations), so the
+narrowest identity it can have is one token per owner.
+
+`MERGE_CAPTAIN_TOKENS` (default `~/.config/merge-captain/tokens`, 0700) holds one
+file per owner, named exactly the owner, mode 0600, containing only the token, and
+`<owner>.meta` (login, saved date, expiry) beside it. For a `gh` call about
+`owner/repo` the captain puts that owner's token in `GH_TOKEN` in that child's
+environment and nowhere else: not this process's environment, not argv, not the
+reviewer, not `change-class`, `agent-pace` or `agent-eval`, not the log, state,
+ledgers, comments or an exception message (every loaded token is also cut out of any
+text the tool prints or logs). A call whose `--repo` names another owner than the
+repository in hand is refused.
+
+Per owner:
+
+- No token file: today's behaviour, the default `gh` login, shown as `identity:
+  default` in `status`.
+- A token file or the directory that is a symlink, owned by another user, or
+  readable by group or others, or a file that is empty or not token-shaped: the
+  owner is `insecure`. There is no fallback to the default login for an owner whose
+  file exists: its repositories get one `skipped insecure-token-file` row per run
+  and nothing is called. A loose directory makes every owner insecure.
+- Past its expiry (the date in `<owner>.meta` is the last good day): the owner's
+  repositories `waiting token-expired`, again with no fallback. `status` warns from
+  14 days out.
+
+`merge-captain auth <owner>` is human-only: it exits 2 unless stdin and stderr are
+both terminals, reads the token with `getpass`, accepts only a fine-grained
+`github_pat_` token (a classic `ghp_` token reaches every repository its user can,
+which defeats the point) for an owner that appears in the config, confirms it with
+one `gh api -i user` whose child alone holds the token, takes the expiry from
+`--expires` or the `github-authentication-token-expiration` response header, and
+writes token and metadata by temp file and rename under umask 077. It prints the
+owner, login and expiry only. `--remove` deletes both files.
+
+What this does not do: `change-class` runs `gh pr diff` itself and still uses the
+default `gh` login, so that login stays installed until `change-class` can be given
+a read-only identity (a follow-up). The tokens are only as protected as the unix
+account that owns them; the guard hook stops Claude Code's file tools and shell
+commands from touching the directory by accident or injection, and a separate
+unix account for the captain is the stronger fix.
+
 ### State and log
 
 `MERGE_CAPTAIN_STATE` (default `~/.local/state/merge-captain/`): `PAUSED`
@@ -221,12 +270,14 @@ minutes across both log files. No diff text, comment bodies or credentials in
 the log. The directory is created 0700 and its files 0600 (tightened if they were
 looser). A PreToolUse hook (`guard-delivery-state.sh`) refuses Claude Code's
 Write/Edit and shell redirects, `tee`, `sed -i`, `cp`, `mv` and `rm` on this
-directory, the agent-eval ledgers and the deployed policy files. These files
-are still only as safe as the unix account that owns them: the ledger check
-makes a forged approval take three coordinated writes, and the hook stops
-accidents and prompt-injected shortcuts under Claude Code, but neither stops a
-determined process running as the same user. A separate uid is the real fix
-(JDW-209). What the design excludes is trusting anything a PR comment says.
+directory, the agent-eval ledgers and the deployed policy files, and any use of
+the token directory (above). These files are still only as safe as the unix
+account that owns them: the ledger check makes a forged approval take three
+coordinated writes, and the hook stops accidents and prompt-injected shortcuts
+under Claude Code, but neither stops a determined process running as the same
+user. A separate unix account for the captain, its state and its tokens is the
+real fix (JDW-209). What the design excludes is trusting anything a PR comment
+says.
 
 ### Output
 
@@ -284,7 +335,15 @@ lane comes from commit trailers and is never the reviewer; lanes on unlisted
 providers are excluded and R1 retries with `--allow-same-family`; bot logins
 normalise; model text carries no link or image; credentials in a diff are
 redacted before the prompt; a merge call that failed after merging is logged
-as merged; the log rotates at 5 MB.
+as merged; the log rotates at 5 MB; each owner's calls carry that owner's token
+and an owner without a file keeps the default login; a token file or directory
+that is group- or world-accessible, a symlink or malformed is never used and does
+not fall back; an expired token makes the owner wait; a token never appears in the
+reviewer or tool environments, a log, state file, comment or message; `auth` refuses
+without a terminal, saves atomically with the right modes, refuses classic tokens
+and never echoes the token; `status` shows identity, login and days to expiry with a
+warning inside 14 days; the guard blocks file tools and shell commands on the token
+directory and allows `merge-captain auth|status`.
 
 ## Calls made for the owner
 
@@ -294,3 +353,7 @@ as merged; the log rotates at 5 MB.
 - Reviews use the lane `agent-pace` picks, so they spend quota the same way
   other work does, and each review is a scoreboard data point.
 - The captain never fixes PRs and never bypasses protections.
+- The captain no longer merges as the owner's full-scope login where a per-owner
+  fine-grained token exists; until the three tokens are saved it keeps the default
+  login, which is the owner's own step (docs/merge-captain.md, "Giving the captain
+  its own tokens").

@@ -2802,6 +2802,89 @@ assert "[redacted]" in mc.clean("token gh" + "p_" + "a" * 30) and mc.clean("a\nb
 assert mc.clean("x" * 400).endswith("…") and len(mc.clean("x" * 400)) == 300
 PY
 
+# ── require_token: a repository that needs its owner's token waits until one exists ──
+need_token() {  # repository name: mark it require_token = true in the case's config
+    sed -i "s|^name = \"$1\"\$|&\nrequire_token = true|" "$CFG"
+    grep -q '^require_token = true$' "$CFG" || fail "need_token did not edit the config for $1" "$(cat "$CFG")"
+}
+token_case() {  # a live R0 pull request and a dry-run one, both repositories needing a token
+    newcase
+    fx pr 1
+    fx class 1 R0 tags=docs reasons=docs:R0:README.md
+    fx pr 2 repo=acme/dry
+    fx class 2 R0 tags=docs reasons=docs:R0:README.md
+    need_token acme/live
+    need_token acme/dry
+}
+token_case
+want 0 run
+grep -qE '^  acme/live,-,-,waiting,token-required$' "$out" || fail "live repo not waiting for a token" "$(cat "$out")"
+grep -qE '^  acme/dry,-,-,waiting,token-required$' "$out" || fail "dry-run repo not waiting for a token" "$(cat "$out")"
+[ "$(grep -c 'token-required' "$out")" = 2 ] || fail "want one row per waiting repository" "$(cat "$out")"
+[ ! -s "$S/gh.log" ] || fail "a gh call was made for a repository that requires a token" "$(cat "$S/gh.log")"
+grep -q '"reason": "token-required"' "$STATE/log.jsonl" || fail "token-required not logged" "$(cat "$STATE/log.jsonl")"
+want 0 run --dry-run
+[ "$(grep -c 'waiting,token-required' "$out")" = 2 ] || fail "dry-run: want both repositories waiting" "$(cat "$out")"
+[ ! -s "$S/gh.log" ] || fail "dry-run made a gh call for a repository that requires a token" "$(cat "$S/gh.log")"
+want 0 explain acme/live#1
+grep -q 'would: waiting' "$out" && grep -q 'token-required' "$out" || fail "explain did not say it would wait" "$(cat "$out")"
+[ ! -s "$S/gh.log" ] || fail "explain made a gh call for a repository that requires a token" "$(cat "$S/gh.log")"
+want 0 status
+grep -qE '^  acme/live,yes,default$' "$out" && grep -qE '^  acme/dry,yes,default$' "$out" || fail "status token_required" "$(cat "$out")"
+grep -qE '^  acme,default,-,-,-$' "$out" || fail "status owner identity" "$(cat "$out")"
+[ "$(grep -c 'acme: token required but missing' "$out")" = 1 ] || fail "want one warning for the owner" "$(cat "$out")"
+
+# As soon as the owner has a valid token file the repository is processed, with no config edit.
+mktok acme "$TOK_ACME"
+want 0 run
+expect 1 merged
+! grep -q 'token-required' "$out" || fail "a token file did not release the repository" "$(cat "$out")"
+calls_use "acme=$(sha "$TOK_ACME")" || fail "a released repository did not use the owner's token" "$(cat "$S/gh.calls")"
+want 0 status
+grep -qE '^  acme/live,yes,token$' "$out" || fail "status after the token appeared" "$(cat "$out")"
+! grep -q 'token required but missing' "$out" || fail "warning stayed after the token appeared" "$(cat "$out")"
+
+# A token that is present but unusable keeps its own reason; the option never turns it into something looser.
+token_case
+mktok acme "$TOK_ACME" 644
+want 1 run
+grep -qE '^  acme/live,-,-,skipped,insecure-token-file$' "$out" || fail "insecure token lost its reason" "$(cat "$out")"
+! grep -q 'token-required' "$out" || fail "an insecure token reported token-required" "$(cat "$out")"
+token_case
+mktok acme "$TOK_ACME"
+mkmeta acme someone 2026-10-01
+want 1 run
+grep -qE '^  acme/live,-,-,waiting,token-expired$' "$out" || fail "expired token lost its reason" "$(cat "$out")"
+
+# A run that only has repositories waiting for a token is not a failed run.
+newcase
+printf '[authors]\nallow = ["jdwillmsen"]\n[[repo]]\nname = "acme/live"\nmode = "live"\nmax_tier = "R2"\nrequire_token = true\n' >"$CFG"
+want 0 run
+
+# Without the option nothing changes: the default login is used, and status lists nothing under token_required.
+newcase
+fx pr 1
+fx class 1 R0 tags=docs reasons=docs:R0:README.md
+want 0 run
+expect 1 merged
+calls_use "acme=$(sha "$DEFAULT_TOKEN")" || fail "default behaviour changed" "$(cat "$S/gh.calls")"
+want 0 status
+grep -q '^token_required\[0\]:$' "$out" || fail "status has no definitive empty token_required" "$(cat "$out")"
+! grep -q 'token required but missing' "$out" || fail "warned without the option" "$(cat "$out")"
+
+# require_token = false behaves as the default, and only a boolean is accepted.
+newcase
+sed -i 's|^name = "acme/live"$|&\nrequire_token = false|' "$CFG"
+want 0 status
+grep -q '^token_required\[0\]:$' "$out" || fail "require_token = false listed" "$(cat "$out")"
+for bad in '"yes"' '1' '"true"' '[true]'; do
+    newcase
+    sed -i "s|^name = \"acme/live\"\$|&\nrequire_token = $bad|" "$CFG"
+    want 1 status
+    grep -q '^error:' "$out" && grep -q 'require_token must be true or false' "$out" ||
+        fail "require_token = $bad was not rejected" "$(cat "$out")"
+done
+
 # ── Global: nothing, in any case above, ever asked for a bypass or another merge style ──
 cat "$S/gh.log" >>"$tmp/all_gh.log"
 grep -qE -- '--admin|--squash|--delete-branch|--auto|pr merge .* -[dsm]( |$)| --merge( |$)' "$tmp/all_gh.log" &&

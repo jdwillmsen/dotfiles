@@ -953,13 +953,17 @@ class Captain:
             r = self.gh(["api", "rate_limit"])
         except (Stop, Refused):
             return False
+        if not r.ok:
+            return False
         try:
             res = json.loads(r.out)["resources"]
-        except (ValueError, KeyError, TypeError):
+            pools = [res.get(k) for k in ("core", "graphql")]
+        except (ValueError, KeyError, TypeError, AttributeError, RecursionError, MemoryError):
+            pools = None
+        if pools is None or not all(p is None or isinstance(p, dict) for p in pools):
+            log("api budget unknown: unexpected answer")
             return False
-        if not r.ok or not isinstance(res, dict):
-            return False
-        left = [(res.get(k) or {}).get("remaining") for k in ("core", "graphql")]
+        left = [p.get("remaining") for p in pools if p]
         return any(isinstance(x, int) and not isinstance(x, bool) and x < API_BUDGET_MIN for x in left)
 
     def ticket_of(self, *texts):

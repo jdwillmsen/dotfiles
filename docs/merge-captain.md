@@ -13,7 +13,9 @@ that owner has none (see "Giving the captain its own tokens"); an owner whose to
 file is unsafe or expired is skipped or waits before any call is made. Before
 anything else a run reads `gh api rate_limit` (free) for each owner; an owner with
 under 500 REST or GraphQL calls left is skipped as `skipped` `api-budget` (logged
-once), and a run in which every owner is low does nothing.
+once), and a run in which every owner is low does nothing. An answer the captain
+cannot read (any shape other than the documented one) counts as unknown, not low:
+the run goes ahead and logs one line to say so.
 
 Repositories are walked live first, then dry-run, each group starting where the
 last run left off (see "Fair rotation"). For each open pull request in a

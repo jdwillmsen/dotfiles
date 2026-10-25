@@ -167,6 +167,9 @@ if args[:2] == ["api", "rate_limit"]:
     if rd("rate_limit_bad") is not None:
         print("not json")
         sys.exit(0)
+    if rd("rate_limit_raw") is not None:
+        sys.stdout.write(rd("rate_limit_raw"))
+        sys.exit(0)
     left = jload(f"rate_limit_{tok}.json", jload("rate_limit.json", {"core": 4000, "graphql": 4000}))
     say({"resources": {"core": {"limit": 5000, "remaining": left["core"]},
                        "graphql": {"limit": 5000, "remaining": left["graphql"]}}})
@@ -2434,6 +2437,21 @@ fx class 1 R0 tags=docs reasons=docs:R0:README.md
 touch "$S/rate_limit_bad"
 want 0 run
 expect 1 merged
+# An answer of any other shape is unknown, not low: the run goes ahead, says so once, and prints no traceback.
+python3 -I -c 'import sys; open(sys.argv[1], "w").write("[" * 100000 + "]" * 100000)' "$tmp/deep.json"
+for shape in '{"resources":{"core":"x"}}' '{"resources":"x"}' '{"resources":null}' '{"resources":[1]}' '[]' '"text"' 'null' \
+    '7' '{}' '{"resources":{"core":[],"graphql":{"remaining":10}}}' '{"resources":{"core":{"remaining":9},"graphql":5}}' \
+    "$(cat "$tmp/deep.json")"; do
+    newcase
+    REPOS="acme/live:live" fair_cfg max_merges_per_hour=1000
+    fx pr 1
+    fx class 1 R0 tags=docs reasons=docs:R0:README.md
+    printf '%s\n' "$shape" >"$S/rate_limit_raw"
+    want 0 run
+    if grep -q Traceback "$err"; then fail "an odd rate_limit answer crashed the run: ${shape:0:60}" "$(cat "$err")"; fi
+    expect 1 merged
+    [ "$(count 'api budget unknown' "$err")" = 1 ] || fail "an odd answer should be logged once: ${shape:0:60}" "$(cat "$err")"
+done
 # One owner low does not stop the others: each owner's token has a budget of its own.
 newcase
 two_owners

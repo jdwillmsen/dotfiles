@@ -78,16 +78,17 @@ echo "$out" | "$PY" -c 'import json,sys; s=json.load(sys.stdin)["skillOverrides"
  assert s["my-skill"]=="off", "unknown user skillOverride removed"; \
  assert s["lavish"]=="off", "enforced skillOverride lost"; print("PASS")'
 
-# The delivery-state guard is enforced: present on a fresh install, kept next to the rtk hook, added next to hooks
-# written by hand, never duplicated, and not switched off by an on-disk PreToolUse list that omits it.
+# The delivery-state guard is enforced, once for the writing tools and once for the reading ones: present on a fresh
+# install, kept next to the rtk hook, added next to hooks written by hand, never duplicated, and not switched off by an
+# on-disk PreToolUse list that omits it.
 # shellcheck disable=SC2016  # the python source carries a literal $HOME, which the settings file keeps unexpanded
 guard_check='import json,sys; d=json.load(sys.stdin); pre=d["hooks"]["PreToolUse"]; \
- guards=[h for e in pre for h in e["hooks"] if h["command"].endswith("guard-delivery-state.sh")]; \
- assert len(guards)==1, "guard hook count %d" % len(guards); \
- entry=[e for e in pre if any(h["command"].endswith("guard-delivery-state.sh") for h in e["hooks"])][0]; \
- assert entry["matcher"]=="Write|Edit|MultiEdit|Bash", entry["matcher"]; \
- assert guards[0]["command"]=="$HOME/.claude/hooks/guard-delivery-state.sh", guards[0]; \
- assert guards[0]["type"]=="command"'
+ want="$HOME/.claude/hooks/guard-delivery-state.sh"; \
+ entries=[e for e in pre if any(h["command"].endswith("guard-delivery-state.sh") for h in e["hooks"])]; \
+ assert sorted(e["matcher"] for e in entries)==["Read|Grep|Glob","Write|Edit|MultiEdit|Bash"], [e["matcher"] for e in entries]; \
+ guards=[h for e in entries for h in e["hooks"] if h["command"].endswith("guard-delivery-state.sh")]; \
+ assert len(guards)==2, "guard hook count %d" % len(guards); \
+ assert all(g["command"]==want and g["type"]=="command" for g in guards), guards'
 out="$(printf '' | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
 echo "$out" | "$PY" -c "$guard_check; \
 assert any(h[\"command\"]==\"rtk hook claude\" for e in pre for h in e[\"hooks\"]), \"rtk hook lost\"; print(\"PASS\")"
@@ -97,3 +98,10 @@ out="$(printf '%s' "$out" | bash "$here/home/private_dot_claude/modify_settings.
 echo "$out" | "$PY" -c "$guard_check; \
 assert any(h[\"command\"]==\"my-hook\" for e in pre for h in e[\"hooks\"]), \"user hook lost\"; \
 assert d[\"hooks\"][\"Stop\"][0][\"hooks\"][0][\"command\"]==\"my-stop\", \"user Stop hook lost\"; print(\"PASS\")"
+
+# A machine that already has the guard's first entry on disk gains the reading-tools entry and keeps one of each.
+# shellcheck disable=SC2016  # the settings file keeps a literal $HOME
+old_entry='{"hooks":{"PreToolUse":[{"matcher":"Write|Edit|MultiEdit|Bash","hooks":[{"type":"command","command":"$HOME/.claude/hooks/guard-delivery-state.sh"}]}]}}'
+out="$(printf '%s' "$old_entry" | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
+out="$(printf '%s' "$out" | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
+echo "$out" | "$PY" -c "$guard_check; print(\"PASS\")"

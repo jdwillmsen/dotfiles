@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # PreToolUse hook: refuse Write/Edit/MultiEdit/Bash calls that modify the merge-captain's approval state
 # (~/.local/state/merge-captain, ~/.local/state/agent-eval) or the deployed delivery policy
-# (~/.config/agents/change-risk.toml, lanes.toml, merge-captain.toml).
+# (~/.config/agents/change-risk.toml, lanes.toml, merge-captain.toml). It also refuses Read, Write, Edit, Grep and
+# Glob on the merge-captain's token directory (~/.config/merge-captain) and any Bash command that mentions it,
+# except `merge-captain auth` and `merge-captain status`, which never print a token.
 #
 # This stops accidents and a prompt-injected shortcut inside Claude Code. It is not a boundary against a process
 # running as the same user: it reads command text, and shell can always spell a path in a way text matching misses.
@@ -15,7 +17,17 @@ IFS= read -r -d '' input || true
 
 case $input in
     *merge-captain* | *agent-eval* | *change-risk* | *lanes.toml*) ;;
-    *) exit 0 ;;
+    *)
+        # Two ways to reach the token directory without its name in the input: a directory moved by
+        # MERGE_CAPTAIN_TOKENS, and a search rooted at ~/.config, which walks into it.
+        if [[ -n ${MERGE_CAPTAIN_TOKENS:-} && $input == *"$MERGE_CAPTAIN_TOKENS"* ]]; then
+            :
+        elif [[ -n ${XDG_CONFIG_HOME:-} && $input == *"\"$XDG_CONFIG_HOME\""* ]]; then
+            :
+        elif [[ $input != *'.config"'* && $input != *'.config/"'* ]]; then
+            exit 0
+        fi
+        ;;
 esac
 
 UNESC=""
@@ -119,6 +131,9 @@ expand_word() {
 
 PDIRS=()
 PFILES=()
+TDIRS=()
+TANCESTORS=()
+TPATS=()
 # The protected locations, spelled as given and with symlinks resolved.
 build_protected() {
     local base f var
@@ -145,6 +160,32 @@ build_protected() {
         mapfile -t resolved < <(realpath -m -- "${files[@]}" 2>/dev/null)
         PFILES+=("${resolved[@]}")
     fi
+    build_token_protected
+}
+
+# The directory the captain keeps its per-owner tokens in, spelled as given and with symlinks resolved. A search
+# rooted at ~/.config would walk into it, so that directory counts for Grep and Glob; ~ itself does not.
+build_token_protected() {
+    local base
+    local -a dirs=() resolved=()
+    TANCESTORS=()
+    for base in "$HOME/.config" "${XDG_CONFIG_HOME:-}"; do
+        if [[ -n $base ]]; then
+            dirs+=("$base/merge-captain")
+            TANCESTORS+=("$base")
+        fi
+    done
+    if [[ -n ${MERGE_CAPTAIN_TOKENS:-} ]]; then dirs+=("$MERGE_CAPTAIN_TOKENS"); fi
+    TDIRS=("${dirs[@]}")
+    if command -v realpath >/dev/null 2>&1; then
+        mapfile -t resolved < <(realpath -m -- "${dirs[@]}" 2>/dev/null)
+        TDIRS+=("${resolved[@]}")
+        mapfile -t resolved < <(realpath -m -- "${TANCESTORS[@]}" 2>/dev/null)
+        TANCESTORS+=("${resolved[@]}")
+    fi
+    # Text a command can carry the directory in, unexpanded and expanded.
+    TPATS=(".config/merge-captain" "merge-captain/tokens" "XDG_CONFIG_HOME}/merge-captain"
+        "XDG_CONFIG_HOME/merge-captain" "${TDIRS[@]}")
 }
 
 protected() {
@@ -155,6 +196,20 @@ protected() {
     for d in "${PFILES[@]}"; do
         if [[ $p == "$d" ]]; then return 0; fi
     done
+    return 1
+}
+
+# True when the path is inside the token directory; $2=1 also counts the directories that contain it.
+token_protected() {
+    local p=$1 d
+    for d in "${TDIRS[@]}"; do
+        if [[ $p == "$d" || $p == "$d"/* ]]; then return 0; fi
+    done
+    if [[ ${2:-0} == 1 ]]; then
+        for d in "${TANCESTORS[@]}"; do
+            if [[ $p == "$d" ]]; then return 0; fi
+        done
+    fi
     return 1
 }
 
@@ -174,6 +229,62 @@ hits() {
         return
     fi
     return 1
+}
+
+token_hits() {
+    local p rp
+    expand_word "$1"
+    p=$W
+    if [[ -z $p ]]; then return 1; fi
+    if [[ $p != /* ]]; then p="${cwd:-$PWD}/$p"; fi
+    lexnorm "$p"
+    if token_protected "$NORM" "${2:-0}"; then return 0; fi
+    if command -v realpath >/dev/null 2>&1; then
+        rp=$(realpath -m -- "$NORM" 2>/dev/null) || return 1
+        token_protected "$rp" "${2:-0}"
+        return
+    fi
+    return 1
+}
+
+# True when the text spells the token directory in any form, whatever the command around it does with it.
+token_mentions() {
+    local pat
+    for pat in "${TPATS[@]}"; do
+        if [[ -n $pat && $1 == *"$pat"* ]]; then return 0; fi
+    done
+    return 1
+}
+
+# A plain `merge-captain auth|status ...` is how a person saves a token and how anyone checks one; neither prints it.
+# Anything that could run other text inside the same segment disqualifies it.
+token_exempt() {
+    local -a w=()
+    local i t cmd="" sub=""
+    # shellcheck disable=SC2016  # matching the literal characters, not expanding them
+    case $1 in
+        *'`'* | *'<'* | *'>'* | *'$('*) return 1 ;;
+    esac
+    read -ra w <<<"$1"
+    for ((i = 0; i < ${#w[@]}; i++)); do
+        t=${w[i]//[\'\"]/}
+        if [[ $t =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then continue; fi
+        cmd=${t##*/}
+        sub=${w[i + 1]:-}
+        break
+    done
+    [[ $cmd == merge-captain && ($sub == auth || $sub == status) ]]
+}
+
+deny_token() {
+    local what=${2:0:200}
+    {
+        echo "guard-delivery-state: blocked $1 on $what"
+        echo "That is the merge captain's token directory. An agent may not read or change it: the owner saves a"
+        echo "token with \`merge-captain auth <owner>\` in their own terminal, and \`merge-captain status\` shows"
+        echo "which owners have one."
+    } >&2
+    exit 2
 }
 
 deny() {
@@ -272,14 +383,16 @@ check_command() {
     cmd=${cmd//(/$'\n'}
     cmd=${cmd//)/$'\n'}
     while IFS= read -r seg; do
-        if [[ -n $seg ]]; then check_segment "$seg"; fi
+        if [[ -z $seg ]]; then continue; fi
+        if token_mentions "$seg" && ! token_exempt "$seg"; then deny_token "Bash" "$seg"; fi
+        check_segment "$seg"
     done <<<"$cmd"
 }
 
 extract tool_name
 tool=${VALUES[0]:-}
 case $tool in
-    Write | Edit | MultiEdit | Bash) ;;
+    Write | Edit | MultiEdit | Bash | Read | Grep | Glob) ;;
     *) exit 0 ;;
 esac
 
@@ -287,13 +400,34 @@ extract cwd
 cwd=${VALUES[0]:-}
 build_protected
 
+# A call that runs from inside the token directory reaches it with relative names.
+case $tool in
+    Bash | Grep | Glob)
+        if [[ -n $cwd ]] && token_hits "$cwd"; then deny_token "$tool" "$cwd"; fi
+        ;;
+esac
+
 if [[ $tool == Bash ]]; then
     extract command
     for value in "${VALUES[@]}"; do check_command "$value"; done
 else
     extract file_path
     for value in "${VALUES[@]}"; do
-        if hits "$value"; then deny "$tool" "$value"; fi
+        case $tool in
+            Write | Edit | MultiEdit) if hits "$value"; then deny "$tool" "$value"; fi ;;
+        esac
+        if token_hits "$value"; then deny_token "$tool" "$value"; fi
     done
+    if [[ $tool == Grep || $tool == Glob ]]; then
+        extract path
+        for value in "${VALUES[@]}"; do
+            if token_hits "$value" 1; then deny_token "$tool" "$value"; fi
+        done
+        # What the search is told to match can name the directory too; Grep's own pattern is a regex to find, not a place.
+        if [[ $tool == Glob ]]; then extract pattern; else extract glob; fi
+        for value in "${VALUES[@]}"; do
+            if token_mentions "$value"; then deny_token "$tool" "$value"; fi
+        done
+    fi
 fi
 exit 0

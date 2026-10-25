@@ -3,32 +3,46 @@
 # (~/.local/state/merge-captain, ~/.local/state/agent-eval) or the deployed delivery policy
 # (~/.config/agents/change-risk.toml, lanes.toml, merge-captain.toml). It also refuses Read, Write, Edit, Grep and
 # Glob on the merge-captain's token directory (~/.config/merge-captain) and any Bash command that mentions it,
-# except `merge-captain auth` and `merge-captain status`, which never print a token.
+# except `merge-captain auth` and `merge-captain status`, which never print a token. A recursive search whose root is
+# the token directory or any directory above it (Bash, Grep or Glob) is refused too, since it reads the tokens
+# without naming them.
 #
 # This stops accidents and a prompt-injected shortcut inside Claude Code. It is not a boundary against a process
 # running as the same user: it reads command text, and shell can always spell a path in a way text matching misses.
 # Receives the hook JSON on stdin; exit 2 with a message on stderr blocks the call.
 #
-# It runs before every tool call, so everything that mentions none of the protected names returns before any
-# process is started: the input is read with a builtin and matched with shell patterns only.
+# It runs before every tool call, so a call that cannot reach a protected path returns without starting a process:
+# the input is read with a builtin and matched with shell patterns only. A file tool whose path crosses a symlink
+# (or a `..` that a link would change the meaning of) costs one `realpath`, and so does any Grep or Glob.
 set -u
+# An & in a replacement string must stay a literal ampersand.
+shopt -u patsub_replacement 2>/dev/null || true
 
 IFS= read -r -d '' input || true
 
-case $input in
-    *merge-captain* | *agent-eval* | *change-risk* | *lanes.toml*) ;;
-    *)
-        # Two ways to reach the token directory without its name in the input: a directory moved by
-        # MERGE_CAPTAIN_TOKENS, and a search rooted at ~/.config, which walks into it.
-        if [[ -n ${MERGE_CAPTAIN_TOKENS:-} && $input == *"$MERGE_CAPTAIN_TOKENS"* ]]; then
-            :
-        elif [[ -n ${XDG_CONFIG_HOME:-} && $input == *"\"$XDG_CONFIG_HOME\""* ]]; then
-            :
-        elif [[ $input != *'.config"'* && $input != *'.config/"'* ]]; then
-            exit 0
-        fi
-        ;;
-esac
+# True when the text names a protected file, or a directory an environment variable moved one to.
+mentions_protected() {
+    local v
+    case $1 in
+        *merge-captain* | *agent-eval* | *change-risk* | *lanes.toml*) return 0 ;;
+    esac
+    for v in MERGE_CAPTAIN_TOKENS MERGE_CAPTAIN_STATE AGENT_EVAL_STATE MERGE_CAPTAIN_CONFIG AGENT_PACE_LANES \
+        AGENT_EVAL_LANES; do
+        if [[ -n ${!v:-} && $1 == *"${!v}"* ]]; then return 0; fi
+    done
+    return 1
+}
+
+# Set when the raw input names nothing protected; whether the call can still reach something is decided below.
+FAST=0
+if ! mentions_protected "$input"; then
+    # A search rooted at ~/.config walks into the token directory without naming it.
+    if [[ -n ${XDG_CONFIG_HOME:-} && $input == *"\"$XDG_CONFIG_HOME\""* ]]; then
+        :
+    elif [[ $input != *'.config"'* && $input != *'.config/"'* ]]; then
+        FAST=1
+    fi
+fi
 
 UNESC=""
 STR=""
@@ -133,7 +147,9 @@ PDIRS=()
 PFILES=()
 TDIRS=()
 TANCESTORS=()
+ANC_ALL=()
 TPATS=()
+RCWD=""
 # The protected locations, spelled as given and with symlinks resolved.
 build_protected() {
     local base f var
@@ -163,26 +179,28 @@ build_protected() {
     build_token_protected
 }
 
-# The directory the captain keeps its per-owner tokens in, spelled as given and with symlinks resolved. A search
-# rooted at ~/.config would walk into it, so that directory counts for Grep and Glob; ~ itself does not.
+# The directory the captain keeps its per-owner tokens in, spelled as given and with symlinks resolved, and every
+# directory above it: a recursive search rooted at any of them walks into the tokens.
 build_token_protected() {
-    local base
+    local base d
     local -a dirs=() resolved=()
-    TANCESTORS=()
     for base in "$HOME/.config" "${XDG_CONFIG_HOME:-}"; do
-        if [[ -n $base ]]; then
-            dirs+=("$base/merge-captain")
-            TANCESTORS+=("$base")
-        fi
+        if [[ -n $base ]]; then dirs+=("$base/merge-captain"); fi
     done
     if [[ -n ${MERGE_CAPTAIN_TOKENS:-} ]]; then dirs+=("$MERGE_CAPTAIN_TOKENS"); fi
     TDIRS=("${dirs[@]}")
     if command -v realpath >/dev/null 2>&1; then
         mapfile -t resolved < <(realpath -m -- "${dirs[@]}" 2>/dev/null)
         TDIRS+=("${resolved[@]}")
-        mapfile -t resolved < <(realpath -m -- "${TANCESTORS[@]}" 2>/dev/null)
-        TANCESTORS+=("${resolved[@]}")
     fi
+    TANCESTORS=(/)
+    for d in "${TDIRS[@]}"; do
+        while [[ $d == /*/* ]]; do
+            d=${d%/*}
+            TANCESTORS+=("$d")
+        done
+    done
+    ANC_ALL=("${TANCESTORS[@]}" "${TDIRS[@]}")
     # Text a command can carry the directory in, unexpanded and expanded.
     TPATS=(".config/merge-captain" "merge-captain/tokens" "XDG_CONFIG_HOME}/merge-captain"
         "XDG_CONFIG_HOME/merge-captain" "${TDIRS[@]}")
@@ -214,7 +232,8 @@ token_protected() {
 }
 
 cwd=""
-# True when the word names a protected location, relative words resolved against the call's directory.
+# True when the word names a protected location, relative words resolved against the call's directory. The link
+# resolution runs on the path as written, not on the `..`-collapsed one: a link followed by `..` leaves its target.
 hits() {
     local p rp
     expand_word "$1"
@@ -224,7 +243,7 @@ hits() {
     lexnorm "$p"
     if protected "$NORM"; then return 0; fi
     if command -v realpath >/dev/null 2>&1; then
-        rp=$(realpath -m -- "$NORM" 2>/dev/null) || return 1
+        rp=$(realpath -m -- "$p" 2>/dev/null) || return 1
         protected "$rp"
         return
     fi
@@ -240,11 +259,163 @@ token_hits() {
     lexnorm "$p"
     if token_protected "$NORM" "${2:-0}"; then return 0; fi
     if command -v realpath >/dev/null 2>&1; then
-        rp=$(realpath -m -- "$NORM" 2>/dev/null) || return 1
+        rp=$(realpath -m -- "$p" 2>/dev/null) || return 1
         token_protected "$rp" "${2:-0}"
         return
     fi
     return 1
+}
+
+# True when the word, resolved against $cwd, is the token directory, inside it, or a directory above it. A word with
+# a wildcard counts when its first wildcard component could match the next directory down the way to the tokens,
+# the way the shell would: a leading `*` does not match a name that starts with a dot.
+root_word_hits() {
+    local p pre dirpart dir comp a parent name rp
+    expand_word "$1"
+    p=$W
+    if [[ -z $p ]]; then return 1; fi
+    if [[ $p != *[\*\?\[]* ]]; then
+        token_hits "$p" 1
+        return
+    fi
+    pre=${p%%[\*\?\[]*}
+    if [[ $pre == */* ]]; then
+        dirpart=${pre%"${pre##*/}"}
+        dir=${dirpart%/}
+        if [[ -z $dir ]]; then dir=/; fi
+    else
+        dirpart=""
+        dir=.
+    fi
+    comp=${p:${#dirpart}}
+    comp=${comp%%/*}
+    if token_hits "$dir" 0; then return 0; fi
+    if [[ $dir != /* ]]; then dir="${cwd:-$PWD}/$dir"; fi
+    rp=""
+    if command -v realpath >/dev/null 2>&1; then rp=$(realpath -m -- "$dir" 2>/dev/null) || rp=""; fi
+    lexnorm "$dir"
+    dir=$NORM
+    for a in "${ANC_ALL[@]}"; do
+        if [[ $a == / ]]; then continue; fi
+        parent=${a%/*}
+        if [[ -z $parent ]]; then parent=/; fi
+        if [[ $parent != "$dir" && $parent != "$rp" ]]; then continue; fi
+        name=${a##*/}
+        if [[ $name == .* && $comp != .* ]]; then continue; fi
+        # shellcheck disable=SC2053  # the component is a glob pattern on purpose
+        if [[ $name == $comp ]]; then return 0; fi
+    done
+    return 1
+}
+
+# root_word_hits from the directory the call started in and from the one a `cd` earlier in the line moved to.
+search_hit() {
+    local saved=$cwd
+    if root_word_hits "$1"; then return 0; fi
+    if [[ -n $RCWD && $RCWD != "$saved" ]]; then
+        cwd=$RCWD
+        if root_word_hits "$1"; then
+            cwd=$saved
+            return 0
+        fi
+        cwd=$saved
+    fi
+    return 1
+}
+
+# True when a Grep or Glob starting at $1 is confined, by its glob or pattern $2, to a directory that neither is nor
+# contains the token directory. A leading wildcard confines nothing.
+search_scoped() {
+    local root=$1 s=$2 pre dir
+    expand_word "$root"
+    root=$W
+    if [[ $root != /* ]]; then root="${cwd:-$PWD}/$root"; fi
+    expand_word "$s"
+    s=$W
+    if [[ -z $s ]]; then return 1; fi
+    if [[ $s == *[\*\?\[\{]* ]]; then
+        pre=${s%%[\*\?\[\{]*}
+        if [[ $pre != */* ]]; then return 1; fi
+        dir=${pre%/*}
+        if [[ -z $dir ]]; then dir=/; fi
+    else
+        dir=$s
+    fi
+    if [[ $dir != /* ]]; then dir="$root/$dir"; fi
+    if token_hits "$dir" 1; then return 1; fi
+    return 0
+}
+
+SFLAGS=()
+SARGS=()
+SWORDS=()
+STDIR=0
+# True when a flag of the current command carries one of the letters ($1), is one of the long names ($2), or both.
+has_opt() {
+    local f k
+    for f in "${SFLAGS[@]}"; do
+        case $f in
+            --*)
+                if [[ " $2 " == *" ${f%%=*} "* ]]; then return 0; fi
+                ;;
+            -?*)
+                for ((k = 0; k < ${#1}; k++)); do
+                    if [[ $f == *"${1:k:1}"* ]]; then return 0; fi
+                done
+                ;;
+        esac
+    done
+    return 1
+}
+
+# A command that walks a whole tree, aimed at the token directory or anything above it, reads the tokens however
+# little it names them. Without a path it searches the directory it runs in.
+check_search() {
+    local cmd=$1 recursive=0 pattern=0 t i
+    local -a targets=()
+    case $cmd in
+        grep | egrep | fgrep | zgrep | zegrep | zfgrep)
+            pattern=1
+            if has_opt rR "--recursive --dereference-recursive"; then recursive=1; fi
+            ;;
+        rg | ag | ack | fd)
+            pattern=1
+            recursive=1
+            ;;
+        find | du | tree) recursive=1 ;;
+        ls) if has_opt R "--recursive"; then recursive=1; fi ;;
+        cp) if has_opt rRa "--recursive --archive"; then recursive=1; fi ;;
+        rsync) if has_opt ra "--recursive --archive"; then recursive=1; fi ;;
+        zip) if has_opt r "--recurse-paths"; then recursive=1; fi ;;
+        tar)
+            if has_opt cru "--create --append --update" || [[ ${SWORDS[0]:-} != -* && ${SWORDS[0]:-} == *[cru]* ]]; then
+                recursive=1
+            fi
+            ;;
+    esac
+    if ((!recursive)); then return; fi
+    case $cmd in
+        find)
+            for ((i = 0; i < ${#SWORDS[@]}; i++)); do
+                t=${SWORDS[i]}
+                case $t in
+                    -H | -L | -P) continue ;;
+                    -* | '(' | ')' | '!') break ;;
+                esac
+                targets+=("$t")
+            done
+            ;;
+        cp | rsync)
+            targets=("${SARGS[@]}")
+            if ((!STDIR && ${#targets[@]})); then unset 'targets[-1]'; fi
+            ;;
+        *) targets=("${SARGS[@]}") ;;
+    esac
+    if ((pattern)) && ! has_opt ef "--regexp --file --files" && ((${#targets[@]})); then targets=("${targets[@]:1}"); fi
+    if ((${#targets[@]} == 0)); then targets=(.); fi
+    for t in "${targets[@]}"; do
+        if search_hit "$t"; then deny_token "recursive $cmd" "$t" search; fi
+    done
 }
 
 # True when the text spells the token directory in any form, whatever the command around it does with it.
@@ -283,6 +454,9 @@ deny_token() {
         echo "That is the merge captain's token directory. An agent may not read or change it: the owner saves a"
         echo "token with \`merge-captain auth <owner>\` in their own terminal, and \`merge-captain status\` shows"
         echo "which owners have one."
+        if [[ -n ${3:-} ]]; then
+            echo "A search rooted there walks into it; aim it at the project directory instead."
+        fi
     } >&2
     exit 2
 }
@@ -300,8 +474,8 @@ deny() {
 
 # One simple command, already split from the rest of the line.
 check_segment() {
-    local -a w=() args=()
-    local i n t cmd="" ci=0 target last="" take_next=0 in_place=0 dup=0
+    local -a w=() args=() flags=()
+    local i n t cmd="" ci=0 target last="" take_next=0 in_place=0 dup=0 tdir=0 rest
     read -ra w <<<"$1"
     n=${#w[@]}
 
@@ -333,6 +507,19 @@ check_segment() {
     done
     if [[ -z $cmd ]]; then return; fi
 
+    # `bash -c '...'` runs another line of commands; judge its text the way the outer line is.
+    case $cmd in
+        bash | sh | zsh | dash)
+            for ((i = ci + 1; i < n; i++)); do
+                if [[ ${w[i]} == -c ]]; then
+                    rest="${w[*]:i+1}"
+                    check_command "${rest//[\'\"]/}"
+                    break
+                fi
+            done
+            ;;
+    esac
+
     for ((i = ci + 1; i < n; i++)); do
         t=${w[i]}
         case $t in
@@ -346,13 +533,44 @@ check_segment() {
             continue
         fi
         case $t in
-            -t | --target-directory) if [[ $cmd == cp || $cmd == mv || $cmd == install || $cmd == ln ]]; then take_next=1; fi ;;
-            --target-directory=*) if hits "${t#*=}"; then deny "$cmd" "${t#*=}"; fi ;;
-            -*) ;;
+            -t | --target-directory)
+                if [[ $cmd == cp || $cmd == mv || $cmd == install || $cmd == ln ]]; then
+                    take_next=1
+                    tdir=1
+                fi
+                ;;
+            --target-directory=*)
+                tdir=1
+                if hits "${t#*=}"; then deny "$cmd" "${t#*=}"; fi
+                ;;
+            -*) flags+=("$t") ;;
             *) args+=("$t") ;;
         esac
     done
     if ((${#args[@]})); then last=${args[-1]}; fi
+
+    SFLAGS=("${flags[@]}")
+    SARGS=("${args[@]}")
+    SWORDS=("${w[@]:ci+1}")
+    STDIR=$tdir
+    check_search "$cmd"
+    case $cmd in
+        cd | pushd)
+            if ((${#args[@]})); then
+                expand_word "${args[0]}"
+                t=$W
+            elif ((${#flags[@]} == 0)); then
+                t=$HOME
+            else
+                t=""
+            fi
+            if [[ -n $t ]]; then
+                if [[ $t != /* ]]; then t="${RCWD:-${cwd:-$PWD}}/$t"; fi
+                lexnorm "$t"
+                RCWD=$NORM
+            fi
+            ;;
+    esac
 
     case $cmd in
         tee | mv | rm | unlink | shred | truncate | touch | chmod | chown | chattr)
@@ -373,20 +591,114 @@ check_segment() {
     esac
 }
 
+# A line of commands, split wherever the shell would start a new one: newlines, ; && || | |& and a lone & (which
+# backgrounds the command before it). The & of >&, &> and 2>&1 is part of a redirect, so it is set aside first.
 check_command() {
     local cmd=$1 seg
     cmd=${cmd//>|/>}
+    cmd=${cmd//>&/$'\x02'}
+    cmd=${cmd//&>/$'\x03'}
+    cmd=${cmd//|&/$'\n'}
     cmd=${cmd//&&/$'\n'}
+    cmd=${cmd//&/$'\n'}
     cmd=${cmd//||/$'\n'}
     cmd=${cmd//|/$'\n'}
     cmd=${cmd//;/$'\n'}
     cmd=${cmd//(/$'\n'}
     cmd=${cmd//)/$'\n'}
+    cmd=${cmd//$'\x02'/>&}
+    cmd=${cmd//$'\x03'/&>}
     while IFS= read -r seg; do
         if [[ -z $seg ]]; then continue; fi
         if token_mentions "$seg" && ! token_exempt "$seg"; then deny_token "Bash" "$seg"; fi
         check_segment "$seg"
     done <<<"$cmd"
+}
+
+# True when a shell line names a command that can walk a tree and something that could be the home directory, the
+# config directory or one of their parents. Decided with builtins only, so an ordinary command costs no process.
+SEARCH_WORD='(^|[^[:alnum:]_./-])(grep|egrep|fgrep|zgrep|rg|ag|ack|fd|find|tar|rsync|cp|ls|du|tree|zip)([^[:alnum:]_./-]|$)'
+BARE_CD='(^|[;&|(])[[:space:]]*(cd|pushd)[[:space:]]*($|[;&|)])'
+SLASH_WORD="(^|[[:space:]'\"])/([[:space:]'\"*]|\$)"
+# True when the text spells a directory above $1, or $1 itself.
+names_above() {
+    local d=$1
+    if [[ -z $d ]]; then return 1; fi
+    if [[ $2 == *"$d"* ]]; then return 0; fi
+    while [[ $d == /*/* ]]; do
+        d=${d%/*}
+        if [[ $2 == *"$d"* ]]; then return 0; fi
+    done
+    return 1
+}
+may_search() {
+    [[ $1 =~ $SEARCH_WORD ]] || return 1
+    if [[ -n ${MERGE_CAPTAIN_TOKENS:-} ]]; then return 0; fi
+    case $1 in
+        *'~'* | *HOME* | *XDG* | */home* | *.config* | *..*) return 0 ;;
+    esac
+    if names_above "$HOME" "$1" || names_above "${XDG_CONFIG_HOME:-}" "$1" || [[ $1 =~ $SLASH_WORD ]]; then return 0; fi
+    if [[ -n $cwd && ($cwd == "$HOME" || $HOME == "${cwd%/}"/*) ]]; then return 0; fi
+    [[ $1 =~ $BARE_CD ]]
+}
+
+# True when no component of the absolute path is a symlink and none is `..`, which a link would make mean something
+# else: the path is then its own real path.
+plain_path() {
+    local acc="" seg
+    local -a parts
+    local IFS=/
+    read -ra parts <<<"$1"
+    for seg in "${parts[@]}"; do
+        case $seg in
+            '') continue ;;
+            ..) return 1 ;;
+        esac
+        acc+="/$seg"
+        if [[ -L $acc ]]; then return 1; fi
+    done
+    return 0
+}
+
+# A file tool names a protected path through a link only if resolving it shows so; the common call has no link
+# and stays free of processes.
+fast_file_gate() {
+    local v p r
+    local -a resolve=() resolved=()
+    extract file_path
+    for v in "${VALUES[@]}"; do
+        expand_word "$v"
+        p=$W
+        if [[ -z $p ]]; then continue; fi
+        if [[ $p != /* ]]; then p="${cwd:-$PWD}/$p"; fi
+        if plain_path "$p"; then
+            if mentions_protected "$p"; then return; fi
+        else
+            resolve+=("$p")
+        fi
+    done
+    if ((${#resolve[@]})); then
+        command -v realpath >/dev/null 2>&1 || return
+        mapfile -t resolved < <(realpath -m -- "${resolve[@]}" 2>/dev/null)
+        for r in "${resolved[@]}"; do
+            if mentions_protected "$r"; then return; fi
+        done
+    fi
+    exit 0
+}
+
+fast_gate() {
+    local v
+    case $tool in
+        Bash)
+            extract command
+            for v in "${VALUES[@]}"; do
+                if may_search "$v"; then return; fi
+            done
+            exit 0
+            ;;
+        Read | Write | Edit | MultiEdit) fast_file_gate ;;
+    esac
 }
 
 extract tool_name
@@ -398,6 +710,7 @@ esac
 
 extract cwd
 cwd=${VALUES[0]:-}
+if ((FAST)); then fast_gate; fi
 build_protected
 
 # A call that runs from inside the token directory reaches it with relative names.
@@ -409,7 +722,10 @@ esac
 
 if [[ $tool == Bash ]]; then
     extract command
-    for value in "${VALUES[@]}"; do check_command "$value"; done
+    for value in "${VALUES[@]}"; do
+        RCWD=$cwd
+        check_command "$value"
+    done
 else
     extract file_path
     for value in "${VALUES[@]}"; do
@@ -419,14 +735,22 @@ else
         if token_hits "$value"; then deny_token "$tool" "$value"; fi
     done
     if [[ $tool == Grep || $tool == Glob ]]; then
-        extract path
-        for value in "${VALUES[@]}"; do
-            if token_hits "$value" 1; then deny_token "$tool" "$value"; fi
-        done
-        # What the search is told to match can name the directory too; Grep's own pattern is a regex to find, not a place.
+        # Grep's own pattern is a regex to find, not a place; Glob's pattern and Grep's glob are places.
         if [[ $tool == Glob ]]; then extract pattern; else extract glob; fi
-        for value in "${VALUES[@]}"; do
+        scopes=("${VALUES[@]}")
+        for value in "${scopes[@]}"; do
             if token_mentions "$value"; then deny_token "$tool" "$value"; fi
+        done
+        extract path
+        roots=("${VALUES[@]}")
+        if ((${#roots[@]} == 0)); then roots=("${cwd:-$PWD}"); fi
+        for value in "${roots[@]}"; do
+            if [[ -z $value ]]; then value=${cwd:-$PWD}; fi
+            if token_hits "$value"; then deny_token "$tool" "$value"; fi
+            # A search rooted above the token directory reaches it unless its glob keeps it inside a project.
+            if token_hits "$value" 1 && ! search_scoped "$value" "${scopes[0]:-}"; then
+                deny_token "$tool" "$value" search
+            fi
         done
     fi
 fi

@@ -385,9 +385,10 @@ directory and allows `merge-captain auth|status`.
 
 ## Calls made for the owner
 
-- Only the dotfiles repo is live, at R2. Everything else is dry-run until the
-  log shows sensible decisions for a few days; flipping a repo is a one-line
-  config edit.
+- Every listed repo is live at R2. The personal ones run on the owner's login; the
+  jdwlabs and dotablaze-tech repos are live with `require_token`, so each starts
+  the moment its owner has run `merge-captain auth`. Changing a mode or a tier is a
+  one-line config edit and is R3.
 - Reviews use the lane `agent-pace` picks, so they spend quota the same way
   other work does, and each review is a scoreboard data point.
 - The captain never fixes PRs and never bypasses protections.

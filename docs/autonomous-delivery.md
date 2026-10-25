@@ -14,7 +14,7 @@ the options considered and the data behind them are in
 | `change-class` | Classifies a plan, ticket, diff or PR as R0–R3 with tags. No model call. | `~/.local/bin/change-class`, policy `~/.config/agents/change-risk.toml` |
 | `agent-pace` | Reads the plan-quota log, works out where the week should be, and picks a lane for each task. | `~/.local/bin/agent-pace`, lanes `~/.config/agents/lanes.toml` |
 | `agent-eval` | Keeps the assignment and outcome ledgers, collects T3 delegated-task history, scores each lane per task class, advises keep, probation or promote. | `~/.local/bin/agent-eval`, ledgers `~/.local/state/agent-eval/` |
-| `merge-captain` | Reviews and rebase-merges R0–R2 pull requests by tier, labels R3 for the owner; dotfiles live, other repos dry-run. See [`merge-captain.md`](merge-captain.md). | `~/.local/bin/merge-captain`, config `~/.config/agents/merge-captain.toml`, log `~/.local/state/merge-captain/` |
+| `merge-captain` | Reviews and rebase-merges R0–R2 pull requests by tier, labels R3 for the owner; every listed repo live at R2, the org repos once their owner has a token. See [`merge-captain.md`](merge-captain.md). | `~/.local/bin/merge-captain`, config `~/.config/agents/merge-captain.toml`, log `~/.local/state/merge-captain/` |
 | `models` report section | Puts the scoreboard and pace in the daily to yearly agent reports. | `agent-report` |
 | Rules and skills | Risk tiers, stuck protocol, ticket-per-thread, dispatch. | shared `AGENTS.md`, skills `jira-followup`, `task-dispatch` |
 
@@ -86,8 +86,10 @@ Live since 2026-10-23. Two systemd user timers drive it:
 | `merge-captain.timer` | every 15 minutes | classify open PRs, review, merge R0–R2 where the repo is live |
 | `agent-eval-collect.timer` | daily 06:45 | `agent-eval collect` then `enrich`, so reports have outcomes |
 
-Only `jdwillmsen/dotfiles` is live (up to R2). The other repos are `dry-run`:
-they are classified and logged, nothing is written. Read what the captain did:
+Every listed repo is live (up to R2). The six jdwlabs and dotablaze-tech repos set
+`require_token`, so they wait (`token-required`, no GitHub call) until their owner has
+run `merge-captain auth <owner>`, then start by themselves. A `dry-run` repo is
+classified and logged and nothing is written. Read what the captain did:
 
 ```sh
 merge-captain status                       # config in force, caps used, last runs

@@ -508,17 +508,26 @@ rm -f "$CFG"
 want 1 status
 grep -q 'cannot read config' "$out" || fail "missing config" "$(cat "$out")"
 
-# ── The shipped config: one live repo, the rest dry-run ──
+# ── The shipped config: every listed repo is live; the org repos wait for their owner's token ──
 newcase
 MERGE_CAPTAIN_CONFIG_SAVE="$CFG"
 CFG="$shipped_cfg"
 want 0 status
-grep -q '^mode_live: 1$' "$out" && grep -q '^mode_dry: 11$' "$out" || fail "shipped config modes" "$(cat "$out")"
+grep -q '^mode_live: 12$' "$out" && grep -q '^mode_dry: 0$' "$out" || fail "shipped config modes" "$(cat "$out")"
 grep -qE '^  jdwillmsen/dotfiles,live,R2$' "$out" || fail "dotfiles must be live at R2" "$(cat "$out")"
 for r in jdwillmsen/gameops jdwillmsen/jdw-deployments jdwillmsen/fwb-minecraft jdwillmsen/career \
     jdwillmsen/countdown-app jdwlabs/apps jdwlabs/deployments jdwlabs/infrastructure jdwlabs/platform \
     dotablaze-tech/apps dotablaze-tech/deployments; do
-    grep -qE "^  $r,dry-run,R2$" "$out" || fail "$r must be listed dry-run" "$(cat "$out")"
+    grep -qE "^  $r,live,R2$" "$out" || fail "$r must be listed live at R2" "$(cat "$out")"
+done
+# The six org repositories are held until their owner has a token; the personal ones run on the login.
+for r in jdwlabs/apps jdwlabs/deployments jdwlabs/infrastructure jdwlabs/platform \
+    dotablaze-tech/apps dotablaze-tech/deployments; do
+    grep -qE "^  $r,yes,default$" "$out" || fail "$r must require its owner's token" "$(cat "$out")"
+done
+for r in jdwillmsen/gameops jdwillmsen/jdw-deployments jdwillmsen/fwb-minecraft jdwillmsen/career \
+    jdwillmsen/countdown-app jdwillmsen/dotfiles; do
+    if grep -qE "^  $r,yes," "$out"; then fail "$r must not require a token"; fi
 done
 want 0 run --dry-run
 grep -q '0 pull requests acted on' "$out" || fail "empty run has no definitive empty state" "$(cat "$out")"

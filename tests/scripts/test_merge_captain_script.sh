@@ -2344,6 +2344,68 @@ assert {x for x in k if x.startswith("acme/a#")} == {"acme/a#1", "acme/a#2"}, so
 assert not [x for x in k if x.startswith("acme/b#1")], "the repo that listed this time keeps only open pull requests"
 PY
 
+# examined.json written by hand or by a bug: a time that is not a finite moment is dropped, one in the future is
+# clamped to now, and the file comes back clean without the run losing its summary.
+newcase
+REPOS="acme/a:live" fair_cfg max_prs_per_run=2 max_prs_per_repo=100 max_merges_per_hour=1000
+flood acme/a 1 11
+mkdir -p "$STATE"
+python3 -I - "$STATE/examined.json" <<'PY'
+import json, sys
+rows = {"acme/a#1": "2030-01-01T00:00:00Z", "acme/a#2": "1e20", "acme/a#3": "inf", "acme/a#4": "nan",
+        "acme/a#5": "9" * 400, "acme/a#6": 5, "acme/a#7": [1], "acme/a#8": None, "acme/a#9": "garbage",
+        "acme/a#10": "-5", "acme/a#11": "2026-10-01T00:00:00Z"}
+json.dump(rows, open(sys.argv[1], "w"))
+PY
+at_minute 0
+want 0 run
+grep -q '^run: ' "$out" || fail "a run over a damaged examined.json lost its summary" "$(cat "$out" "$err")"
+if grep -q Traceback "$err"; then fail "a damaged examined.json crashed the run" "$(cat "$err")"; fi
+python3 -I - "$STATE/examined.json" <<'PY' || fail "examined.json was not rewritten clean" "$(cat "$STATE/examined.json")"
+import json, re, sys
+k = json.load(open(sys.argv[1]))
+assert all(isinstance(v, str) and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", v) and v <= "2026-10-23T20:00:00Z"
+           for v in k.values()), k
+assert k["acme/a#1"] == "2026-10-23T20:00:00Z", "a future date should be clamped to now"
+assert k["acme/a#2"] == "2026-10-23T20:00:00Z", "an absurdly large time should be clamped to now"
+assert k["acme/a#11"] == "2026-10-01T00:00:00Z", "a good entry was altered"
+assert not {"acme/a#5", "acme/a#6", "acme/a#7", "acme/a#8", "acme/a#9", "acme/a#10"} & set(k), sorted(k)
+PY
+# A clamped entry is "just examined", so it no longer outranks a repository's other pull requests for ever.
+at_minute 1
+want 0 run
+[ "$(examined_count acme/a)" = 4 ] || fail "the second run served the wrong pull requests" "$(cat "$S/gh.log")"
+want 0 status
+grep -q '^  examined_tracked: ' "$out" || fail "status over a damaged examined.json" "$(cat "$out" "$err")"
+
+# Deeply nested state reads as empty instead of crashing.
+newcase
+REPOS="acme/a:live" fair_cfg max_prs_per_repo=100 max_merges_per_hour=1000
+flood acme/a 1 2
+mkdir -p "$STATE"
+python3 -I -c 'import sys; open(sys.argv[1], "w").write("[" * 100000 + "]" * 100000)' "$STATE/examined.json"
+python3 -I -c 'import sys; open(sys.argv[1], "w").write("[" * 100000 + "]" * 100000)' "$STATE/rotation.json"
+at_minute 0
+want 0 run
+grep -q '^run: ' "$out" || fail "deeply nested state lost the summary" "$(cat "$out" "$err")"
+if grep -q Traceback "$err"; then fail "deeply nested state crashed the run" "$(cat "$err")"; fi
+python3 -I -c 'import json,sys; assert set(json.load(open(sys.argv[1]))) == {"acme/a#1", "acme/a#2"}' "$STATE/examined.json" ||
+    fail "deeply nested examined.json was not rewritten" "$(head -c 300 "$STATE/examined.json")"
+python3 -I -c 'import json,sys; json.load(open(sys.argv[1]))' "$STATE/rotation.json" ||
+    fail "deeply nested rotation.json was not rewritten" "$(head -c 300 "$STATE/rotation.json")"
+want 0 status
+# Saving the fairness state can fail for any reason; the run still ends with its summary.
+newcase
+REPOS="acme/a:live" fair_cfg max_prs_per_repo=100 max_merges_per_hour=1000
+flood acme/a 1 2
+mkdir -p "$STATE/examined.json"
+at_minute 0
+want 0 run
+grep -q '^run: ' "$out" || fail "a failed save lost the summary" "$(cat "$out" "$err")"
+[ "$(count 'fairness state not saved' "$err")" = 1 ] || fail "a failed save should say so once" "$(cat "$err")"
+if grep -q Traceback "$err"; then fail "a failed save crashed the run" "$(cat "$err")"; fi
+rmdir "$STATE/examined.json"
+
 # The API budget: low in either pool stops the run once; exactly the floor is enough; an unreadable answer is not low.
 newcase
 REPOS="acme/live:live acme/dry:dry-run" fair_cfg max_merges_per_hour=1000

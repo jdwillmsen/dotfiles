@@ -14,6 +14,7 @@ import datetime as dt
 import fcntl
 import getpass
 import json
+import math
 import os
 import re
 import shutil
@@ -1594,7 +1595,7 @@ def decisions_block(rows):
 def read_state_json(path):
     try:
         j = json.loads(path.read_text())
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError, MemoryError):
         return {}
     return j if isinstance(j, dict) else {}
 
@@ -1608,13 +1609,20 @@ def load_rotation():
     return out
 
 
-def load_examined():
-    """repo#number -> when the captain last spent a decision on it, as epoch seconds."""
+def load_examined(now):
+    """repo#number -> when the captain last spent a decision on it, as epoch seconds. An entry whose time is not a
+    finite, parseable moment is dropped, and one dated after `now` is clamped to it: a future date would otherwise
+    sort a pull request last for as long as it stayed in the file."""
     out = {}
     for k, v in read_state_json(EXAMINED).items():
-        t = parse_time(v)
-        if isinstance(k, str) and re.fullmatch(r"[^#\s]+#[0-9]+", k) and t is not None:
-            out[k] = t
+        if not (isinstance(k, str) and isinstance(v, str) and re.fullmatch(r"[^#\s]+#[0-9]+", k)):
+            continue
+        try:
+            t = parse_time(v)
+        except (ValueError, OverflowError, OSError):
+            continue
+        if t is not None and math.isfinite(t) and t >= 0:
+            out[k] = min(t, now)
     return out
 
 
@@ -1627,7 +1635,15 @@ def rotate(group, start):
 def save_fairness(run, state):
     """Rotation cursors and examination times, each swapped in whole. A pull request that is no longer open is
     forgotten, and only for a repository whose whole list was read: a failed or truncated list says nothing
-    about what closed."""
+    about what closed. It runs in a `finally`, so nothing it hits may escape: a run that did its work must still
+    print its summary."""
+    try:
+        write_fairness(run, state)
+    except Exception as e:
+        log(f"fairness state not saved: {getattr(e, 'strerror', None) or type(e).__name__}")
+
+
+def write_fairness(run, state):
     examined = run["examined"]
     configured = {r["name"] for r in run["cap"].cfg["repos"]}
     for key in list(examined):
@@ -1637,11 +1653,8 @@ def save_fairness(run, state):
     newest = sorted(examined.items(), key=lambda kv: kv[1], reverse=True)[:EXAMINED_MAX]
     rot = {"live": run["cursor"].get("live") or state.get("live"), "dry": run["cursor"].get("dry") or state.get("dry"),
            "deferred": run["deferred_n"], "at": run["id"]}
-    try:
-        write_private(EXAMINED, json.dumps({k: iso(v) for k, v in sorted(newest)}, indent=0) + "\n")
-        write_private(ROTATION, json.dumps({k: v for k, v in rot.items() if v is not None}) + "\n")
-    except OSError as e:
-        log(f"fairness state not saved: {e.strerror}")
+    write_private(EXAMINED, json.dumps({k: iso(v) for k, v in sorted(newest)}, indent=0) + "\n")
+    write_private(ROTATION, json.dumps({k: v for k, v in rot.items() if v is not None}) + "\n")
 
 
 def check_api_budget(run, repos):
@@ -1764,7 +1777,7 @@ def cmd_run(args):
     # examined to the scheduled run that follows it.
     persist = not (args.dry_run or args.repo or args.pr is not None)
     run = {"cap": cap, "id": run_id, "args": args, "nothing": nothing, "decisions": [], "deferred": [], "deferred_n": 0,
-           "failed_lists": 0, "examined": load_examined(), "open": {}, "cursor": {}, "walked": False,
+           "failed_lists": 0, "examined": load_examined(cap.now), "open": {}, "cursor": {}, "walked": False,
            "low_owners": set(), "budget_logged": set()}
     state = load_rotation()
     groups = [("live", [r for r in repos if r["mode"] == "live" and not args.dry_run]),
@@ -1883,7 +1896,7 @@ def cmd_status(args):
     rot = load_rotation()
     out["rotation"] = {"live_next": rot.get("live", "-"), "dry_next": rot.get("dry", "-"),
                        "deferred_last_run": rot["deferred"], "as_of": rot["at"] or "-",
-                       "examined_tracked": len(load_examined())}
+                       "examined_tracked": len(load_examined(now_epoch()))}
     out["owners"], out["warnings"] = owner_report(cfg["repos"], now_epoch())
     runs = [r for r in read_log() if r.get("action") == "run"][-5:]
     out["last_runs"] = [{"at": r.get("at"), "result": r.get("reason")} for r in reversed(runs)]

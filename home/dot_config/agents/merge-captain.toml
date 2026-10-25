@@ -57,55 +57,61 @@ max_tier = "R2"
 
 [[repo]]
 name = "jdwillmsen/gameops"
-mode = "dry-run"
+mode = "live"
 max_tier = "R2"
 
 [[repo]]
 name = "jdwillmsen/jdw-deployments"
-mode = "dry-run"
+mode = "live"
 max_tier = "R2"
 
 [[repo]]
 name = "jdwillmsen/fwb-minecraft"
-mode = "dry-run"
+mode = "live"
 max_tier = "R2"
 
 [[repo]]
 name = "jdwillmsen/career"
-mode = "dry-run"
+mode = "live"
 max_tier = "R2"
 
 [[repo]]
 name = "jdwillmsen/countdown-app"
-mode = "dry-run"
+mode = "live"
 max_tier = "R2"
 
 [[repo]]
 name = "jdwlabs/apps"
-mode = "dry-run"
+mode = "live"
 max_tier = "R2"
+require_token = true
 
 [[repo]]
 name = "jdwlabs/deployments"
-mode = "dry-run"
+mode = "live"
 max_tier = "R2"
+require_token = true
 
 [[repo]]
 name = "jdwlabs/infrastructure"
-mode = "dry-run"
+mode = "live"
 max_tier = "R2"
+require_token = true
 
 [[repo]]
 name = "jdwlabs/platform"
-mode = "dry-run"
+mode = "live"
 max_tier = "R2"
+require_token = true
 
 [[repo]]
 name = "dotablaze-tech/apps"
-mode = "dry-run"
+mode = "live"
 max_tier = "R2"
+require_token = true
 
 [[repo]]
 name = "dotablaze-tech/deployments"
-mode = "dry-run"
+mode = "live"
 max_tier = "R2"
+require_token = true

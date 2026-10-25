@@ -9,6 +9,14 @@
 # allow_no_checks: true lets a repository with no CI at all merge; otherwise a
 # pull request that reports no checks waits.
 # max_prs_per_repo: optional; overrides [limits] max_prs_per_repo for this repository.
+# require_token: optional, default false. true holds the repository (waiting,
+# token-required, no GitHub call) until its owner has a token file, then runs it
+# as usual. It can only withhold; a bad token keeps its own reason. Example:
+#   [[repo]]
+#   name = "jdwlabs/apps"
+#   mode = "dry-run"
+#   max_tier = "R2"
+#   require_token = true
 
 [limits]
 # Caps count only pull requests that need a decision: a draft, a held one or one

@@ -75,6 +75,7 @@ name = "jdwillmsen/dotfiles"
 mode = "live"        # live | dry-run | off
 max_tier = "R2"
 allow_no_checks = false   # optional; true lets a repo with no CI merge
+require_token = false     # optional; true holds the repo until its owner has a token file
 ```
 
 The PR author login is normalised before matching: a leading `app/` is dropped and
@@ -242,6 +243,14 @@ Per owner:
 - Past its expiry (the date in `<owner>.meta` is the last good day): the owner's
   repositories `waiting token-expired`, again with no fallback. `status` warns from
   14 days out.
+- `require_token = true` on a `[[repo]]` (a boolean, else a config error) turns the
+  first case into a hold: while the owner has no token file (`identity: default`)
+  the repository gets one `waiting token-required` row per run, in live and dry-run
+  alike, and no `gh` call is made for it, listing included. It does not count as a
+  failed run. `status` shows it under `token_required` and warns `<owner>: token
+  required but missing`; once a valid token file exists the repository is processed
+  with no config edit. The option can only withhold: an insecure or expired token
+  keeps its own row, and a repository without the option is unchanged.
 
 `merge-captain auth <owner>` is human-only: it exits 2 unless stdin and stderr are
 both terminals, reads the token with `getpass`, accepts only a fine-grained
@@ -366,7 +375,8 @@ redacted before the prompt; a merge call that failed after merging is logged
 as merged; the log rotates at 5 MB; each owner's calls carry that owner's token
 and an owner without a file keeps the default login; a token file or directory
 that is group- or world-accessible, a symlink or malformed is never used and does
-not fall back; an expired token makes the owner wait; a token never appears in the
+not fall back; an expired token makes the owner wait; `require_token` holds a repository, with no
+gh call, until its owner has a token file; a token never appears in the
 reviewer or tool environments, a log, state file, comment or message; `auth` refuses
 without a terminal, saves atomically with the right modes, refuses classic tokens
 and never echoes the token; `status` shows identity, login and days to expiry with a

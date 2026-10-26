@@ -3,9 +3,10 @@
 # (~/.local/state/merge-captain, ~/.local/state/agent-eval) or the deployed delivery policy
 # (~/.config/agents/change-risk.toml, lanes.toml, merge-captain.toml). It also refuses Read, Write, Edit, Grep and
 # Glob on the merge-captain's token directory (~/.config/merge-captain) and any Bash command that mentions it,
-# except `merge-captain auth` and `merge-captain status`, which never print a token. A recursive search whose root is
-# the token directory or any directory above it (Bash, Grep or Glob) is refused too, since it reads the tokens
-# without naming them.
+# except `merge-captain auth`, `auth-app` and `status`, which never print a token or key. The directory also holds
+# the approver App's id file and private key (approver.json, approver.key), so they are covered the same way. A
+# recursive search whose root is the token directory or any directory above it (Bash, Grep or Glob) is refused too,
+# since it reads the tokens without naming them.
 #
 # This stops accidents and a prompt-injected shortcut inside Claude Code. It is not a boundary against a process
 # running as the same user: it reads command text, and shell can always spell a path in a way text matching misses.
@@ -427,7 +428,8 @@ token_mentions() {
     return 1
 }
 
-# A plain `merge-captain auth|status ...` is how a person saves a token and how anyone checks one; neither prints it.
+# A plain `merge-captain auth|auth-app|status ...` is how a person saves a token or the approver App's key and how
+# anyone checks them; none prints one.
 # Anything that could run other text inside the same segment disqualifies it.
 token_exempt() {
     local -a w=()
@@ -444,7 +446,7 @@ token_exempt() {
         sub=${w[i + 1]:-}
         break
     done
-    [[ $cmd == merge-captain && ($sub == auth || $sub == status) ]]
+    [[ $cmd == merge-captain && ($sub == auth || $sub == auth-app || $sub == status) ]]
 }
 
 deny_token() {
@@ -452,8 +454,8 @@ deny_token() {
     {
         echo "guard-delivery-state: blocked $1 on $what"
         echo "That is the merge captain's token directory. An agent may not read or change it: the owner saves a"
-        echo "token with \`merge-captain auth <owner>\` in their own terminal, and \`merge-captain status\` shows"
-        echo "which owners have one."
+        echo "token with \`merge-captain auth <owner>\` (the approver App's key with \`merge-captain auth-app\`) in"
+        echo "their own terminal, and \`merge-captain status\` shows which owners have one."
         if [[ -n ${3:-} ]]; then
             echo "A search rooted there walks into it; aim it at the project directory instead."
         fi

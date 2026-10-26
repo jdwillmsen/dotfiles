@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -IE
 """merge-captain — classify, review and rebase-merge open pull requests by risk tier.
 
 Walks the configured repositories, classifies each open pull request with
@@ -405,6 +405,14 @@ def read_meta(owner):
     return meta if isinstance(meta, dict) else {}
 
 
+# gh and openssl handle the owner tokens and the App key, so they are found in these directories only, in this order,
+# and run with this PATH, whatever PATH the caller has.
+TRUSTED_DIRS = ("/usr/bin", "/usr/local/bin", "/bin")
+TRUSTED_PATH = "/usr/local/bin:/usr/bin:/bin"
+# What a child could use to read or redirect traffic that carries a credential: certificate and proxy settings,
+# interpreter and loader hooks, and gh's and git's own configuration. The user's gh login is a config file, not these.
+DROP_ENV = re.compile(r"(?i)SSL_CERT_.*|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|NODE_EXTRA_CA_CERTS|.*_PROXY|PYTHON.*|"
+                      r"GH_.*|GITHUB_.*|GIT_.*|LD_.*|OPENSSL_.*|BASH_ENV|ENV|IFS|PERL.*|RUBY.*")
 ACCOUNT_HOME = pwd.getpwuid(os.getuid()).pw_dir
 INSTALLED = Path(ACCOUNT_HOME) / ".local/bin/merge-captain"
 
@@ -433,6 +441,23 @@ def test_mode():
     if os.path.realpath(sys.argv[0]) == os.path.realpath(INSTALLED):
         return False
     return under_temp(TOKENS) and under_temp(STATE)
+
+
+def tool_path(env_name, name):
+    """Absolute path of a tool that handles credentials. A test run may name its own; a real run never consults PATH
+    or ~/.local/bin."""
+    if test_mode() and os.environ.get(env_name):
+        return os.environ[env_name]
+    for d in TRUSTED_DIRS:
+        if os.access(os.path.join(d, name), os.X_OK):
+            return os.path.join(d, name)
+    return os.path.join(TRUSTED_DIRS[1], name)
+
+
+def harden_environment():
+    """Drops from this process, and so from every child, the variables in DROP_ENV."""
+    for k in [k for k in os.environ if DROP_ENV.fullmatch(k)]:
+        del os.environ[k]
 
 
 def override_problem():
@@ -619,10 +644,10 @@ def sign_rs256(key_fd, data):
     """Signature bytes of `data` under the key open on `key_fd`, or None. openssl is handed the descriptor, never a
     path, so a swap of the file after it was judged cannot change which key signs; the key stays out of this
     process's memory and off every command line."""
-    argv = [find_tool("MERGE_CAPTAIN_OPENSSL", "openssl"), "dgst", "-sha256", "-sign", f"/dev/fd/{key_fd}"]
+    argv = [tool_path("MERGE_CAPTAIN_OPENSSL", "openssl"), "dgst", "-sha256", "-sign", f"/dev/fd/{key_fd}"]
     try:
         r = subprocess.run(argv, input=data, capture_output=True, timeout=TOOL_TIMEOUT_S, start_new_session=True,
-                           pass_fds=(key_fd,))
+                           pass_fds=(key_fd,), env=dict(os.environ, PATH=TRUSTED_PATH))
     except (OSError, subprocess.TimeoutExpired):
         return None
     return r.stdout if r.returncode == 0 and r.stdout else None
@@ -1046,7 +1071,7 @@ class Captain:
         self.explain = explain
         self.max_prs = max_prs or self.limits["max_prs_per_run"]
         self.now = now_epoch()
-        self.gh_bin = find_tool("MERGE_CAPTAIN_GH", "gh")
+        self.gh_bin = tool_path("MERGE_CAPTAIN_GH", "gh")
         self.classify_bin = find_tool("MERGE_CAPTAIN_CLASS", "change-class")
         self.pace_bin = find_tool("MERGE_CAPTAIN_PACE", "agent-pace")
         self.eval_bin = find_tool("MERGE_CAPTAIN_EVAL", "agent-eval")
@@ -1157,7 +1182,8 @@ class Captain:
         block = self.owner_block(self.repo)
         if block:
             raise Stop(*block)
-        env = dict(os.environ, GH_PROMPT_DISABLED="1", NO_COLOR="1", GH_NO_UPDATE_NOTIFIER="1", GH_PAGER="cat")
+        env = dict(os.environ, GH_PROMPT_DISABLED="1", NO_COLOR="1", GH_NO_UPDATE_NOTIFIER="1", GH_PAGER="cat",
+                   PATH=TRUSTED_PATH)
         token = self.identity(owner)["token"]
         if token:
             env["GH_TOKEN"] = token
@@ -1766,7 +1792,8 @@ class Captain:
         if FORBIDDEN_FLAGS & set(args) or not self.app_shape_ok(args, self.repo):
             raise Refused(f"app call not allowed: gh {' '.join(args[:4])}")
         env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")}
-        env.update(GH_TOKEN=secret, GH_PROMPT_DISABLED="1", NO_COLOR="1", GH_NO_UPDATE_NOTIFIER="1", GH_PAGER="cat")
+        env.update(GH_TOKEN=secret, GH_PROMPT_DISABLED="1", NO_COLOR="1", GH_NO_UPDATE_NOTIFIER="1", GH_PAGER="cat",
+                   PATH=TRUSTED_PATH)
         return run_cmd([self.gh_bin, *args], timeout=GH_TIMEOUT_S, cwd=self.scratch, env=env)
 
     def mint_installation_token(self, creds, repo, retract=False):
@@ -2598,8 +2625,8 @@ def token_check(token):
 def whoami(token):
     """(login, expiry date or None) of a token, from one `gh api -i user` with the token in that child alone."""
     env = dict(os.environ, GH_TOKEN=token, GH_PROMPT_DISABLED="1", NO_COLOR="1", GH_NO_UPDATE_NOTIFIER="1",
-               GH_PAGER="cat")
-    r = run_cmd([find_tool("MERGE_CAPTAIN_GH", "gh"), "api", "-i", "user"], timeout=GH_TIMEOUT_S, env=env)
+               GH_PAGER="cat", PATH=TRUSTED_PATH)
+    r = run_cmd([tool_path("MERGE_CAPTAIN_GH", "gh"), "api", "-i", "user"], timeout=GH_TIMEOUT_S, env=env)
     if not r.ok:
         reason = clean(r.err.splitlines()[0], 120) if r.err.strip() else "no reason given"
         die(EXIT_FAIL, f"GitHub did not accept that token ({reason})", "Check the token, its resource owner and expiry")
@@ -2873,6 +2900,8 @@ def build_parser():
 
 
 def main(argv):
+    if not test_mode():
+        harden_environment()
     args = build_parser().parse_args(argv)
     return args.func(args)
 

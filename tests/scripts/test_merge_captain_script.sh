@@ -21,7 +21,8 @@ SK="s""k-"
 
 [ -x "$tool" ] || fail "merge-captain missing or not executable"
 python3 -I -c "import ast, sys; ast.parse(open(sys.argv[1]).read())" "$tool" || fail "merge-captain does not parse"
-head -1 "$tool" | grep -qx '#!/usr/bin/env python3' || fail "merge-captain needs the python3 env shebang"
+head -1 "$tool" | grep -qx '#!/usr/bin/python3 -IE' || fail "merge-captain needs the isolated system python3 shebang"
+[ -x /usr/bin/python3 ] || fail "the shebang's interpreter is missing"
 
 tmp="$(mktemp -d)"
 # shellcheck disable=SC2064  # $tmp must expand now: the trap outlives its scope
@@ -53,7 +54,8 @@ with open(f"{S}/gh.log", "a") as f:
 with open(f"{S}/gh.calls", "a") as f:
     # A hash, so no stub file ever holds a token and a grep for the real one over the temp dir stays meaningful.
     sha = hashlib.sha256(os.environ["GH_TOKEN"].encode()).hexdigest() if "GH_TOKEN" in os.environ else None
-    f.write(json.dumps({"argv": shown, "stdin": stdin, "token": "GH_TOKEN" in os.environ, "gh_token_sha": sha}) + "\n")
+    f.write(json.dumps({"argv": shown, "stdin": stdin, "token": "GH_TOKEN" in os.environ, "gh_token_sha": sha,
+                        "path": os.environ.get("PATH")}) + "\n")
 
 
 def rd(name, default=None):
@@ -2994,6 +2996,7 @@ cat >"$bin/openssl" <<'SH'
 #!/usr/bin/env bash
 # A recording stand-in for openssl; with swap_key present it replaces the key file just before signing.
 echo "$*" >>"$STUB_DIR/openssl.log"
+echo "$PATH" >>"$STUB_DIR/openssl.path"
 if [ -e "$STUB_DIR/swap_key" ]; then mv -f "$STUB_DIR/other.copy" "$(cat "$STUB_DIR/swap_key")"; fi
 exec /usr/bin/openssl "$@"
 SH
@@ -3158,6 +3161,12 @@ post = json.loads(open(sys.argv[3]).readline())
 assert post["ledger_at_post"] == ["attempted"], post
 PY
 [ "$(mode_of "$STATE/approvals.jsonl")" = 600 ] || fail "the approval ledger must be 0600"
+# gh and openssl run with a fixed PATH, not the caller's (the test's own is /usr/bin:/bin).
+python3 -I - "$S/gh.calls" "$S/openssl.path" <<'PY' || fail "a credential-handling child ran with the caller's PATH"
+import json, sys
+paths = {json.loads(line)["path"] for line in open(sys.argv[1])} | {line.strip() for line in open(sys.argv[2])}
+assert paths == {"/usr/local/bin:/usr/bin:/bin"}, paths
+PY
 # Neither the key, the installation token nor the JWT is in any output, state, log or stub file.
 [ -s "$S/realtokens/jwt" ] || fail "the stub never saw a JWT"
 [ -z "$(app_strays "$(cat "$S/realtokens/jwt")")" ] || fail "key material or a token was written outside its file" "$(app_strays "$(cat "$S/realtokens/jwt")")"
@@ -3690,6 +3699,50 @@ assert not mc.test_mode(), "no variable switches test mode on"
 assert mc.override_problem() and "MERGE_CAPTAIN_" in mc.override_problem()
 mc.TOKENS = Path(tmp) / "t"
 assert mc.override_problem() is None
+PY
+
+# H-a: credential-handling tools come from fixed directories, and the environment is scrubbed.
+python3 -I - "$tool" "$tmp" <<'PY' || fail "trusted tool and environment unit checks failed"
+import importlib.machinery, importlib.util, os, sys
+from pathlib import Path
+tool, tmp = sys.argv[1:3]
+sys.dont_write_bytecode = True
+os.environ.update(MERGE_CAPTAIN_STATE=tmp + "/h-state", MERGE_CAPTAIN_CONFIG=tmp + "/none.toml",
+                  MERGE_CAPTAIN_TOKENS=tmp + "/h-tokens")
+spec = importlib.util.spec_from_loader("mc", importlib.machinery.SourceFileLoader("mc", tool))
+mc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mc)
+evil = tmp + "/evilbin"
+os.makedirs(evil, exist_ok=True)
+for name in ("gh", "openssl"):
+    with open(f"{evil}/{name}", "w") as f:
+        f.write("#!/bin/sh\nexit 0\n")
+    os.chmod(f"{evil}/{name}", 0o755)
+os.environ["PATH"] = evil + ":" + os.environ["PATH"]
+os.environ["HOME_BIN_TRAP"] = "x"
+mc.test_mode = lambda: False
+assert mc.tool_path("MERGE_CAPTAIN_GH", "gh") == "/usr/bin/gh", mc.tool_path("MERGE_CAPTAIN_GH", "gh")
+assert mc.tool_path("MERGE_CAPTAIN_OPENSSL", "openssl") == "/usr/bin/openssl"
+os.environ["MERGE_CAPTAIN_GH"] = evil + "/gh"
+assert mc.tool_path("MERGE_CAPTAIN_GH", "gh") == "/usr/bin/gh", "an override named the tool in a real run"
+mc.test_mode = lambda: True
+assert mc.tool_path("MERGE_CAPTAIN_GH", "gh") == evil + "/gh", "a test run may name its tools"
+del os.environ["MERGE_CAPTAIN_GH"]
+assert mc.tool_path("MERGE_CAPTAIN_GH", "gh") == "/usr/bin/gh", "PATH was consulted"
+assert mc.TRUSTED_DIRS == ("/usr/bin", "/usr/local/bin", "/bin") and mc.TRUSTED_PATH == "/usr/local/bin:/usr/bin:/bin"
+# The scrub.
+drop = ["SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS", "HTTPS_PROXY",
+        "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "NO_PROXY", "no_proxy", "PYTHONPATH", "PYTHONSTARTUP",
+        "PYTHONHOME", "GH_TOKEN", "GH_HOST", "GH_CONFIG_DIR", "GH_ENTERPRISE_TOKEN", "GITHUB_TOKEN", "GIT_SSH_COMMAND",
+        "GIT_EXEC_PATH", "LD_PRELOAD", "LD_LIBRARY_PATH", "OPENSSL_CONF", "OPENSSL_MODULES", "BASH_ENV", "ENV", "IFS",
+        "PERL5OPT", "RUBYOPT"]
+keep = ["HOME", "PATH", "LANG", "LC_ALL", "TERM", "TZ", "USER", "XDG_RUNTIME_DIR", "SYSTEMD_EXEC_PID", "NOTIFY_SOCKET",
+        "MERGE_CAPTAIN_CONFIG", "ANTHROPIC_BASE_URL"]
+for k in drop + keep:
+    os.environ[k] = "x"
+mc.harden_environment()
+assert [k for k in drop if k in os.environ] == [], [k for k in drop if k in os.environ]
+assert [k for k in keep if k not in os.environ] == [], "the scrub removed something the tools need"
 PY
 
 # M1: approve only where a push dismisses the approval; M2: the attempt is on file before the post.

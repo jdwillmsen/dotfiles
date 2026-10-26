@@ -595,9 +595,14 @@ check_segment() {
 
 # The captain's tool and path overrides (MERGE_CAPTAIN_GH, _OPENSSL, _STATE, _TOKENS ...) exist for its tests. Set by an
 # agent they would point the captain at a program or a directory of its choosing, so a command that assigns one, inline
-# or through export, env or declare, is refused. Reading one (grep, echo) is harmless and stays allowed.
+# or through export, env, declare, python, perl, ruby or node, is refused. Reading one (grep, rg, echo) is harmless and
+# stays allowed.
 ASSIGNS_OVERRIDE='MERGE_CAPTAIN_[A-Za-z0-9_]*[[:space:]"'"'"']*[+]?='
-EXPORTS_WORD='(^|[^[:alnum:]_])(export|declare|typeset|readonly|env|setenv)([^[:alnum:]_]|$)'
+# export, env and friends only count as the command being run (start of a line, or after ; & | ( or a quote opening
+# a -c script), so grepping for the word "export" alongside a variable name is a read, not an assignment.
+EXPORTS_WORD='(^|[;&|(]|[[:space:]]-[a-z]*c[[:space:]]+["'"'"'])[[:space:]]*(command[[:space:]]+|exec[[:space:]]+|sudo[[:space:]]+)?(export|declare|typeset|readonly|env|setenv)([^[:alnum:]_]|$)'
+# Other languages' ways of setting a variable for a child (python, perl, ruby, node).
+SETS_ENV_WORD='os[.]environ|os[.]putenv|[$]ENV[{[]|(^|[^[:alnum:]_])ENV[{[]|putenv|setenv|process[.]env'
 deny_override() {
     {
         echo "guard-delivery-state: blocked Bash on ${1:0:200}"
@@ -611,7 +616,8 @@ deny_override() {
 # backgrounds the command before it). The & of >&, &> and 2>&1 is part of a redirect, so it is set aside first.
 check_command() {
     local cmd=$1 seg
-    if [[ $cmd == *MERGE_CAPTAIN_* ]] && { [[ $cmd =~ $ASSIGNS_OVERRIDE ]] || [[ $cmd =~ $EXPORTS_WORD ]]; }; then
+    if [[ $cmd == *MERGE_CAPTAIN_* ]] &&
+        { [[ $cmd =~ $ASSIGNS_OVERRIDE ]] || [[ $cmd =~ $EXPORTS_WORD ]] || [[ $cmd =~ $SETS_ENV_WORD ]]; }; then
         deny_override "$cmd"
     fi
     cmd=${cmd//>|/>}

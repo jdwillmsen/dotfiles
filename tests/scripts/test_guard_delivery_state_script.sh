@@ -221,6 +221,22 @@ blocked "a status followed by a read" Bash command "merge-captain status; cat $T
 blocked "an auth that redirects the token out" Bash command "merge-captain auth jdwlabs > $T/jdwlabs"
 blocked "a remove spelled with a redirect" Bash command "merge-captain auth jdwlabs --remove < $T/jdwlabs"
 blocked "env var pointing at it for another tool" Bash command "MERGE_CAPTAIN_TOKENS=$T cat $T/jdwlabs"
+# The approver App's key and ids live in the same directory and get the same protection.
+for tool in Read Write Edit MultiEdit; do
+    blocked "$tool on the approver key" "$tool" file_path "$T/approver.key"
+    blocked "$tool on the approver ids" "$tool" file_path "$T/approver.json"
+    blocked "$tool on the approver key through a link" "$tool" file_path "$tmp/merge-captain-tokens-link/approver.key"
+done
+blocked "cat the approver key" Bash command "cat $T/approver.key"
+blocked "cat the approver key via tilde" Bash command 'cat ~/.config/merge-captain/tokens/approver.key'
+blocked "cat the approver key from inside" Bash command 'cat approver.key' "$T"
+blocked "copy the approver key out" Bash command "cp $T/approver.key /tmp/k.pem"
+blocked "openssl on the approver key" Bash command "openssl rsa -in $T/approver.key -noout -text"
+blocked "grep the approver ids" Bash command "grep app_id $T/approver.json"
+blocked "an auth-app that redirects the key out" Bash command "merge-captain auth-app --remove > $T/approver.key"
+blocked "an auth-app followed by a read" Bash command "merge-captain auth-app --key-file /tmp/k.pem; cat $T/approver.key"
+allowed "saving the approver" Bash command 'merge-captain auth-app --key-file ~/Downloads/app.pem'
+allowed "removing the approver" Bash command 'merge-captain auth-app --remove'
 # ...and these never touch a token.
 allowed "saving a token" Bash command 'merge-captain auth jdwlabs'
 allowed "saving with an expiry" Bash command 'merge-captain auth dotablaze-tech --expires 2027-01-01'

@@ -66,6 +66,12 @@ TIERS = ("R0", "R1", "R2", "R3")
 MODES = ("live", "dry-run", "off")
 # R3 is never mergeable here, so it is not a legal ceiling.
 CEILINGS = ("R0", "R1", "R2")
+# Variables that move a tool or a directory the captain trusts with credentials. Honoured by the tests only: set in
+# production they would hand the owner tokens and the App key to whatever they point at, so credentials are not loaded.
+OVERRIDE_VARS = ("MERGE_CAPTAIN_OPENSSL", "MERGE_CAPTAIN_GH", "MERGE_CAPTAIN_CLASS", "MERGE_CAPTAIN_STATE",
+                 "MERGE_CAPTAIN_TOKENS", "MERGE_CAPTAIN_API_URL")
+# The test suite's opt-in. Not a secret: the hook refuses any command that assigns a MERGE_CAPTAIN_ variable.
+HARNESS_VAR = "MERGE_CAPTAIN_TEST_HARNESS"
 # The App that approves on the captain's behalf. Its id, installation id and key sit beside the owner tokens; the
 # dots keep these names from ever matching an owner, which cannot contain one.
 APPROVER_IDS, APPROVER_KEY = "approver.json", "approver.key"
@@ -389,6 +395,15 @@ def read_meta(owner):
     return meta if isinstance(meta, dict) else {}
 
 
+def override_problem():
+    """Why no credential may be loaded or saved right now, or None."""
+    if os.environ.get(HARNESS_VAR) == "1":
+        return None
+    if any(os.environ.get(v) for v in OVERRIDE_VARS):
+        return "a MERGE_CAPTAIN_ tool or path override is set"
+    return None
+
+
 def private_problem(st, what):
     """Why a token directory or file may not be used, or None. A secret another account can open is not one."""
     if stat.S_ISLNK(st.st_mode):
@@ -438,6 +453,9 @@ def owner_identity(owner, now):
 
     if not OWNER.fullmatch(owner):
         return ident
+    problem = override_problem()
+    if problem:
+        return insecure(problem)
     owner = owner.lower()
     try:
         dst = os.lstat(TOKENS)
@@ -507,6 +525,9 @@ def load_approver():
     def insecure(problem):
         return {**ident, "state": "insecure", "problem": problem}
 
+    problem = override_problem()
+    if problem:
+        return insecure(problem)
     try:
         dst = os.lstat(TOKENS)
     except FileNotFoundError:
@@ -2311,8 +2332,15 @@ def cmd_explain(args):
     return 0
 
 
+def refuse_override():
+    problem = override_problem()
+    if problem:
+        die(EXIT_FAIL, f"nothing was saved: {problem}", "Unset it; it is for tests only")
+
+
 def token_dir_ready():
     """The token directory, created 0700 or tightened to it, and refused when it is not a plain directory of ours."""
+    refuse_override()
     os.umask(0o077)
     try:
         st = os.lstat(TOKENS)
@@ -2412,6 +2440,7 @@ def cmd_auth(args):
     if not (sys.stdin.isatty() and sys.stderr.isatty()):
         usage_error("auth needs a person at a terminal: stdin and stderr must both be one",
                     "Run it in a normal terminal outside any agent session")
+    refuse_override()
     owner = args.owner
     if not OWNER.fullmatch(owner):
         usage_error(f"not a GitHub owner name: {clean(owner, 60)}")
@@ -2485,6 +2514,7 @@ def cmd_auth_app(args):
                 die(EXIT_FAIL, f"cannot remove {name}: {e.strerror}")
         emit({"approver": "removed" if removed else "none saved"})
         return 0
+    refuse_override()
     if not args.key_file:
         usage_error("auth-app needs --key-file PATH, the private key GitHub generated for the App")
     try:

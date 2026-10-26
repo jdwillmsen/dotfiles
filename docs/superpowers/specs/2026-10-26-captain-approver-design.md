@@ -1,7 +1,7 @@
 # Merge captain approver identity
 
-Status: proposed. R3 (changes who can approve merges): needs the owner's approval
-before any of it is built.
+Status: awaiting owner approval. R3 (changes who can approve merges): the owner has
+not yet approved it, and nothing here goes live before they do.
 
 ## Intent
 
@@ -47,6 +47,14 @@ After a PR's tier gate is met and the captain would merge it, but GitHub reports
 
 Caps: `max_approvals_per_hour` (default 4) and `merge-captain pause`, which stops
 approvals as well as merges. A PR authored by the App is skipped.
+
+## Isolation limit
+
+The guard hook reads command text, so it stops accidents and prompt-injected
+shortcuts, not a determined process: an agent running as the same unix account can
+read the approver key by means the hook cannot see. Going live is therefore gated on
+running the captain as a separate unix account (its own token directory, state and
+key), or on the owner explicitly accepting that limit.
 
 ## Blast radius and rollback
 

@@ -237,6 +237,24 @@ blocked "an auth-app that redirects the key out" Bash command "merge-captain aut
 blocked "an auth-app followed by a read" Bash command "merge-captain auth-app --key-file /tmp/k.pem; cat $T/approver.key"
 allowed "saving the approver" Bash command 'merge-captain auth-app --key-file ~/Downloads/app.pem'
 allowed "removing the approver" Bash command 'merge-captain auth-app --remove'
+# The tool and path overrides are for tests: an agent may not assign one, however it spells the assignment.
+blocked "inline override for status" Bash command "MERGE_CAPTAIN_TOKENS=$T merge-captain status"
+blocked "inline gh override" Bash command 'MERGE_CAPTAIN_GH=/tmp/evil merge-captain run'
+blocked "inline openssl override" Bash command 'MERGE_CAPTAIN_OPENSSL=/tmp/evil merge-captain run'
+blocked "inline state override" Bash command 'MERGE_CAPTAIN_STATE=/tmp/s merge-captain status'
+blocked "inline class override" Bash command 'MERGE_CAPTAIN_CLASS=/tmp/c merge-captain run'
+blocked "export override" Bash command 'export MERGE_CAPTAIN_GH=/tmp/evil; merge-captain run'
+blocked "export without a value" Bash command 'export MERGE_CAPTAIN_GH'
+blocked "env override" Bash command 'env MERGE_CAPTAIN_TOKENS=/tmp/t merge-captain status'
+blocked "env override, quoted name" Bash command 'env "MERGE_CAPTAIN_TOKENS=/tmp/t" merge-captain status'
+blocked "declare -x override" Bash command 'declare -x MERGE_CAPTAIN_STATE=/tmp/s'
+blocked "override with spaces around =" Bash command 'MERGE_CAPTAIN_GH =/tmp/evil true'
+blocked "appended override" Bash command 'MERGE_CAPTAIN_GH+=x true'
+blocked "override on a later line" Bash command $'true\nMERGE_CAPTAIN_GH=/tmp/evil merge-captain run'
+blocked "the test switch" Bash command 'MERGE_CAPTAIN_TEST_HARNESS=1 merge-captain run'
+blocked "the API override" Bash command 'MERGE_CAPTAIN_API_URL=http://127.0.0.1:1 merge-captain run'
+allowed "reading an override name" Bash command 'grep MERGE_CAPTAIN_GH docs/merge-captain.md'
+allowed "echoing one" Bash command 'echo "$MERGE_CAPTAIN_STATE"'
 # ...and these never touch a token.
 allowed "saving a token" Bash command 'merge-captain auth jdwlabs'
 allowed "saving with an expiry" Bash command 'merge-captain auth dotablaze-tech --expires 2027-01-01'
@@ -244,7 +262,6 @@ allowed "removing a token" Bash command 'merge-captain auth jdwillmsen --remove'
 allowed "status" Bash command 'merge-captain status'
 allowed "status with stderr joined" Bash command 'merge-captain status 2>&1 | head -20'
 allowed "status after a cd elsewhere" Bash command 'cd ~/projects && merge-captain status'
-allowed "status that names the directory by variable" Bash command "MERGE_CAPTAIN_TOKENS=$T merge-captain status"
 allowed "status with an absolute tool path" Bash command "$H/.local/bin/merge-captain status"
 allowed "Read of another config file" Read file_path "$H/.config/agents/lanes.toml"
 allowed "Read of a lookalike directory" Read file_path "$H/.config/merge-captain-notes/x"

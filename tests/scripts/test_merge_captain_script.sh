@@ -250,15 +250,27 @@ if args[0] == "api" and "/rules/branches/" in args[1]:
     if rd("rules_none") is not None:
         say([{"type": "required_status_checks", "parameters": {}}])
     say([{"type": "pull_request", "parameters": {"dismiss_stale_reviews_on_push": rd("no_stale") is None}}])
-if args[0] == "api" and "/contents/" in args[1]:
-    where = args[1].split("/contents/")[1].split("?")[0]
-    if rd("codeowners_err") is not None:
+if args[0] == "api" and "/contents" in args[1]:
+    import base64
+    where = args[1].split("/contents", 1)[1].split("?")[0].strip("/")
+    if rd("codeowners_err") is not None or (rd("listing_fail") is not None and where):
         fail("gh: Server Error (HTTP 500)")
     text = rd("codeowners.txt")
-    if text is None or (rd("codeowners_at") or ".github/CODEOWNERS").strip() != where:
-        fail("gh: Not Found (HTTP 404)")
-    import base64
-    say({"type": "file", "content": base64.encodebytes(text.encode()).decode()})
+    at = (rd("codeowners_at") or ".github/CODEOWNERS").strip()
+    folder, _, name = at.rpartition("/")
+    if text is None:
+        text, folder, name = None, None, None
+    if where == "":
+        top = [{"name": folder.split("/")[0], "type": "dir"}] if folder else ([{"name": name, "type": "file"}] if name else [])
+        say(top)
+    if text is not None and where == folder:
+        say([{"name": name, "type": rd("codeowners_type") or "file"}])
+    if text is not None and where == at:
+        if rd("codeowners_404") is not None:
+            fail("gh: Not Found (HTTP 404)")
+        say({"type": "file", "encoding": rd("codeowners_encoding") or "base64",
+             "content": base64.encodebytes(text.encode("utf-8", "surrogateescape")).decode()})
+    fail("gh: Not Found (HTTP 404)")
 if args[0] == "api" and "code-scanning" in args[1]:
     n = args[1].split("refs/pull/")[1].split("/")[0]
     v = rd(f"alerts_{n}")
@@ -3241,7 +3253,7 @@ grep -q 'merge-captain:needs-human sha=.* reason=codeowners' "$S/posted_41.txt" 
 grep -q '"name": "needs-human"' "$S/pr_41.json" || fail "needs-human label not set" "$(cat "$S/pr_41.json")"
 codeowners_case "a directory owner" '# owners\n/src/ @team  # ours\n' needs-human codeowners-required
 codeowners_case "a glob owner" '*.py @team\n' needs-human codeowners-required
-codeowners_case "a nested wildcard" 'src/**/*.py @team\n/src/x.py @team\n' needs-human codeowners-required
+codeowners_case "a nested wildcard in the last segment" 'src/**/*.py @team\n/src/x.py @team\n' waiting codeowners-unknown
 codeowners_case "a later line that owns the path again" '* @a\n/src/ @b\n' needs-human codeowners-required
 codeowners_case "a syntax this matcher does not model" '[Docs]\n* @team\n' waiting codeowners-unknown
 codeowners_case "a character class" 'src/[xy].py @team\n' waiting codeowners-unknown
@@ -3766,6 +3778,60 @@ ln -sf "$(command -v python3)" "$tmp/script"
 env "${MCENV[@]}" "$tmp/script" -I "$tmp/ptyrun2.py" "$APP_ID,$INST_ID" "$tmp/pty.out" "$tool" auth-app --key-file "$tmp/src.pem"
 pty_out="$(tr -d '\r' <"$tmp/pty.out")"
 [ "$(cat "$tmp/pty.out.rc")" = 2 ] && grep -q 'not one made by script' <<<"$pty_out" && [ ! -e "$TOKDIR" ] || fail "auth-app ran under a pty wrapper" "$pty_out"
+
+# M3/L4: CODEOWNERS patterns this matcher cannot judge are unknown, never a guess.
+for text in '/docs/* @team\n' 'docs/*.md @team\n' '/*.md @team\n' 'src/** @team\n' 'a/*/ @team\n' \
+    '*a*b*c*d*e*f*g* @team\n'; do
+    codeowners_case "pattern $text" "$text" waiting codeowners-unknown
+done
+newcase_app
+printf '*.md @team\n' >"$S/codeowners.txt"
+apr_pr 129 R0
+want 0 run
+expect 129 merged "approved by"
+newcase_app
+printf '/x/**/**/**/**/**/**/**/**/y.py @team\n' >"$S/codeowners.txt"
+printf '[{"filename":"x/a/b/y.py"}]' >"$S/files_130.json"
+apr_pr 130 R0
+want 0 run
+expect 130 needs-human codeowners-required
+# L1/L2/L3: absence needs a listing that worked; the file must be base64 text, with or without a BOM.
+newcase_app
+printf '* @team\n' >"$S/codeowners.txt"
+echo x >"$S/codeowners_404"
+apr_pr 131 R0
+want 0 run
+expect 131 waiting codeowners-unknown
+no_app_activity "a listed file that cannot be fetched"
+newcase_app
+printf '* @team\n' >"$S/codeowners.txt"
+echo none >"$S/codeowners_encoding"
+apr_pr 131 R0
+want 0 run
+expect 131 waiting codeowners-unknown
+newcase_app
+printf '* @team\n' >"$S/codeowners.txt"
+echo symlink >"$S/codeowners_type"
+apr_pr 131 R0
+want 0 run
+expect 131 waiting codeowners-unknown
+newcase_app
+printf '* @team\n' >"$S/codeowners.txt"
+echo x >"$S/listing_fail"
+apr_pr 131 R0
+want 0 run
+expect 131 waiting codeowners-unknown
+newcase_app
+printf '\xef\xbb\xbf* @team\n' >"$S/codeowners.txt"
+apr_pr 131 R0
+want 0 run
+expect 131 needs-human codeowners-required
+no_app_activity "a CODEOWNERS file with a byte order mark"
+newcase_app
+apr_pr 131 R0
+want 0 run
+expect 131 merged "approved by"
+grep -q 'contents/?ref=main' "$S/gh.log" || fail "the base tree was not listed" "$(cat "$S/gh.log")"
 
 # ── Global: nothing, in any case above, ever asked for a bypass or another merge style ──
 cat "$S/gh.log" >>"$tmp/all_gh.log"

@@ -117,6 +117,8 @@ APP_NUMBER = re.compile(r"[1-9][0-9]{0,19}")
 PEM_KEY = re.compile(r"-----BEGIN (?:RSA )?PRIVATE KEY-----\n[A-Za-z0-9+/=\n]+-----END (?:RSA )?PRIVATE KEY-----\n?")
 KEY_MAX_BYTES = 16384
 CODEOWNER_FILES = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
+# Wildcards one CODEOWNERS pattern may carry before it is called too costly to judge.
+CODEOWNER_WILDCARDS = 6
 API_URL = "https://api.github.com"
 DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 SHA = re.compile(r"[0-9a-f]{40}")
@@ -652,9 +654,19 @@ def github_api(method, path, secret, body=None):
 
 
 def codeowner_regex(pattern):
-    """A full-match regex for one CODEOWNERS pattern, or None for syntax this matcher does not model (sections,
-    character classes, escapes), which the caller treats as undeterminable rather than guessing."""
+    """A full-match regex for one CODEOWNERS pattern, or None for syntax this matcher does not model, which the
+    caller treats as undeterminable rather than guessing: sections, character classes, escapes, too many wildcards,
+    and a wildcard in the last segment of a pattern that has a slash (GitHub matches those one level deep, which the
+    directory-covers-everything rule below would overstate or understate)."""
     if any(c in pattern for c in "[]\\!"):
+        return None
+    pattern = re.sub(r"\*{3,}", "**", pattern)
+    while "**/**/" in pattern:
+        pattern = pattern.replace("**/**/", "**/")
+    if len(re.findall(r"\*+|\?", pattern)) > CODEOWNER_WILDCARDS:
+        return None
+    last = pattern.strip("/").rsplit("/", 1)[-1]
+    if "/" in pattern and ("*" in last or "?" in last):
         return None
     anchored = pattern.startswith("/") or "/" in pattern.rstrip("/")
     body, out, i = pattern.strip("/"), [], 0
@@ -1761,6 +1773,43 @@ class Captain:
             isinstance(x, dict) and x.get("type") == "pull_request" and isinstance(x.get("parameters"), dict)
             and x["parameters"].get("dismiss_stale_reviews_on_push") is True for x in rules)
 
+    def codeowners_text(self, repo, ref):
+        """("found", text), ("none", None) or ("unknown", None). Absence is concluded only from a listing that
+        succeeded, never from a bare 404, which a permission problem produces too."""
+        def listing(where):
+            r = self.gh(["api", f"repos/{repo}/contents/{where}?ref={ref}"])
+            try:
+                rows = json.loads(r.out)
+            except ValueError:
+                return None
+            if not (r.ok and isinstance(rows, list) and len(rows) < 1000 and all(isinstance(x, dict) for x in rows)):
+                return None
+            return {x.get("name"): x.get("type") for x in rows}
+
+        root = listing("")
+        if root is None:
+            return "unknown", None
+        for where in CODEOWNER_FILES:
+            folder, _, name = where.rpartition("/")
+            entries = root
+            if folder:
+                if folder not in root:
+                    continue
+                entries = listing(folder) if root[folder] == "dir" else None
+                if entries is None:
+                    return "unknown", None
+            if name not in entries:
+                continue
+            r = self.gh(["api", f"repos/{repo}/contents/{where}?ref={ref}"])
+            try:
+                j = json.loads(r.out)
+                if not (r.ok and entries[name] == "file" and j["type"] == "file" and j["encoding"] == "base64"):
+                    return "unknown", None
+                return "found", base64.b64decode(j["content"]).decode("utf-8-sig")
+            except (ValueError, KeyError, TypeError, AttributeError):
+                return "unknown", None
+        return "none", None
+
     def codeowners_covered(self, repo, n, details):
         """True when a code owner must review this pull request, False when none must, None when that cannot be
         told. Two independent signals, either of which is enough: GitHub's own pending code-owner review requests,
@@ -1790,19 +1839,10 @@ class Captain:
         if not r.ok or not isinstance(rows, list) or len(rows) >= 100 or not all(isinstance(p, str) for p in paths):
             return None
 
-        ref = urllib.parse.quote(str(details.get("baseRefName") or ""), safe="")
-        for where in CODEOWNER_FILES:
-            r = self.gh(["api", f"repos/{repo}/contents/{where}?ref={ref}"])
-            if not r.ok:
-                if "HTTP 404" in r.err + r.out:
-                    continue
-                return None
-            try:
-                text = base64.b64decode(json.loads(r.out)["content"]).decode()
-            except (ValueError, KeyError, TypeError, AttributeError):
-                return None
+        found, text = self.codeowners_text(repo, urllib.parse.quote(str(details.get("baseRefName") or ""), safe=""))
+        if found == "found":
             return codeowners_cover(text, paths)
-        return False
+        return False if found == "none" else None
 
     def approve(self, rc, n, head, tier, lane, reasons, details):
         """Approve as the App on exactly `head`, or end the pull request with the reason it was not approved. Every

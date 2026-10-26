@@ -3527,7 +3527,8 @@ while time.time() < deadline:
     if not data:
         break
     buf += data
-    if sent < len(replies) and buf.count(b"input hidden") > sent:
+    asked = buf.count(b"input hidden") + buf.count(b"App ID: ") + buf.count(b"Installation ID: ")
+    if sent < len(replies) and asked > sent:
         os.write(fd, replies[sent].encode() + b"\n")
         sent += 1
 if time.time() >= deadline:

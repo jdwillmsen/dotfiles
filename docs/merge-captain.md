@@ -201,41 +201,60 @@ GitHub reports `REVIEW_REQUIRED` with merge state `BLOCKED`, and the repository 
 `live`. Then, in order:
 
 1. Not paused, tier R2 or below, author on the allow-list, and not the App itself
-   (`approver-authored`); under the hourly cap (`approval-cap`); no earlier row for
-   this head in `approvals.jsonl` (`approval-not-accepted`, or `approval-withdrawn`
-   after a merge failure), so a held PR is never approved in a loop.
+   (`approver-authored`). Rows for this head in `approvals.jsonl` decide what is left:
+   a `confirmed` row means it was approved and GitHub still wants a review
+   (`approval-not-accepted`); a `withdrawn` row means it was taken back
+   (`approval-withdrawn`); either way the head is never approved again, so a held PR
+   is not approved in a loop. A head with only an `attempted` row is looked up in step
+   7. The hourly cap (`approval-cap`) counts attempts.
 2. The head is read again and must be the reviewed one (`head moved before approval`).
 3. The App's files must be usable, else `waiting` `approver-missing` and nothing else
    is called.
 4. The base branch's rules (`rules/branches/<base>`) must include a `pull_request`
    rule with `dismiss_stale_reviews_on_push` true, else `waiting`
    `approver-no-stale-dismissal`. Without it an approval would survive a push and the
-   merge could land code nobody reviewed. Unreadable rules count as not set.
+   merge could land code nobody reviewed. Unreadable rules count as not set, and
+   classic branch protection is not consulted: a repository that dismisses stale
+   approvals only through classic protection is refused here too.
 5. No CODEOWNERS requirement over the changed paths: a pending code-owner review
    request on the PR, or a CODEOWNERS file on the base branch (`.github/`, root,
    `docs/`) with a line that owns a changed path (last match wins; a line with no
    owner releases the path). A hit labels the PR `needs-human`
    (`codeowners-required`). A file is concluded absent only from a base-tree listing
-   that succeeded, never from a bare 404. Anything that cannot be judged is `waiting`
+   that succeeded, never from a bare 404. Matching is a bounded per-segment glob (no
+   backtracking regex): a pattern covers the file it names and everything below a
+   directory it names, a trailing `**` covers everything below, and a wildcard in the
+   last segment of a pattern with a slash matches that one level (`/docs/*` owns
+   `docs/a.md`, not `docs/sub/a.md`). Anything that cannot be judged is `waiting`
    `codeowners-unknown`: no approval. That covers failed reads, 100 or more changed
-   files, a file that is not base64 text, sections, character classes, escapes, more
-   than six wildcards in a pattern, and any pattern that has a slash and a wildcard in
-   its last segment (GitHub matches those one level deep).
+   files, a file that is not base64 text, sections, character classes, escapes,
+   negation, a wildcard-only directory pattern such as `a/*/`, and patterns or paths
+   past the size caps.
 6. The head is read once more, immediately before the token is minted.
-7. A fresh installation token is minted for this one approval, limited to the one
+7. If the head has an unconfirmed attempt, the PR's reviews are listed: a review by
+   the App on this head is recorded as `confirmed` (`resumed`) and not posted again;
+   none means the post never arrived and it is retried (within the cap); a list that
+   cannot be read is `waiting` `approval-unverified`.
+8. A fresh installation token is minted for this one approval, limited to the one
    repository and the `pull_requests: write` permission: an RS256 JWT (`iat` now-60 s,
    `exp` now+540 s, `iss` the App ID) signed with `openssl dgst -sha256 -sign`
    through the key file's checked descriptor (`/dev/fd/N`, not its path), exchanged at
    `POST /app/installations/<id>/access_tokens` by the captain itself over HTTPS, so
    the JWT is never on a command line. The token lives in memory only and is revoked
    with `DELETE /installation/token` as soon as it has been used, on error paths too.
-8. An `attempted` row is written to `approvals.jsonl`, then the `APPROVE` review is
+9. An `attempted` row is written to `approvals.jsonl`, then the `APPROVE` review is
    submitted on that head (`commit_id`), body "merge-captain approval: tier T, reviewer
-   lane L, sha S" (R0: "no review required (R0)"), then a `confirmed` row. Attempts
-   count toward the hourly cap, so a refused post or a lost reply cannot hide one.
-9. The usual `--match-head-commit` merge, as the owner's identity. If it does not
-   happen, the App's own review is dismissed (a `withdrawn` row; `withdraw-failed` if
-   GitHub refuses) so no green check is left behind.
+   lane L, sha S" (R0: "no review required (R0)"), then a `confirmed` row. If a
+   deadline or crash comes after the post went out, the `confirmed` row is still
+   written.
+10. The usual `--match-head-commit` merge, as the owner's identity. If it does not
+    happen, the approval is taken back (the App's own review is dismissed and a
+    `withdrawn` row written; `withdraw-failed` if GitHub refuses) only when the head
+    changed, the host refused the merge for a lasting reason (a policy, a required
+    check, a conflict), the run hit its hard deadline between the post and the merge
+    result, or something unexpected failed. A pause, the hourly merge cap, a network
+    error, a 5xx or a "try again" refusal leaves the approval standing, and the next
+    run merges on it.
 
 R0 PRs are approved too: that has not been settled with the owner and may change.
 
@@ -258,12 +277,13 @@ form but never read the generated key):
 2. In a normal terminal: `merge-captain auth-app --key-file ~/Downloads/<key>.pem`
    and type the two ids at the hidden prompts. The key file must be a plain file of
    yours with mode 0600. The command refuses without a terminal, inside an agent
-   session (`CLAUDECODE` set) and under `script`, `expect` and similar wrappers; a
-   pty made some other way cannot be told from a person's, so that check is best
-   effort. It checks that the key can sign, copies it into the token directory as
-   `approver.key` (0600, with `approver.json` for the ids; the guard hook covers both
-   like the tokens) and prints only the two ids. Then delete the source file it names
-   (it says nothing of the kind when you point it at the saved key itself).
+   session (`CLAUDECODE` set) and under `script`, `expect` and similar wrappers; that
+   last check is best effort, a pty made some other way (for example Python's
+   `pty.spawn`) cannot be told from a person's and is not stopped. It checks that the
+   key can sign, copies it into the token directory as `approver.key` (0600, with
+   `approver.json` for the ids; the guard hook covers both like the tokens) and prints
+   only the two ids. Then delete the source file it names (it says nothing of the
+   kind when you point it at the saved key itself).
 3. `merge-captain status` shows `approver: state: ready`. Set `approver = true` on the
    repositories that should use it in the chezmoi source of `merge-captain.toml` and
    `chezmoi apply`; then try one PR with `merge-captain explain O/R#N`.
@@ -271,18 +291,35 @@ form but never read the generated key):
 A key file that is a symlink, belongs to someone else or is readable by group or
 others is not used (`approver-missing`; `status` names the reason).
 
-Overrides: `MERGE_CAPTAIN_GH`, `_OPENSSL`, `_CLASS`, `_STATE`, `_TOKENS` and
-`_API_URL` move a tool or directory the captain trusts. They exist for the test suite,
-which also sets `MERGE_CAPTAIN_TEST_HARNESS=1`. Without that, if any is set, no owner
-token and no App key is loaded (`insecure-token-file`, approver `insecure`) and `auth`
-and `auth-app` refuse to save. The guard hook refuses any command that assigns a
-`MERGE_CAPTAIN_` variable, inline or through `export`, `env` or `declare`.
+How a real run protects what it holds, and what that does not do:
 
-Isolation limit: an agent running as the same unix account can read the approver key
-whatever the hook says (a script, another tool, a shell trick the hook's text matching
-misses). The hook stops accidents and prompt-injected shortcuts, not a determined
-process. Going live is therefore gated on running the captain as a separate unix
-account, or on the owner accepting that limit.
+- The command starts as `/usr/bin/python3 -IE`. `gh` and `openssl`, the only programs
+  that see an owner token or the App key, are found in `/usr/bin`, `/usr/local/bin`
+  and `/bin` only and run with that PATH, whatever the caller's PATH or
+  `~/.local/bin` holds. Certificate, proxy, Python, loader (`LD_*`, `OPENSSL_*`),
+  `GH_*`, `GITHUB_*` and `GIT_*` variables are dropped from the process and every
+  child, so a default login that depended on `GH_TOKEN` in the environment no longer
+  works in a real run; use `gh auth login`.
+- Any `MERGE_CAPTAIN_` variable (a prefix rule, so a future one is covered),
+  `AGENT_EVAL_STATE`, `AGENT_PACE_LANES`, a moved `XDG_CONFIG_HOME` or
+  `XDG_STATE_HOME`, or a changed `HOME` is an override. While one is set no owner
+  token and no App key is loaded (`insecure-token-file`, approver `insecure`), and
+  `auth` and `auth-app` refuse to save. The tests honour overrides only for a copy of
+  the tool that is not `~/.local/bin/merge-captain` and whose tokens and state resolve
+  under `/tmp` or `/var/tmp`; no environment variable turns this on. The guard hook
+  refuses any command that assigns a `MERGE_CAPTAIN_` variable (inline, `export`,
+  `env`, `declare`, or from Python, perl, ruby or node) but allows reading one.
+- These checks do not stop an agent running as the same unix account. It can change
+  `PATH`, set a proxy or CA bundle for a program the captain does not scrub, replace a
+  file in `~/.local/bin`, add a systemd drop-in for the captain's unit, or read the
+  key file directly. The override rule defends credentials only against a run that
+  was started with an override in its environment, by mistake or by a prompt-injected
+  shell command; it is not a boundary.
+- The existing `jdwlabs-agent-bot` key already lives where agents on this account can
+  read it, and with it they can already approve PRs it did not author. The approver
+  App therefore adds no new capability for an agent, and removes none. The real fix is
+  to run the captain, its state and its tokens as a separate unix account (tracked as
+  JDW-209). Until then going live rests on the owner accepting that limit.
 
 Rollback: `merge-captain pause`, then uninstall the App from the organization, or set
 `approver = false` (those PRs go back to `blocked`), or `merge-captain auth-app

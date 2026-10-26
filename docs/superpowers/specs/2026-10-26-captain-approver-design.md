@@ -50,11 +50,16 @@ approvals as well as merges. A PR authored by the App is skipped.
 
 ## Isolation limit
 
-The guard hook reads command text, so it stops accidents and prompt-injected
-shortcuts, not a determined process: an agent running as the same unix account can
-read the approver key by means the hook cannot see. Going live is therefore gated on
-running the captain as a separate unix account (its own token directory, state and
-key), or on the owner explicitly accepting that limit.
+The guard hook reads command text and the captain's override checks read its
+environment, so together they stop accidents and prompt-injected shortcuts, not a
+process running as the same unix account: that process can change `PATH`, set a proxy
+or CA bundle, replace a file in `~/.local/bin`, add a systemd drop-in or read the key
+file. The override check is a defence only for a run started with an override in its
+environment. The existing `jdwlabs-agent-bot` key already lives where agents on this
+account can read it, and can already approve PRs it did not author, so this App adds no
+new capability and removes none. The real fix is to run the captain as a separate unix
+account (its own token directory, state and key), tracked as JDW-209. Going live is
+gated on that, or on the owner explicitly accepting the limit.
 
 ## Blast radius and rollback
 

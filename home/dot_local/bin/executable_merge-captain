@@ -10,6 +10,7 @@ fine-grained token when one is saved (`auth`), else the default gh login.
 Agent-facing: stdout is TOON, diagnostics go to stderr.
 """
 import argparse
+import base64
 import datetime as dt
 import fcntl
 import getpass
@@ -17,6 +18,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import signal
 import stat
@@ -25,6 +27,7 @@ import sys
 import tempfile
 import time
 import tomllib
+import urllib.parse
 from pathlib import Path
 
 VERSION = "1.0.0"
@@ -55,6 +58,7 @@ ROTATION = STATE / "rotation.json"
 EXAMINED = STATE / "examined.json"
 REVIEWS = STATE / "reviews.jsonl"
 ATTEMPTS = STATE / "attempts.jsonl"
+APPROVALS = STATE / "approvals.jsonl"
 HUMAN = STATE / "human.jsonl"
 LOCK = STATE / "lock"
 
@@ -62,10 +66,14 @@ TIERS = ("R0", "R1", "R2", "R3")
 MODES = ("live", "dry-run", "off")
 # R3 is never mergeable here, so it is not a legal ceiling.
 CEILINGS = ("R0", "R1", "R2")
+# The App that approves on the captain's behalf. Its id, installation id and key sit beside the owner tokens; the
+# dots keep these names from ever matching an owner, which cannot contain one.
+APPROVER_IDS, APPROVER_KEY = "approver.json", "approver.key"
+APPROVER_LOGIN = "merge-captain-approver[bot]"
 # Providers this tool can run headless. Which of them a review may use is the [reviewers] config.
 PROVIDERS = ("claudeAgent", "opencode")
 LIMIT_DEFAULTS = {"max_prs_per_run": 20, "max_dry_prs_per_run": 8, "max_prs_per_repo": 4, "max_reviews_per_run": 2,
-                  "max_merges_per_hour": 6, "review_timeout_s": 300, "max_diff_bytes": 150000}
+                  "max_merges_per_hour": 6, "max_approvals_per_hour": 4, "review_timeout_s": 300, "max_diff_bytes": 150000}
 # Below this many calls left in either the REST or the GraphQL budget a run does nothing, so the captain never
 # spends the budget other tools on the same login are waiting on.
 API_BUDGET_MIN = 500
@@ -96,6 +104,10 @@ FINE_GRAINED = re.compile(r"github_pat_[A-Za-z0-9_]{20,240}")
 # What a saved token must look like to be sent anywhere: no whitespace or control character could ride along into
 # a header.
 TOKEN_SHAPE = re.compile(r"[A-Za-z0-9_]{20,255}")
+APP_NUMBER = re.compile(r"[1-9][0-9]{0,19}")
+PEM_KEY = re.compile(r"-----BEGIN (?:RSA )?PRIVATE KEY-----\n[A-Za-z0-9+/=\n]+-----END (?:RSA )?PRIVATE KEY-----\n?")
+KEY_MAX_BYTES = 16384
+CODEOWNER_FILES = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
 DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 SHA = re.compile(r"[0-9a-f]{40}")
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
@@ -141,7 +153,7 @@ PROMPT_SECRETS = (
                 r"(?:\"[^\"\n]{6,}\"|'[^'\n]{6,}'|[A-Za-z0-9_+/=@%^*!~:-]{8,})"), r"\1[redacted]"),
 )
 
-USAGE_SHORT = "merge-captain [run | status | pause | resume | explain | auth] [--help]"
+USAGE_SHORT = "merge-captain [run | status | pause | resume | explain | auth | auth-app] [--help]"
 
 
 def log(msg):
@@ -330,11 +342,14 @@ def load_config():
         need_token = row.get("require_token", False)
         if not isinstance(need_token, bool):
             die(EXIT_FAIL, f"repo {name}: require_token must be true or false, got {need_token!r}")
+        approver = row.get("approver", False)
+        if not isinstance(approver, bool):
+            die(EXIT_FAIL, f"repo {name}: approver must be true or false, got {approver!r}")
         per_repo = row.get("max_prs_per_repo", limits["max_prs_per_repo"])
         if not positive_int(per_repo):
             die(EXIT_FAIL, f"repo {name}: max_prs_per_repo must be a positive integer, got {per_repo!r}")
         repos.append({"name": name, "mode": mode, "max_tier": ceiling, "allow_no_checks": no_checks,
-                      "require_token": need_token, "max_prs_per_repo": per_repo})
+                      "require_token": need_token, "approver": approver, "max_prs_per_repo": per_repo})
     return {"limits": limits, "allow": allow, "ignore": ignore, "providers": providers, "repos": repos}
 
 
@@ -467,6 +482,144 @@ def identity_block(ident):
     if token_expired(ident):
         return "waiting", "token-expired"
     return None
+
+
+def read_secret_file(path, before, limit):
+    """The text of a file that passed `private_problem`, or None. Opened without following a link and compared with
+    what was checked, like a token; nothing from a file that fails to read may reach a message."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd) as f:
+            after = os.fstat(f.fileno())
+            if (after.st_ino, after.st_dev) != (before.st_ino, before.st_dev):
+                return None
+            return f.read(limit + 1)[:limit]
+    except (OSError, ValueError):
+        return None
+
+
+def load_approver():
+    """The approver App's ids and key path, or why it cannot be used. `state` is ready, missing (nothing saved) or
+    insecure (saved, but a file another account could open or swap). The key text is read only to be registered as
+    a secret and shape-checked; signing reads the file again through openssl."""
+    ident = {"state": "missing", "problem": None, "app_id": None, "installation_id": None, "key_path": None}
+
+    def insecure(problem):
+        return {**ident, "state": "insecure", "problem": problem}
+
+    try:
+        dst = os.lstat(TOKENS)
+    except FileNotFoundError:
+        return ident
+    except OSError:
+        return insecure("token directory unreadable")
+    problem = private_problem(dst, "token directory")
+    if problem:
+        return insecure(problem)
+    stats = {}
+    for name in (APPROVER_IDS, APPROVER_KEY):
+        try:
+            st = os.lstat(TOKENS / name)
+        except FileNotFoundError:
+            return ident
+        except OSError:
+            return insecure("approver file unreadable")
+        problem = private_problem(st, "approver key file" if name == APPROVER_KEY else "approver id file")
+        if problem:
+            return insecure(problem)
+        stats[name] = st
+    try:
+        ids = json.loads(read_secret_file(TOKENS / APPROVER_IDS, stats[APPROVER_IDS], 4096) or "")
+    except ValueError:
+        ids = None
+    app_id, inst = (ids.get("app_id"), ids.get("installation_id")) if isinstance(ids, dict) else (None, None)
+    if not (isinstance(app_id, str) and APP_NUMBER.fullmatch(app_id)
+            and isinstance(inst, str) and APP_NUMBER.fullmatch(inst)):
+        return insecure("approver id file malformed")
+    key = read_secret_file(TOKENS / APPROVER_KEY, stats[APPROVER_KEY], KEY_MAX_BYTES)
+    if key is None or not PEM_KEY.fullmatch(key):
+        return insecure("approver key file malformed")
+    register_key(key)
+    return {**ident, "state": "ready", "app_id": app_id, "installation_id": inst, "key_path": TOKENS / APPROVER_KEY}
+
+
+def register_key(pem):
+    """Key text and its bare base64 body, so a message carrying either is cut."""
+    KNOWN_SECRETS.add(pem.strip())
+    KNOWN_SECRETS.add("".join(l for l in pem.splitlines() if not l.startswith("-----")))
+
+
+def b64url(raw):
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def sign_rs256(key_path, data):
+    """Signature bytes of `data` under the key at `key_path`, or None. The key stays in its file: openssl reads it,
+    so it is never on a command line or in this process's memory."""
+    argv = [find_tool("MERGE_CAPTAIN_OPENSSL", "openssl"), "dgst", "-sha256", "-sign", str(key_path)]
+    try:
+        r = subprocess.run(argv, input=data, capture_output=True, timeout=TOOL_TIMEOUT_S, start_new_session=True)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout if r.returncode == 0 and r.stdout else None
+
+
+def app_jwt(app_id, key_path, now):
+    """A signed GitHub App JWT, valid for ten minutes at most (iat is backdated against clock skew), or None."""
+    def part(obj):
+        return b64url(json.dumps(obj, separators=(",", ":")).encode())
+
+    signing_input = part({"alg": "RS256", "typ": "JWT"}) + "." + part(
+        {"iat": int(now) - 60, "exp": int(now) + 540, "iss": int(app_id)})
+    sig = sign_rs256(key_path, signing_input.encode())
+    return f"{signing_input}.{b64url(sig)}" if sig else None
+
+
+def codeowner_regex(pattern):
+    """A full-match regex for one CODEOWNERS pattern, or None for syntax this matcher does not model (sections,
+    character classes, escapes), which the caller treats as undeterminable rather than guessing."""
+    if any(c in pattern for c in "[]\\!"):
+        return None
+    anchored = pattern.startswith("/") or "/" in pattern.rstrip("/")
+    body, out, i = pattern.strip("/"), [], 0
+    while i < len(body):
+        if body.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif body.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif body[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif body[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(body[i]))
+            i += 1
+    # A pattern naming a directory covers everything beneath it; one that names a file may also name a directory.
+    tail = "/.*" if pattern.endswith("/") else "(?:/.*)?"
+    return re.compile(("" if anchored else "(?:.*/)?") + "".join(out) + tail, re.S)
+
+
+def codeowners_cover(text, paths):
+    """True when a code owner is assigned to any of `paths`, False when none is, None when the file cannot be
+    judged. As on GitHub the last matching line wins, and a line with no owner releases the path."""
+    rules = []
+    for line in text.splitlines():
+        words = line.split("#", 1)[0].split()
+        if not words:
+            continue
+        rx = codeowner_regex(words[0])
+        if rx is None:
+            return None
+        rules.append((rx, len(words) > 1))
+    for path in paths:
+        owned = [has_owner for rx, has_owner in rules if rx.fullmatch(path)]
+        if owned and owned[-1]:
+            return True
+    return False
 
 
 class Result:
@@ -741,6 +894,12 @@ def merges_since(now):
     return count
 
 
+def approvals_since(now):
+    """Approvals the captain submitted in the last hour; the approval cap counts exactly these."""
+    return sum(1 for row in read_jsonl(APPROVALS)
+               if (t := parse_time(row.get("at"))) is not None and now - HOUR_S < t <= now)
+
+
 # ── Captain ──────────────────────────────────────────────────────────────────
 
 def deadline_from_env(name, default):
@@ -776,6 +935,7 @@ class Captain:
         self.deadline_s = deadline_from_env("MERGE_CAPTAIN_DEADLINE_S", RUN_DEADLINE_S)
         self.hard_deadline_s = deadline_from_env("MERGE_CAPTAIN_HARD_DEADLINE_S", HARD_DEADLINE_S)
         self.pending = None
+        self.recorded_lane = None
         self.open_assignment = None
         self.lanes = None
         self.deadline_logged = False
@@ -1062,6 +1222,7 @@ class Captain:
         """"approve", "changes" or None from this tool's own record. Nothing on the pull request is read:
         the owner's login also authors every agent comment, so a comment proves nothing about who wrote it.
         A `changes` line blocks whether or not the ledgers back it, because a forged one can only stop a merge."""
+        self.recorded_lane = None
         rows = [row for row in read_jsonl(REVIEWS)
                 if row.get("repo") == repo and row.get("pr") == n and row.get("head") == head
                 and row.get("tier") in TIERS and TIERS.index(row["tier"]) >= TIERS.index(tier)]
@@ -1072,7 +1233,9 @@ class Captain:
             return None
         assignments = self.by_id(read_jsonl(EVAL_STATE / "assignments.jsonl"))
         outcomes = self.by_id(read_jsonl(EVAL_STATE / "outcomes.jsonl"))
-        if any(self.approval_trusted(row, tier, assignments, outcomes) for row in approvals):
+        trusted = next((row for row in approvals if self.approval_trusted(row, tier, assignments, outcomes)), None)
+        if trusted:
+            self.recorded_lane = trusted["lane"]
             return "approve"
         self.step("review", "approve on record not backed by the ledgers")
         return None
@@ -1129,6 +1292,7 @@ class Captain:
         return {x.get("name") for x in rows if isinstance(x, dict)} if isinstance(rows, list) else None
 
     def gate(self, rc, n, d):
+        """True when only the repository's required approval is missing; raises Stop for any other unmet gate."""
         repo = rc["name"]
         mergeable = str(d.get("mergeable") or "").upper()
         if mergeable == "CONFLICTING":
@@ -1198,7 +1362,12 @@ class Captain:
         if updated is None or self.now - updated < SETTLE_S:
             raise Stop("waiting", "updated in the last 120 seconds")
         if state != "CLEAN" and not (state == "UNSTABLE" and tolerated):
+            # Every check above passed, so a required approval is all that is left to wait for.
+            decision = str(d.get("reviewDecision") or "").upper()
+            if state == "BLOCKED" and rc["approver"] and decision == "REVIEW_REQUIRED":
+                return True
             raise Stop("blocked", f"merge state {clean(state, 20) or 'unknown'}")
+        return False
 
     # -- review --------------------------------------------------------------
 
@@ -1443,6 +1612,152 @@ class Captain:
             self.edit_labels(repo, n, ["needs-human"], [])
         raise Stop("needs-human", summary)
 
+    # -- approval -------------------------------------------------------------
+
+    @staticmethod
+    def app_shape_ok(args, repo):
+        """The only two calls made as the App: the installation token exchange and one APPROVE review."""
+        if args[:3] != ["api", "-X", "POST"]:
+            return False
+        if len(args) == 6:
+            return (re.fullmatch(r"app/installations/[1-9][0-9]*/access_tokens", args[3]) is not None
+                    and args[4] == "-H" and args[5].startswith("Authorization: Bearer "))
+        return (len(args) == 10 and re.fullmatch(rf"repos/{re.escape(repo)}/pulls/[0-9]+/reviews", args[3]) is not None
+                and args[4:7] == ["-f", "event=APPROVE", "-f"] and args[8] == "-f" and args[9].startswith("body=")
+                and args[7].startswith("commit_id=") and SHA.fullmatch(args[7][len("commit_id="):]) is not None)
+
+    def app_gh(self, args, secret):
+        """One gh call as the App, with `secret` as the only credential in the child. The token reaches nothing else."""
+        if not self.live or self.explain:
+            raise Refused("approval attempted outside a live run")
+        if PAUSED.exists():
+            raise Stop("skipped", "paused")
+        if FORBIDDEN_FLAGS & set(args) or not self.app_shape_ok(args, self.repo):
+            raise Refused(f"app call not allowed: gh {' '.join(args[:4])}")
+        if self.past_deadline():
+            raise Stop("waiting", "deadline")
+        env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")}
+        env.update(GH_TOKEN=secret, GH_PROMPT_DISABLED="1", NO_COLOR="1", GH_NO_UPDATE_NOTIFIER="1", GH_PAGER="cat")
+        return run_cmd([self.gh_bin, *args], timeout=GH_TIMEOUT_S, cwd=self.scratch, env=env)
+
+    def mint_installation_token(self, creds):
+        """A fresh installation token, kept in memory for this one approval. The JWT that buys it is on the gh
+        command line for the length of one call and is good for ten minutes at most."""
+        jwt = app_jwt(creds["app_id"], creds["key_path"], self.now)
+        if jwt is None:
+            raise Stop("waiting", "approver-signing-failed")
+        KNOWN_SECRETS.add(jwt)
+        r = self.app_gh(["api", "-X", "POST", f"app/installations/{creds['installation_id']}/access_tokens",
+                         "-H", f"Authorization: Bearer {jwt}"], jwt)
+        if not r.ok:
+            raise Stop("waiting", "approver-token-refused")
+        try:
+            token = json.loads(r.out).get("token")
+        except (ValueError, AttributeError):
+            token = None
+        if not isinstance(token, str) or not TOKEN_SHAPE.fullmatch(token):
+            raise Stop("waiting", "approver-token-unreadable")
+        KNOWN_SECRETS.add(token)
+        return token
+
+    def codeowners_covered(self, repo, n, details):
+        """True when a code owner must review this pull request, False when none must, None when that cannot be
+        told. Two independent signals, either of which is enough: GitHub's own pending code-owner review requests,
+        and a CODEOWNERS file on the base branch with a line covering a changed path."""
+        owner, name = repo.split("/")
+        query = ("query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){"
+                 "reviewRequests(first:100){nodes{asCodeOwner} pageInfo{hasNextPage}}}}}")
+        r = self.gh(["api", "graphql", "-f", f"query={query}", "-f", f"o={owner}", "-f", f"r={name}",
+                     "-F", f"n={n}"])
+        try:
+            requests = json.loads(r.out)["data"]["repository"]["pullRequest"]["reviewRequests"]
+            pending = [x for x in requests["nodes"] if isinstance(x, dict)]
+            more = bool(requests["pageInfo"]["hasNextPage"])
+        except (ValueError, KeyError, TypeError, AttributeError):
+            return None
+        if any(x.get("asCodeOwner") is True for x in pending):
+            return True
+        if more or not r.ok:
+            return None
+
+        r = self.gh(["api", f"repos/{repo}/pulls/{n}/files?per_page=100"])
+        try:
+            rows = json.loads(r.out)
+            paths = [p for x in rows for p in (x.get("filename"), x.get("previous_filename")) if p]
+        except (ValueError, TypeError, AttributeError):
+            return None
+        if not r.ok or not isinstance(rows, list) or len(rows) >= 100 or not all(isinstance(p, str) for p in paths):
+            return None
+
+        ref = urllib.parse.quote(str(details.get("baseRefName") or ""), safe="")
+        for where in CODEOWNER_FILES:
+            r = self.gh(["api", f"repos/{repo}/contents/{where}?ref={ref}"])
+            if not r.ok:
+                if "HTTP 404" in r.err + r.out:
+                    continue
+                return None
+            try:
+                text = base64.b64decode(json.loads(r.out)["content"]).decode()
+            except (ValueError, KeyError, TypeError, AttributeError):
+                return None
+            return codeowners_cover(text, paths)
+        return False
+
+    def approve(self, rc, n, head, tier, lane, reasons, details):
+        """Approve as the App on exactly `head`, or end the pull request with the reason it was not approved. Every
+        condition is checked here again, close to the call, whatever the caller already established."""
+        repo = rc["name"]
+        if PAUSED.exists():
+            raise Stop("skipped", "paused")
+        if not (self.live and rc["approver"]):
+            raise Stop("skipped", "approver-off")
+        if self.author_login(details.get("author")) == APPROVER_LOGIN:
+            raise Stop("skipped", "approver-authored")
+        if not self.author_allowed(details.get("author"), self.cfg["allow"]):
+            raise Stop("skipped", "author-not-allowed")
+        if TIERS.index(tier) > TIERS.index("R2"):
+            raise Stop("skipped", f"{tier} above R2")
+        if approvals_since(self.now) >= self.limits["max_approvals_per_hour"]:
+            raise Stop("skipped", "approval-cap")
+        if any(row.get("repo") == repo and row.get("pr") == n and row.get("head") == head
+               for row in read_jsonl(APPROVALS)):
+            # Approved already, yet GitHub still wants a review: another approval would change nothing.
+            raise Stop("waiting", "approval-not-accepted")
+        now_head, state = self.fetch_head(repo, n)
+        names = {x.get("name") for x in state.get("labels") or [] if isinstance(x, dict)}
+        if now_head != head:
+            raise Stop("waiting", "head moved before approval")
+        if state.get("state") != "OPEN" or state.get("isDraft") or names & set(SKIP_LABELS):
+            raise Stop("skipped", "no longer eligible")
+        creds = load_approver()
+        if creds["state"] != "ready":
+            self.step("approver", creds["problem"] or creds["state"])
+            raise Stop("waiting", "approver-missing")
+        covered = self.codeowners_covered(repo, n, details)
+        if covered is None:
+            raise Stop("waiting", "codeowners-unknown")
+        if covered:
+            self.hand_to_human(repo, n, head, tier, reasons, details, "codeowners",
+                               "A code owner's review is required for the changed paths, so the approval is left "
+                               "for a person.", "codeowners-required")
+        token = self.mint_installation_token(creds)
+        who = md_safe(lane or "none (no review needed)", 60)
+        body = f"merge-captain approval: tier {tier}, reviewer lane {who}, sha {head}"
+        r = self.app_gh(["api", "-X", "POST", f"repos/{repo}/pulls/{n}/reviews", "-f", "event=APPROVE", "-f",
+                         f"commit_id={head}", "-f", f"body={body}"], token)
+        if not r.ok:
+            why = clean(r.err.splitlines()[0], 100) if r.err.strip() else "no reason given"
+            raise Stop("blocked", f"approval refused: {why}")
+        try:
+            reply = json.loads(r.out)
+        except ValueError:
+            reply = None
+        if not (isinstance(reply, dict) and reply.get("commit_id") == head):
+            raise Stop("blocked", "approval not confirmed for this head")
+        append_jsonl(APPROVALS, {"repo": repo, "pr": n, "head": head, "tier": tier, "lane": lane,
+                                 "at": iso(self.now)}, durable=True)
+        self.step("approve", f"submitted on {head[:12]}")
+
     # -- one pull request ----------------------------------------------------
 
     def process(self, rc, pr):
@@ -1519,8 +1834,8 @@ class Captain:
                                f"Risk tier {tier} is above the {ceiling} this repository lets the captain merge, "
                                "so it is left for a person.", why)
 
-        self.gate(rc, n, details)
-        self.step("gates", "met")
+        needs_approval = self.gate(rc, n, details)
+        self.step("gates", "met, approval required" if needs_approval else "met")
 
         lane = None
         if tier != "R0":
@@ -1542,7 +1857,10 @@ class Captain:
         d["lane"] = lane
 
         if not self.live:
-            raise Stop("would-merge", reason)
+            raise Stop("would-merge", reason + ("; would approve as the App first" if needs_approval else ""))
+        if needs_approval:
+            self.approve(rc, n, head, tier, lane or self.recorded_lane, reasons, details)
+            reason += "; approved by merge-captain-approver"
         self.merge(repo, n, head, d, reason, lane)
 
     def merge(self, repo, n, head, d, reason, lane):
@@ -1924,6 +2242,14 @@ def cmd_status(args):
                        "deferred_last_run": rot["deferred"], "as_of": rot["at"] or "-",
                        "examined_tracked": len(load_examined(now_epoch()))}
     out["owners"], out["warnings"] = owner_report(cfg["repos"], now_epoch())
+    wanted = [r["name"] for r in cfg["repos"] if r["approver"] and r["mode"] != "off"]
+    app = load_approver()
+    out["approver"] = {"state": app["state"], "repos": wanted, "approvals_last_hour": approvals_since(now_epoch()),
+                       "max_approvals_per_hour": cfg["limits"]["max_approvals_per_hour"]}
+    if wanted and app["state"] != "ready":
+        out["warnings"].append("approver wanted by " + shown_names(wanted) + " but is " + app["state"]
+                               + (f" ({app['problem']})" if app["problem"] else "")
+                               + "; those pull requests wait as approver-missing")
     kinds = {o["owner"]: o["identity"] for o in out["owners"]}
     out["token_required"] = [{"repo": r["name"], "require_token": "yes", "identity": kinds[r["name"].split("/")[0]]}
                              for r in cfg["repos"] if r.get("require_token")]
@@ -2063,9 +2389,13 @@ def whoami(token):
 
 
 def refuse_linked_removal(owner):
+    refuse_linked(TOKENS, TOKENS / owner, TOKENS / f"{owner}.meta")
+
+
+def refuse_linked(*paths):
     """A symlinked token directory would make the unlink act on its target, and a symlinked file is not ours to
     judge: removal only ever touches plain files in a plain directory."""
-    for path in (TOKENS, TOKENS / owner, TOKENS / f"{owner}.meta"):
+    for path in paths:
         try:
             linked = stat.S_ISLNK(os.lstat(path).st_mode)
         except FileNotFoundError:
@@ -2134,6 +2464,63 @@ def cmd_auth(args):
     return 0
 
 
+def cmd_auth_app(args):
+    """Save or remove the approver App's ids and private key. Like `auth`, only ever with a person at a terminal:
+    the key is copied from a file the person names into the token directory, and they are told to delete the source."""
+    if not (sys.stdin.isatty() and sys.stderr.isatty()):
+        usage_error("auth-app needs a person at a terminal: stdin and stderr must both be one",
+                    "Run it in a normal terminal outside any agent session")
+    if args.remove:
+        if args.key_file:
+            usage_error("--key-file does not go with --remove")
+        refuse_linked(TOKENS, TOKENS / APPROVER_IDS, TOKENS / APPROVER_KEY)
+        removed = False
+        for name in (APPROVER_KEY, APPROVER_IDS):
+            try:
+                os.unlink(TOKENS / name)
+                removed = True
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                die(EXIT_FAIL, f"cannot remove {name}: {e.strerror}")
+        emit({"approver": "removed" if removed else "none saved"})
+        return 0
+    if not args.key_file:
+        usage_error("auth-app needs --key-file PATH, the private key GitHub generated for the App")
+    try:
+        with open(args.key_file) as f:
+            st = os.fstat(f.fileno())
+            if not stat.S_ISREG(st.st_mode) or st.st_size > KEY_MAX_BYTES:
+                die(EXIT_FAIL, "the key file is not a regular file of a plausible size")
+            pem = f.read().replace("\r\n", "\n").strip() + "\n"
+    except (OSError, ValueError) as e:
+        die(EXIT_FAIL, f"cannot read the key file: {getattr(e, 'strerror', None) or 'not text'}")
+    register_key(pem)
+    if not PEM_KEY.fullmatch(pem):
+        die(EXIT_FAIL, "that is not an unencrypted PEM private key", "Use the .pem GitHub generated for the App")
+    if sign_rs256(args.key_file, b"merge-captain") is None:
+        die(EXIT_FAIL, "that key cannot sign", "Check it is the App's RSA private key and that openssl is installed")
+    ids = []
+    for what in ("App ID", "Installation ID"):
+        try:
+            value = getpass.getpass(f"{what} (input hidden): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            die(EXIT_FAIL, f"no {what} entered")
+        if not APP_NUMBER.fullmatch(value):
+            die(EXIT_FAIL, f"{what} must be a number")
+        ids.append(value)
+    token_dir_ready()
+    meta = json.dumps({"app_id": ids[0], "installation_id": ids[1], "saved_at": iso(now_epoch())})
+    try:
+        write_private(TOKENS / APPROVER_KEY, pem)
+        write_private(TOKENS / APPROVER_IDS, meta + "\n")
+    except OSError as e:
+        die(EXIT_FAIL, f"cannot save the approver: {e.strerror}")
+    emit({"app_id": ids[0], "installation_id": ids[1],
+          "help": "Delete the source key file now: shred -u " + shlex.quote(args.key_file)})
+    return 0
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 class Parser(argparse.ArgumentParser):
@@ -2195,6 +2582,11 @@ def build_parser():
     a.add_argument("owner", metavar="OWNER")
     a.add_argument("--expires", metavar="YYYY-MM-DD", help="when the token expires, if GitHub does not say")
     a.add_argument("--remove", action="store_true", help="delete the saved token instead")
+
+    aa = sub.add_parser("auth-app", help="save or remove the approver App's ids and key (a person at a terminal only)")
+    aa.set_defaults(func=cmd_auth_app)
+    aa.add_argument("--key-file", metavar="PATH", help="the App's private key file; copied, so delete the source after")
+    aa.add_argument("--remove", action="store_true", help="delete the saved App ids and key instead")
     return p
 
 

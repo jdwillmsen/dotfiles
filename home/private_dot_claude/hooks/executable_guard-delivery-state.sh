@@ -598,11 +598,14 @@ check_segment() {
 # or through export, env, declare, python, perl, ruby or node, is refused. Reading one (grep, rg, echo) is harmless and
 # stays allowed.
 ASSIGNS_OVERRIDE='MERGE_CAPTAIN_[A-Za-z0-9_]*[[:space:]"'"'"']*[+]?='
-# export, env and friends only count as the command being run (start of a line, or after ; & | ( or a quote opening
-# a -c script), so grepping for the word "export" alongside a variable name is a read, not an assignment.
-EXPORTS_WORD='(^|[;&|(]|[[:space:]]-[a-z]*c[[:space:]]+["'"'"'])[[:space:]]*(command[[:space:]]+|exec[[:space:]]+|sudo[[:space:]]+)?(export|declare|typeset|readonly|env|setenv)([^[:alnum:]_]|$)'
-# Other languages' ways of setting a variable for a child (python, perl, ruby, node).
-SETS_ENV_WORD='os[.]environ|os[.]putenv|[$]ENV[{[]|(^|[^[:alnum:]_])ENV[{[]|putenv|setenv|process[.]env'
+# export, env and friends only count as the command being run (start of a line or segment, or after ; & | ( { ! a
+# backtick, then/do/else, or a quote opening a -c script), so grepping for the word "export" alongside a variable name
+# is a read, not an assignment. Judged per segment as well as on the whole line: ^ only means the start of the string.
+EXPORTS_WORD='(^|[;&|({!`]|[[:space:]]-[a-z]*c[[:space:]]+["'"'"']|(^|[[:space:]])(then|do|else|elif)[[:space:]])[[:space:]]*(command[[:space:]]+|exec[[:space:]]+|sudo[[:space:]]+)?(export|declare|typeset|readonly|env|setenv)([^[:alnum:]_]|$)'
+# Other languages' ways of setting a variable for a child: python (update, setdefault, a subscript assignment, putenv),
+# perl and ruby (%ENV), node (process.env), and any env=/env: option naming one. Reading one (os.environ.get, a
+# subscript read) is not here.
+SETS_ENV_WORD='os[.]environ[.](update|setdefault|pop|clear|__setitem__)|os[.]environ[[:space:]]*=|os[.](putenv|unsetenv)|[$]ENV[{[]|(^|[^[:alnum:]_])ENV[{[]|putenv|setenv|process[.]env|(^|[^[:alnum:]_])env[[:space:]]*[=:]|[[][[:space:]]*["'"'"']MERGE_CAPTAIN_[A-Za-z0-9_]*["'"'"'][[:space:]]*[]][[:space:]]*[+]?=([^=]|$)'
 deny_override() {
     {
         echo "guard-delivery-state: blocked Bash on ${1:0:200}"
@@ -636,6 +639,7 @@ check_command() {
     while IFS= read -r seg; do
         if [[ -z $seg ]]; then continue; fi
         if token_mentions "$seg" && ! token_exempt "$seg"; then deny_token "Bash" "$seg"; fi
+        if [[ $seg == *MERGE_CAPTAIN_* && $seg =~ $EXPORTS_WORD ]]; then deny_override "$seg"; fi
         check_segment "$seg"
     done <<<"$cmd"
 }

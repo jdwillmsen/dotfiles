@@ -25,7 +25,7 @@ IFS= read -r -d '' input || true
 mentions_protected() {
     local v
     case $1 in
-        *merge-captain* | *agent-eval* | *change-risk* | *lanes.toml*) return 0 ;;
+        *merge-captain* | *agent-eval* | *change-risk* | *lanes.toml* | *MERGE_CAPTAIN_*) return 0 ;;
     esac
     for v in MERGE_CAPTAIN_TOKENS MERGE_CAPTAIN_STATE AGENT_EVAL_STATE MERGE_CAPTAIN_CONFIG AGENT_PACE_LANES \
         AGENT_EVAL_LANES; do
@@ -593,10 +593,27 @@ check_segment() {
     esac
 }
 
+# The captain's tool and path overrides (MERGE_CAPTAIN_GH, _OPENSSL, _STATE, _TOKENS ...) exist for its tests. Set by an
+# agent they would point the captain at a program or a directory of its choosing, so a command that assigns one, inline
+# or through export, env or declare, is refused. Reading one (grep, echo) is harmless and stays allowed.
+ASSIGNS_OVERRIDE='MERGE_CAPTAIN_[A-Za-z0-9_]*[[:space:]"'"'"']*[+]?='
+EXPORTS_WORD='(^|[^[:alnum:]_])(export|declare|typeset|readonly|env|setenv)([^[:alnum:]_]|$)'
+deny_override() {
+    {
+        echo "guard-delivery-state: blocked Bash on ${1:0:200}"
+        echo "MERGE_CAPTAIN_* variables redirect the merge captain's tools and directories. An agent may not set"
+        echo "them; run the tool as it is."
+    } >&2
+    exit 2
+}
+
 # A line of commands, split wherever the shell would start a new one: newlines, ; && || | |& and a lone & (which
 # backgrounds the command before it). The & of >&, &> and 2>&1 is part of a redirect, so it is set aside first.
 check_command() {
     local cmd=$1 seg
+    if [[ $cmd == *MERGE_CAPTAIN_* ]] && { [[ $cmd =~ $ASSIGNS_OVERRIDE ]] || [[ $cmd =~ $EXPORTS_WORD ]]; }; then
+        deny_override "$cmd"
+    fi
     cmd=${cmd//>|/>}
     cmd=${cmd//>&/$'\x02'}
     cmd=${cmd//&>/$'\x03'}

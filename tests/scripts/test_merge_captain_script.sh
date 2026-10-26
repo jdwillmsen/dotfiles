@@ -504,7 +504,7 @@ DEFAULT_TOKEN="${GP}testsecretvalue0000000000000"
 mc_env() {  # rebuilt per call: a test may point CFG somewhere else
     MCENV=(MERGE_CAPTAIN_CONFIG="$CFG" MERGE_CAPTAIN_STATE="$STATE" MERGE_CAPTAIN_NOW="$NOW" MERGE_CAPTAIN_TOKENS="$TOKDIR"
         MERGE_CAPTAIN_GH="$bin/gh" MERGE_CAPTAIN_CLASS="$bin/change-class" MERGE_CAPTAIN_PACE="$bin/agent-pace"
-        MERGE_CAPTAIN_EVAL="$bin/agent-eval" MERGE_CAPTAIN_CLAUDE="$bin/claude" MERGE_CAPTAIN_OPENCODE="$bin/opencode"
+        MERGE_CAPTAIN_TEST_HARNESS=1 MERGE_CAPTAIN_EVAL="$bin/agent-eval" MERGE_CAPTAIN_CLAUDE="$bin/claude" MERGE_CAPTAIN_OPENCODE="$bin/opencode"
         AGENT_PACE_LANES="$tmp/lanes.toml" STUB_DIR="$S" AGENT_EVAL_STATE="$S/evalstate" HOME="$tmp/home"
         GH_TOKEN="$DEFAULT_TOKEN" SOME_API_KEY="${SK}testtesttesttesttest" PLATFORMCTL_JDWLABS_NVIDIA_API_KEY=nv-keep-me
         PATH="/usr/bin:/bin")
@@ -2202,7 +2202,7 @@ with open(tmp + "/unit-tokens/acme", "w") as f:
     os.chmod(f.name, 0o600)
     f.write(tok + "\n")
 os.environ.update(MERGE_CAPTAIN_STATE=tmp + "/unit-state", MERGE_CAPTAIN_CONFIG=tmp + "/none.toml",
-                  MERGE_CAPTAIN_TOKENS=tmp + "/unit-tokens")
+                  MERGE_CAPTAIN_TOKENS=tmp + "/unit-tokens", MERGE_CAPTAIN_TEST_HARNESS="1")
 spec = importlib.util.spec_from_loader("mc", importlib.machinery.SourceFileLoader("mc", tool))
 mc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mc)
@@ -2799,7 +2799,8 @@ python3 -I - "$tool" "$tmp" <<'PY' || fail "guard unit checks failed"
 import importlib.machinery, importlib.util, os, sys
 tool, tmp = sys.argv[1:3]
 sys.dont_write_bytecode = True  # keep the source tree free of a pycache
-os.environ.update(MERGE_CAPTAIN_STATE=tmp + "/guard-state", MERGE_CAPTAIN_CONFIG=tmp + "/none.toml")
+os.environ.update(MERGE_CAPTAIN_STATE=tmp + "/guard-state", MERGE_CAPTAIN_CONFIG=tmp + "/none.toml",
+                  MERGE_CAPTAIN_TEST_HARNESS="1")
 spec = importlib.util.spec_from_loader("mc", importlib.machinery.SourceFileLoader("mc", tool))
 mc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mc)
@@ -3473,6 +3474,59 @@ ln -s "$tmp/moved.pem" "$TOKDIR/approver.key"
 ptyapp "" auth-app --remove
 [ "$pty_rc" = 1 ] && grep -q 'is a symlink' <<<"$pty_out" && [ -e "$TOKDIR/approver.json" ] || fail "remove through a link" "$pty_out"
 rm -f "$tmp/moved.pem"
+
+# ── Review hardening ──
+# H1: a tool or path override in the environment must not be able to receive the owner tokens or the App key.
+newcase_app
+mktok acme "$TOK_ACME"
+apr_pr 80 R0
+mc_env_prod() {  # the usual environment without the test suite's opt-in, so every override variable counts
+    local x
+    mc_env
+    for x in "${!MCENV[@]}"; do
+        if [ "${MCENV[$x]}" = MERGE_CAPTAIN_TEST_HARNESS=1 ]; then unset "MCENV[$x]"; fi
+    done
+}
+prod() {  # args...: like mc, in that environment
+    rc=0
+    mc_env_prod
+    env "${MCENV[@]}" "$tool" "$@" >"$out" 2>"$err" || rc=$?
+}
+prod run
+grep -q 'acme/live,-,-,skipped,insecure-token-file' "$out" || fail "a run with overrides set still used credentials" "$(cat "$out")"
+[ ! -s "$S/gh.log" ] || fail "gh was called with overrides set" "$(cat "$S/gh.log")"
+prod status
+grep -q '^  acme,insecure,' "$out" && grep -q 'a MERGE_CAPTAIN_ tool or path override is set' "$out" || fail "status does not name the override" "$(cat "$out")"
+grep -q '^  state: insecure$' "$out" || fail "the approver loaded under an override" "$(cat "$out")"
+! grep -qF -- "$TOK_ACME" "$out" "$err" || fail "status printed a token"
+XT="$tmp/xc/merge-captain/tokens"
+rm -rf "$tmp/xc" "$tmp/xs"
+mkdir -p "$XT" "$tmp/xs"
+chmod 700 "$tmp/xc/merge-captain" "$XT"
+printf '%s\n' "$TOK_ACME" >"$XT/acme"
+cp "$TOKDIR/approver.key" "$TOKDIR/approver.json" "$XT/"
+chmod 600 "$XT"/*
+alone() {  # VAR=value...: only these set, the default token directory in use
+    rc=0
+    env -i HOME="$tmp/home" PATH=/usr/bin:/bin XDG_STATE_HOME="$tmp/xs" XDG_CONFIG_HOME="$tmp/xc" \
+        MERGE_CAPTAIN_CONFIG="$CFG" "$@" "$tool" status >"$out" 2>"$err" || rc=$?
+}
+alone
+grep -q '^  acme,token,' "$out" && grep -q '^  state: ready$' "$out" || fail "the control did not load its credentials" "$(cat "$out")"
+for v in MERGE_CAPTAIN_OPENSSL=/usr/bin/true MERGE_CAPTAIN_GH=/usr/bin/true MERGE_CAPTAIN_CLASS=/usr/bin/true \
+    MERGE_CAPTAIN_STATE="$tmp/xs/merge-captain" MERGE_CAPTAIN_TOKENS="$XT" MERGE_CAPTAIN_API_URL=http://127.0.0.1:9; do
+    alone "$v"
+    grep -q '^  acme,insecure,' "$out" && grep -q '^  state: insecure$' "$out" || fail "${v%%=*} did not stop credentials loading" "$(cat "$out")"
+done
+alone MERGE_CAPTAIN_GH=/usr/bin/true MERGE_CAPTAIN_TEST_HARNESS=1
+grep -q '^  acme,token,' "$out" || fail "the test opt-in no longer works" "$(cat "$out")"
+# Saving credentials is refused too: the token would be sent to the overridden gh.
+newcase
+mc_env_prod
+env "${MCENV[@]}" python3 -I "$tmp/ptyrun.py" full "$TOK_ACME" "$tmp/pty.out" "$tool" auth acme || true
+pty_out="$(tr -d '\r' <"$tmp/pty.out")"
+[ "$(cat "$tmp/pty.out.rc")" = 1 ] && grep -q 'nothing was saved' <<<"$pty_out" && [ ! -e "$TOKDIR/acme" ] || fail "auth saved a token under an override" "$pty_out"
+! grep -qF -- "$TOK_ACME" <<<"$pty_out" || fail "auth printed the token"
 
 # ── Global: nothing, in any case above, ever asked for a bypass or another merge style ──
 cat "$S/gh.log" >>"$tmp/all_gh.log"

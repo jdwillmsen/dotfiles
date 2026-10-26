@@ -21,6 +21,7 @@
 # pull requests as the merge-captain-approver App when its ruleset wants one review and
 # everything else is met (R2 or below, an allowed author, no CODEOWNERS path). Needs
 # `merge-captain auth-app` first; without the App's key the PR waits as approver-missing.
+# Shipped false everywhere: the owner flips it per repository once the App is provisioned.
 
 [limits]
 # Caps count only pull requests that need a decision: a draft, a held one or one
@@ -91,7 +92,7 @@ name = "jdwlabs/apps"
 mode = "live"
 max_tier = "R2"
 require_token = true
-approver = true
+approver = false
 
 [[repo]]
 name = "jdwlabs/deployments"
@@ -104,14 +105,14 @@ name = "jdwlabs/infrastructure"
 mode = "live"
 max_tier = "R2"
 require_token = true
-approver = true
+approver = false
 
 [[repo]]
 name = "jdwlabs/platform"
 mode = "live"
 max_tier = "R2"
 require_token = true
-approver = true
+approver = false
 
 [[repo]]
 name = "dotablaze-tech/apps"

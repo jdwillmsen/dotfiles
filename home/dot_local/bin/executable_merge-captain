@@ -414,8 +414,8 @@ TRANSIENT_REFUSAL = re.compile(r"(?i)\b5\d\d\b|time[d ]?-? ?out|connect|temporar
                                r"bad gateway|resolve|dial|reset by peer|modified")
 # gh and openssl handle the owner tokens and the App key, so they are found in these directories only, in this order,
 # and run with this PATH, whatever PATH the caller has.
-TRUSTED_DIRS = ("/usr/bin", "/usr/local/bin", "/bin")
-TRUSTED_PATH = "/usr/local/bin:/usr/bin:/bin"
+SYSTEM_BIN_DIRS = ("/usr/bin", "/usr/local/bin", "/bin")
+SYSTEM_BIN_PATH = "/usr/local/bin:/usr/bin:/bin"
 # What a child could use to read or redirect traffic that carries a credential: certificate and proxy settings,
 # interpreter and loader hooks, and gh's and git's own configuration. The user's gh login is a config file, not these.
 DROP_ENV = re.compile(r"(?i)SSL_CERT_.*|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE|NODE_EXTRA_CA_CERTS|.*_PROXY|PYTHON.*|"
@@ -455,10 +455,10 @@ def tool_path(env_name, name):
     or ~/.local/bin."""
     if test_mode() and os.environ.get(env_name):
         return os.environ[env_name]
-    for d in TRUSTED_DIRS:
+    for d in SYSTEM_BIN_DIRS:
         if os.access(os.path.join(d, name), os.X_OK):
             return os.path.join(d, name)
-    return os.path.join(TRUSTED_DIRS[1], name)
+    return os.path.join(SYSTEM_BIN_DIRS[1], name)
 
 
 def harden_environment():
@@ -654,7 +654,7 @@ def sign_rs256(key_fd, data):
     argv = [tool_path("MERGE_CAPTAIN_OPENSSL", "openssl"), "dgst", "-sha256", "-sign", f"/dev/fd/{key_fd}"]
     try:
         r = subprocess.run(argv, input=data, capture_output=True, timeout=TOOL_TIMEOUT_S, start_new_session=True,
-                           pass_fds=(key_fd,), env=dict(os.environ, PATH=TRUSTED_PATH))
+                           pass_fds=(key_fd,), env=dict(os.environ, PATH=SYSTEM_BIN_PATH))
     except (OSError, subprocess.TimeoutExpired):
         return None
     return r.stdout if r.returncode == 0 and r.stdout else None
@@ -1226,7 +1226,7 @@ class Captain:
         if block:
             raise Stop(*block)
         env = dict(os.environ, GH_PROMPT_DISABLED="1", NO_COLOR="1", GH_NO_UPDATE_NOTIFIER="1", GH_PAGER="cat",
-                   PATH=TRUSTED_PATH)
+                   PATH=SYSTEM_BIN_PATH)
         token = self.identity(owner)["token"]
         if token:
             env["GH_TOKEN"] = token
@@ -1425,9 +1425,9 @@ class Captain:
             return None
         assignments = self.by_id(read_jsonl(EVAL_STATE / "assignments.jsonl"))
         outcomes = self.by_id(read_jsonl(EVAL_STATE / "outcomes.jsonl"))
-        trusted = next((row for row in approvals if self.approval_trusted(row, tier, assignments, outcomes)), None)
-        if trusted:
-            self.recorded_lane = trusted["lane"]
+        backed = next((row for row in approvals if self.approval_trusted(row, tier, assignments, outcomes)), None)
+        if backed:
+            self.recorded_lane = backed["lane"]
             return "approve"
         self.step("review", "approve on record not backed by the ledgers")
         return None
@@ -1836,7 +1836,7 @@ class Captain:
             raise Refused(f"app call not allowed: gh {' '.join(args[:4])}")
         env = {k: v for k, v in os.environ.items() if k not in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")}
         env.update(GH_TOKEN=secret, GH_PROMPT_DISABLED="1", NO_COLOR="1", GH_NO_UPDATE_NOTIFIER="1", GH_PAGER="cat",
-                   PATH=TRUSTED_PATH)
+                   PATH=SYSTEM_BIN_PATH)
         return run_cmd([self.gh_bin, *args], timeout=GH_TIMEOUT_S, cwd=self.scratch, env=env)
 
     def mint_installation_token(self, creds, repo, retract=False):
@@ -2747,7 +2747,7 @@ def token_check(token):
 def whoami(token):
     """(login, expiry date or None) of a token, from one `gh api -i user` with the token in that child alone."""
     env = dict(os.environ, GH_TOKEN=token, GH_PROMPT_DISABLED="1", NO_COLOR="1", GH_NO_UPDATE_NOTIFIER="1",
-               GH_PAGER="cat", PATH=TRUSTED_PATH)
+               GH_PAGER="cat", PATH=SYSTEM_BIN_PATH)
     r = run_cmd([tool_path("MERGE_CAPTAIN_GH", "gh"), "api", "-i", "user"], timeout=GH_TIMEOUT_S, env=env)
     if not r.ok:
         reason = clean(r.err.splitlines()[0], 120) if r.err.strip() else "no reason given"

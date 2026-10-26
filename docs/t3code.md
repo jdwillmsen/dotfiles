@@ -160,6 +160,19 @@ starting a thread is a choice of stream rather than of repo:
 | `DOTA` | `~/projects/dotablaze-tech` |
 | `DOTFILES` | the chezmoi source directory |
 
+Each project carries its org's logo, so the sidebar groups by stream at a
+glance: cyan for `jdwlabs`, red for `jdwillmsen` (`JDW`, `DOTFILES`, and the
+`FWB` project), orange for `dotablaze-tech`. The SVGs are chezmoi-managed into
+`~/.t3/project-icons/` and set as the project's `faviconPath` by absolute path:
+
+```bash
+# via the t3-code MCP: t3_project_update { projectId, faviconPath }
+~/.t3/project-icons/<owner>-logo.svg
+```
+
+`faviconPath` lives in `state.sqlite`, not in a file chezmoi can own, so a
+re-registered project needs it set again.
+
 A thread's work is rarely one repo's: most pull requests opened from T3 came
 from threads that touched several. Rooting a project at a repo would buy T3's
 own worktree, branch and diff controls for the few threads that stay in one,
@@ -405,6 +418,7 @@ Everything lives under `~/.t3`:
 | `userdata/state.sqlite` | Threads, sessions, settings |
 | `userdata/logs/` | `server.log`, per-terminal logs, provider events. The unit appends its own stdout/stderr here as `boot-service.log`, which nothing rotates — `server.trace.ndjson` does, around 10 MB |
 | `userdata/secrets/` | Provider env values marked sensitive |
+| `project-icons/` | Org logo SVGs used as project icons; chezmoi-managed |
 | `worktrees/` | Per-thread git worktrees, for a project whose root is a git repository — here only `DOTFILES`. Stream projects never put anything in it |
 | `scratch/` | One folder per thread started with no project; kept when the thread is deleted |
 

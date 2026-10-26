@@ -194,8 +194,9 @@ else, installed on those three repositories), approves them. It authors nothing 
 is not `jdwlabs-agent-bot`, so revoking one never disables the other. Design:
 `docs/superpowers/specs/2026-10-26-captain-approver-design.md`.
 
-A repository opts in with `approver = true` (default `false`, and `false` in the
-shipped config until the App is provisioned); `[limits] max_approvals_per_hour`
+A repository opts in with `approver = true` (default `false`; the shipped config sets it
+on `jdwlabs/apps`, `jdwlabs/infrastructure` and `jdwlabs/platform`, the repositories that
+require an approving review); `[limits] max_approvals_per_hour`
 (default 4) caps approvals. The step runs only when the merge gate is otherwise met,
 GitHub reports `REVIEW_REQUIRED` with merge state `BLOCKED`, and the repository is
 `live`. Then, in order:

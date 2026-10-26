@@ -160,6 +160,8 @@ unsure, classify up. Put the result on the PR and ticket as labels
   protection (`.../branches/<base>/protection`); an access error is not a
   "no". If gated, author it as `jdwlabs-agent-bot` (jdwlabs repos; elsewhere,
   say so first). Method: dotfiles `docs/bot-authored-prs.md`.
+  The merge captain approves R0–R2 org PRs as `merge-captain-approver` once the
+  tier's review is done.
 - Title `type(scope): short description`, under 70 chars. **Body is for the
   reviewer, ~150 words max**, only sections with content: *Why* (1–3 sentences); *Needs attention* —
   risky spots as `file:line` and the feedback wanted; *Risk/rollout* only if

@@ -46,7 +46,9 @@ configured repository, ending at the first step that fails:
    and with any other implementer lane is also excluded. With no usable trailer the
    review runs as before and its comment says "implementer unknown". Trailers are
    whatever the commit author wrote.
-7. `gh pr merge --rebase --match-head-commit <sha>`. Never `--admin`, never another
+7. Where the ruleset wants one approving review and everything above is met, the
+   approver step (below) submits it as the App on this exact head.
+8. `gh pr merge --rebase --match-head-commit <sha>`. Never `--admin`, never another
    merge style, never `--delete-branch`.
 
 The review comment is posted before the review is recorded. If it cannot be
@@ -66,7 +68,7 @@ failure, because a failure kind feeds the lane cooldown that all dispatch shares
 `[limits]` holds the caps: PRs per run (`max_prs_per_run`, 20), dry-run PRs per run
 (`max_dry_prs_per_run`, 8), PRs per repository per run (`max_prs_per_repo`, 4, and a
 `[[repo]]` may set its own), reviewer calls per run (2, failed calls included),
-merges per hour (6), review timeout (300 s), largest diff read. The PR caps count
+merges per hour (6), approvals per hour (4), review timeout (300 s), largest diff read. The PR caps count
 only pull requests that went through classification, gates, review or merge, so a
 draft or a held PR never uses them; the run cap counts live repositories only and
 the dry cap dry-run ones, so reporting on dry-run repositories cannot starve live
@@ -89,7 +91,7 @@ by default); every lane on another provider is passed to `agent-pace assign` as
 other-family lane is left for an R1 review it asks once more with
 `--allow-same-family` and the comment says "same-family reviewer". Each
 `[[repo]]` has `mode` (`live`, `dry-run`, `off`), `max_tier` (`R0`..`R2`) and
-optionally `allow_no_checks` and `require_token` (a boolean, default `false`). A repo
+optionally `allow_no_checks`, `require_token` and `approver` (booleans, default `false`). A repo
 not listed is ignored. A malformed file stops the run with an error, never a default.
 
 `require_token = true` holds a repository until its owner has a token file: with
@@ -182,6 +184,72 @@ file and its metadata, and refuses when the directory or either file is a symlin
 revoke the token on GitHub as well. The owner then goes back
 to the default login. To stop the captain for that owner instead, set its repositories
 to `mode = "off"` or `merge-captain pause`.
+
+## The approver App
+
+The org rulesets on `jdwlabs/apps`, `jdwlabs/infrastructure` and `jdwlabs/platform`
+require one approving review, so R2 PRs there stop at `merge state BLOCKED`. A
+separate GitHub App, `merge-captain-approver` (Pull requests: Read and write, nothing
+else, installed on those three repositories), approves them. It authors nothing and
+is not `jdwlabs-agent-bot`, so revoking one never disables the other. Design:
+`docs/superpowers/specs/2026-10-26-captain-approver-design.md`.
+
+A repository opts in with `approver = true` (default `false`); `[limits]
+max_approvals_per_hour` (default 4) caps approvals. The step runs only when the
+merge gate is otherwise met, GitHub reports `REVIEW_REQUIRED` with merge state
+`BLOCKED`, and the repository is `live`. Then, in order:
+
+1. Not paused, tier R2 or below, author on the allow-list, and not the App itself
+   (`approver-authored`); under the hourly cap (`approval-cap`); not already approved
+   on this head (`approval-not-accepted`, so a held PR is never approved in a loop).
+2. The head is read again and must be the reviewed one (`head moved before approval`).
+3. The App's files must be usable, else `waiting` `approver-missing` and nothing else
+   is called.
+4. No CODEOWNERS requirement over the changed paths: a pending code-owner review
+   request on the PR, or a CODEOWNERS file on the base branch (`.github/`, root,
+   `docs/`) with a line that owns a changed path (last match wins; a line with no
+   owner releases the path). A hit labels the PR `needs-human`
+   (`codeowners-required`). Anything that cannot be judged (a failed read, 100 or more
+   changed files, sections or character classes in the file) is `waiting`
+   `codeowners-unknown`: no approval.
+5. A fresh installation token is minted for this one approval: an RS256 JWT (`iat`
+   now-60 s, `exp` now+540 s, `iss` the App ID) signed with `openssl dgst -sha256
+   -sign`, exchanged at `POST /app/installations/<id>/access_tokens`. The token lives
+   in memory only. The JWT is on the `gh` command line for that one call (it can only
+   buy installation tokens and expires within ten minutes).
+6. An `APPROVE` review is submitted on that head (`commit_id`), body "merge-captain
+   approval: tier T, reviewer lane L, sha S", and recorded in `approvals.jsonl` in
+   the state directory. Then the usual `--match-head-commit` merge, as the owner's
+   identity.
+
+A push after the approval dismisses it under the ruleset; the next run starts again at
+step 1 on the new head, and a PR is never merged on an approval for another commit.
+`merge-captain pause` stops approvals as it stops merges. `status` shows `approver`
+(state, repositories, approvals this hour) and warns when a repository wants an
+approver that is missing or unsafe. Key text, JWT and installation token join the
+captain's list of secrets, so nothing prints or logs them.
+
+Provisioning (yours, outside any agent session; agents may drive the App registration
+form but never read the generated key):
+
+1. Register the App under the `jdwlabs` organization with only Pull requests: Read
+   and write, webhooks off, and install it on `jdwlabs/apps`, `jdwlabs/infrastructure`
+   and `jdwlabs/platform`. Note the App ID and the installation ID (the number in
+   the installation's settings URL). Generate a private key.
+2. In a normal terminal: `merge-captain auth-app --key-file ~/Downloads/<key>.pem`
+   and type the two ids at the hidden prompts. It refuses without a terminal, checks
+   that the key can sign, copies it into the token directory as `approver.key` (0600,
+   with `approver.json` for the ids; the guard hook covers both like the tokens) and
+   prints only the two ids. Then delete the source file it names.
+3. `merge-captain status` shows `approver: state: ready`. Try one PR with
+   `merge-captain explain O/R#N`.
+
+A key file that is a symlink, belongs to someone else or is readable by group or
+others is not used (`approver-missing`; `status` names the reason).
+
+Rollback: `merge-captain pause`, then uninstall the App from the organization, or set
+`approver = false` (those PRs go back to `blocked`), or `merge-captain auth-app
+--remove` (they wait as `approver-missing`).
 
 ## Flipping a repo to live
 
@@ -281,7 +349,7 @@ A `waiting` for `quota` or `review-unavailable` costs nothing; `blocked` with
   directory (`~/.config/merge-captain`, `MERGE_CAPTAIN_TOKENS`, and `XDG_CONFIG_HOME`
   where set), and any Bash command that mentions the directory in any way (`cat`,
   `cp`, `ls`, `grep`, `tar`, `find`, `echo >` ...), except a plain
-  `merge-captain auth` or `merge-captain status`. A line is split at newlines, `;`,
+  `merge-captain auth`, `auth-app` or `merge-captain status`. A line is split at newlines, `;`,
   `&&`, `||`, `|`, `|&` and a lone `&` before each part is judged, so a backgrounded
   `status & cat <token>` is refused; `&>`, `>&` and `2>&1` stay redirects. Paths are
   resolved through symlinks before they are judged, so a link into the token directory
@@ -303,8 +371,9 @@ A `waiting` for `quota` or `review-unavailable` costs nothing; `blocked` with
   substitution that hides the path), and nothing in these files can: a separate unix
   account for the captain, its state and its tokens is the real fix (JDW-209). Pause
   and resume go through `merge-captain pause|resume`, which the hook allows.
-- If the repository's ruleset requires an approving review, the merge is refused
-  and shows as `blocked`; the captain does not approve its own reviews.
+- If the repository's ruleset requires an approving review and the repository has no
+  `approver = true`, the merge is refused and shows as `blocked`; the captain never
+  approves as the owner or as its own `gh` identity (see "The approver App").
 - `opencode` reviewers are off by default. Findings, 2026-10-23: a plain
   `opencode run -m opencode/deepseek-v4.1-flash-free 'Reply OK'` works in a
   terminal-like environment, with a benign `OPENCODE_CONFIG_CONTENT`, and with the

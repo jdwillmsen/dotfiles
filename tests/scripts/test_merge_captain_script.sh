@@ -3472,7 +3472,13 @@ CFG_SAVE="$CFG"
 CFG="$shipped_cfg"
 want 0 status
 CFG="$CFG_SAVE"
-grep -q '^  repos\[3\]: jdwlabs/apps,jdwlabs/infrastructure,jdwlabs/platform$' "$out" || fail "the shipped approver repositories" "$(cat "$out")"
+grep -q '^  repos\[0\]:' "$out" || fail "the shipped config must leave every approver off" "$(cat "$out")"
+python3 -I - "$shipped_cfg" <<'PY' || fail "the three org repositories must list approver = false"
+import sys, tomllib
+rows = {r["name"]: r for r in tomllib.load(open(sys.argv[1], "rb"))["repo"]}
+assert all(rows[n]["approver"] is False for n in ("jdwlabs/apps", "jdwlabs/infrastructure", "jdwlabs/platform")), rows
+assert not any(r.get("approver") for r in rows.values())
+PY
 grep -q '^  max_approvals_per_hour: 4$' "$out" || fail "the shipped cap" "$(cat "$out")"
 
 # auth-app: a person at a terminal only; the key is copied, never shown; the ids are typed hidden.

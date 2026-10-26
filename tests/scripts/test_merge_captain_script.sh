@@ -4243,5 +4243,10 @@ if grep '^pr merge' "$tmp/all_gh.log" | grep -vqE '^pr merge [0-9]+ --repo [^ ]+
     fail "a merge was not exactly --rebase --match-head-commit <sha>" "$(grep '^pr merge' "$tmp/all_gh.log" | sort -u)"
 fi
 
+# A run outlasts the JWT lifetime, so each token exchange must be signed with the clock now, never the run's start.
+if grep -q 'app_jwt(creds, self\.now)' "$tool"; then
+    fail "the App JWT is signed with the run's start time" "app_jwt(creds, self.now) found"
+fi
+
 shellcheck -s bash "$0"
 echo "test_merge_captain_script: OK"

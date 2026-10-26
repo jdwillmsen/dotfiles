@@ -17,6 +17,10 @@
 #   mode = "dry-run"
 #   max_tier = "R2"
 #   require_token = true
+# approver: optional, default false. true lets the captain approve this repository's
+# pull requests as the merge-captain-approver App when its ruleset wants one review and
+# everything else is met (R2 or below, an allowed author, no CODEOWNERS path). Needs
+# `merge-captain auth-app` first; without the App's key the PR waits as approver-missing.
 
 [limits]
 # Caps count only pull requests that need a decision: a draft, a held one or one
@@ -29,6 +33,8 @@ max_dry_prs_per_run = 8
 max_prs_per_repo = 4
 max_reviews_per_run = 2
 max_merges_per_hour = 6
+# Approvals the App may submit in an hour, across all repositories.
+max_approvals_per_hour = 4
 review_timeout_s = 300
 max_diff_bytes = 150000
 
@@ -85,6 +91,7 @@ name = "jdwlabs/apps"
 mode = "live"
 max_tier = "R2"
 require_token = true
+approver = true
 
 [[repo]]
 name = "jdwlabs/deployments"
@@ -97,12 +104,14 @@ name = "jdwlabs/infrastructure"
 mode = "live"
 max_tier = "R2"
 require_token = true
+approver = true
 
 [[repo]]
 name = "jdwlabs/platform"
 mode = "live"
 max_tier = "R2"
 require_token = true
+approver = true
 
 [[repo]]
 name = "dotablaze-tech/apps"

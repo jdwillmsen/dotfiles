@@ -45,12 +45,15 @@ S = os.environ["STUB_DIR"]
 SELF = "captain-bot"
 args = sys.argv[1:]
 stdin = sys.stdin.read() if "--body-file" in args else ""
+BEARER = "Authorization: Bearer "
+# A JWT on the command line is logged as its hash, like a token in the environment.
+shown = [BEARER + hashlib.sha256(a[len(BEARER):].encode()).hexdigest() if a.startswith(BEARER) else a for a in args]
 with open(f"{S}/gh.log", "a") as f:
-    f.write(" ".join(args) + "\n")
+    f.write(" ".join(shown) + "\n")
 with open(f"{S}/gh.calls", "a") as f:
     # A hash, so no stub file ever holds a token and a grep for the real one over the temp dir stays meaningful.
     sha = hashlib.sha256(os.environ["GH_TOKEN"].encode()).hexdigest() if "GH_TOKEN" in os.environ else None
-    f.write(json.dumps({"argv": args, "stdin": stdin, "token": "GH_TOKEN" in os.environ, "gh_token_sha": sha}) + "\n")
+    f.write(json.dumps({"argv": shown, "stdin": stdin, "token": "GH_TOKEN" in os.environ, "gh_token_sha": sha}) + "\n")
 
 
 def rd(name, default=None):
@@ -85,6 +88,47 @@ def save_pr(n, pr):
 if rd("gh_down") is not None:
     fail("gh: dial tcp: lookup api.github.com: no such host")
 head2 = args[:2]
+if args[:3] == ["api", "-X", "POST"]:
+    path = args[3]
+    if path.startswith("app/installations/"):
+        import base64, subprocess, tempfile
+        jwt = flag("-H").removeprefix(BEARER)
+        if os.environ.get("GH_TOKEN") != jwt:
+            fail("stub gh: the JWT must also be the process credential")
+        os.makedirs(f"{S}/realtokens", exist_ok=True)
+        open(f"{S}/realtokens/jwt", "w").write(jwt)
+        if rd("mint_fail") is not None:
+            fail("HTTP 401: A JSON web token could not be decoded: " + jwt)
+        head, payload, sig = jwt.split(".")
+        b = lambda t: base64.urlsafe_b64decode(t + "=" * (-len(t) % 4))
+        claims = json.loads(b(payload))
+        now = int(os.environ["STUB_NOW_EPOCH"])
+        assert json.loads(b(head)) == {"alg": "RS256", "typ": "JWT"}, head
+        assert claims == {"iat": now - 60, "exp": now + 540, "iss": int(rd("app_id"))}, claims
+        assert path == f"app/installations/{rd('installation_id')}/access_tokens", path
+        with tempfile.TemporaryDirectory() as d:
+            open(f"{d}/sig", "wb").write(b(sig))
+            ok = subprocess.run(["openssl", "dgst", "-sha256", "-verify", os.environ["STUB_PUB"], "-signature", f"{d}/sig"],
+                                input=f"{head}.{payload}".encode(), capture_output=True).returncode == 0
+        if not ok:
+            fail("HTTP 401: Bad credentials (signature)")
+        with open(f"{S}/minted", "a") as f:
+            f.write("1\n")
+        say({"token": rd("realtokens/inst_token"), "expires_at": "2026-10-23T21:00:00Z"})
+    if "/pulls/" in path and path.endswith("/reviews"):
+        n = path.split("/")[4]
+        if os.environ.get("GH_TOKEN") != rd("realtokens/inst_token"):
+            fail("HTTP 401: Bad credentials")
+        fields = dict(a.split("=", 1) for a in args[4:] if "=" in a)
+        with open(f"{S}/reviews_posted.jsonl", "a") as f:
+            f.write(json.dumps({"pr": n, "fields": fields, "token_sha": hashlib.sha256(os.environ["GH_TOKEN"].encode()).hexdigest()}) + "\n")
+        if rd("review_fail") is not None:
+            fail("HTTP 422: Unprocessable: refused for " + os.environ["GH_TOKEN"])
+        pr = jload(f"pr_{n}.json", {})
+        if rd("review_noeffect") is None and fields["commit_id"] == pr.get("headRefOid"):
+            pr.update(reviewDecision="APPROVED", mergeStateStatus="CLEAN")
+            save_pr(n, pr)
+        say({"id": 1, "state": "APPROVED", "commit_id": fields["commit_id"]})
 if head2 == ["pr", "list"]:
     repo = flag("--repo")
     if rd("list_fail_" + repo.replace("/", "_")) is not None:
@@ -145,6 +189,8 @@ if head2 == ["pr", "merge"]:
     if msg:
         fail(msg)
     pr = jload(f"pr_{n}.json", {})
+    if pr.get("reviewDecision") == "REVIEW_REQUIRED":
+        fail("Pull request is not mergeable: the base branch policy prohibits the merge.")
     pr["state"] = "MERGED"
     save_pr(n, pr)
     if rd("merge_then_fail") is not None:
@@ -186,12 +232,34 @@ if args[:3] == ["api", "-i", "user"]:
     sys.exit(0)
 if args[:2] == ["api", "graphql"]:
     n = [a for a in args if a.startswith("n=")][0][2:]
+    if "reviewRequests" in [a for a in args if a.startswith("query=")][0]:
+        if rd(f"coreq_bad_{n}") is not None:
+            print("not json")
+            sys.exit(0)
+        say({"data": {"repository": {"pullRequest": {"reviewRequests": {
+            "nodes": [{"asCodeOwner": rd(f"coreq_{n}") is not None}], "pageInfo": {"hasNextPage": False}}}}}})
     if rd(f"threads_bad_{n}") is not None:
         print("not json")
         sys.exit(0)
     k = int(rd(f"threads_{n}", "0"))
     nodes = [{"isResolved": False}] * k + [{"isResolved": True}]
     say({"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes, "pageInfo": {"hasNextPage": False}}}}}})
+if args[0] == "api" and "/pulls/" in args[1] and "/files?" in args[1]:
+    n = args[1].split("/pulls/")[1].split("/")[0]
+    if rd("pause_on_files") is not None:
+        open(os.path.join(os.environ["MERGE_CAPTAIN_STATE"], "PAUSED"), "w").write("stub\n")
+    if rd("files_fail") is not None:
+        fail("gh: Server Error (HTTP 500)")
+    say(jload(f"files_{n}.json", [{"filename": "src/x.py"}]))
+if args[0] == "api" and "/contents/" in args[1]:
+    where = args[1].split("/contents/")[1].split("?")[0]
+    if rd("codeowners_err") is not None:
+        fail("gh: Server Error (HTTP 500)")
+    text = rd("codeowners.txt")
+    if text is None or (rd("codeowners_at") or ".github/CODEOWNERS").strip() != where:
+        fail("gh: Not Found (HTTP 404)")
+    import base64
+    say({"type": "file", "content": base64.encodebytes(text.encode()).decode()})
 if args[0] == "api" and "code-scanning" in args[1]:
     n = args[1].split("refs/pull/")[1].split("/")[0]
     v = rd(f"alerts_{n}")
@@ -419,6 +487,7 @@ cfg() {  # limit overrides as key=value; LIVE_MAX sets the live repo's ceiling
         echo 'allow = ["jdwillmsen", "jdwlabs-agent-bot[bot]", "renovate[bot]", "dependabot[bot]"]'
         printf '[[repo]]\nname = "acme/live"\nmode = "live"\nmax_tier = "%s"\n' "${LIVE_MAX:-R2}"
         if [ -n "${ALLOW_NO_CHECKS:-}" ]; then echo 'allow_no_checks = true'; fi
+        if [ -n "${APPROVER:-}" ]; then echo 'approver = true'; fi
         printf '[[repo]]\nname = "acme/dry"\nmode = "dry-run"\nmax_tier = "R2"\n'
         printf '[[repo]]\nname = "acme/off"\nmode = "off"\nmax_tier = "R2"\n'
     } >"$CFG"
@@ -2895,6 +2964,515 @@ for bad in '"yes"' '1' '"true"' '[true]'; do
     grep -q '^error:' "$out" && grep -q 'require_token must be true or false' "$out" ||
         fail "require_token = $bad was not rejected" "$(cat "$out")"
 done
+
+# ── The approver App: the captain approves as a separate identity, on the reviewed commit only ──
+# The App's key is a throwaway generated here; no credential-shaped literal exists in this file. The gh stub verifies
+# the JWT (claims and RS256 signature) against the matching public key before it hands out an installation token.
+APP_ID=424242
+INST_ID=7070707
+GS="gh""s_"
+INST_TOKEN="${GS}InstallationTokenInstallationToken00"
+openssl genrsa -out "$tmp/app_key.pem" 2048 2>/dev/null
+openssl rsa -in "$tmp/app_key.pem" -pubout -out "$tmp/app_pub.pem" 2>/dev/null
+export STUB_PUB="$tmp/app_pub.pem"
+STUB_NOW_EPOCH="$(date -u -d "$NOW" +%s)"
+export STUB_NOW_EPOCH
+KEYBODY="$(sed -n 2p "$tmp/app_key.pem")"
+[ "${#KEYBODY}" -ge 32 ] || fail "the throwaway key has no body line to search for"
+mkapp() {  # the App's files exactly as `auth-app` leaves them, and what the stub must hand out
+    mkdir -p "$TOKDIR" "$S/realtokens"
+    chmod 700 "$TOKDIR"
+    cp "$tmp/app_key.pem" "$TOKDIR/approver.key"
+    chmod 600 "$TOKDIR/approver.key"
+    printf '{"app_id":"%s","installation_id":"%s","saved_at":"2026-10-01T00:00:00Z"}\n' "$APP_ID" "$INST_ID" >"$TOKDIR/approver.json"
+    chmod 600 "$TOKDIR/approver.json"
+    printf '%s' "$APP_ID" >"$S/app_id"
+    printf '%s' "$INST_ID" >"$S/installation_id"
+    printf '%s' "$INST_TOKEN" >"$S/realtokens/inst_token"
+}
+newcase_app() { APPROVER=1 newcase "$@"; mkapp; }
+apr_pr() {  # N tier [fx pr args...]: held by the ruleset for one approval, with its review queued from R1 up
+    local n="$1" tier="$2"
+    shift 2
+    fx pr "$n" reviewDecision=REVIEW_REQUIRED mergeStateStatus=BLOCKED "$@"
+    if [ "$tier" = R0 ]; then
+        fx class "$n" R0 tags=docs reasons=docs:R0:README.md
+    else
+        fx class "$n" "$tier"
+        fx pace 1 lane=claude-sonnet provider=claudeAgent model=claude-sonnet-5-5
+        fx rev claude 1 approve
+    fi
+}
+posts() { if [ -s "$S/reviews_posted.jsonl" ]; then wc -l <"$S/reviews_posted.jsonl"; else echo 0; fi; }
+no_app_activity() {  # nothing was minted, posted or merged
+    [ ! -e "$S/minted" ] && [ "$(posts)" = 0 ] && [ "$(count '^pr merge' "$S/gh.log")" = 0 ] ||
+        fail "$1: the App was used or a merge happened" "$(cat "$S/gh.log")"
+}
+app_strays() {  # files holding the key body, an installation token or the JWT, other than the fixtures that are meant to
+    grep -rlF --exclude-dir=tokens --exclude-dir=realtokens --exclude=app_key.pem --exclude=src.pem --exclude=merge_fail \
+        -e "$KEYBODY" -e "$INST_TOKEN" ${1:+-e "$1"} "$tmp" || true
+}
+head_of() { printf '%040x' "$1"; }
+
+# Approval happens on the reviewed head only, after the tier's review, before the merge, as the App.
+newcase_app
+apr_pr 30 R1
+want 0 run
+expect 30 merged "review approve by claude-sonnet; approved by merge-captain-approver"
+[ "$(posts)" = 1 ] || fail "exactly one approval expected" "$(cat "$S/reviews_posted.jsonl" 2>/dev/null)"
+python3 -I - "$S/reviews_posted.jsonl" "$(head_of 30)" "$(sha "$INST_TOKEN")" <<'PY' || fail "approval content" "$(cat "$S/reviews_posted.jsonl")"
+import json, sys
+row = json.loads(open(sys.argv[1]).readline())
+f = row["fields"]
+assert row["pr"] == "30" and f["event"] == "APPROVE" and f["commit_id"] == sys.argv[2], row
+assert f["body"] == f"merge-captain approval: tier R1, reviewer lane claude-sonnet, sha {sys.argv[2]}", f["body"]
+assert row["token_sha"] == sys.argv[3], "the approval was not made with the installation token"
+PY
+[ "$(wc -l <"$S/minted")" = 1 ] || fail "one installation token per approval"
+review_line="$(grep -n '^api -X POST repos/acme/live/pulls/30/reviews ' "$S/gh.log" | cut -d: -f1)"
+merge_line="$(grep -n '^pr merge 30 ' "$S/gh.log" | cut -d: -f1)"
+[ -n "$review_line" ] && [ -n "$merge_line" ] && [ "$review_line" -lt "$merge_line" ] || fail "approve before merge" "$(cat "$S/gh.log")"
+grep -qx "pr merge 30 --repo acme/live --rebase --match-head-commit $(head_of 30)" "$S/gh.log" || fail "merge not pinned to the approved head"
+python3 -I - "$S/gh.calls" "$(sha "$DEFAULT_TOKEN")" <<'PY' || fail "the merge must run as the captain's own identity, not the App"
+import json, sys
+for line in open(sys.argv[1]):
+    c = json.loads(line)
+    if c["argv"][:2] == ["pr", "merge"]:
+        assert c["gh_token_sha"] == sys.argv[2], c
+PY
+python3 -I - "$STATE/approvals.jsonl" "$(head_of 30)" <<'PY' || fail "approval ledger" "$(cat "$STATE/approvals.jsonl")"
+import json, sys
+row = json.loads(open(sys.argv[1]).readline())
+assert {k: row[k] for k in ("repo", "pr", "head", "tier", "lane")} == {"repo": "acme/live", "pr": 30, "head": sys.argv[2], "tier": "R1", "lane": "claude-sonnet"}, row
+assert row["at"], row
+PY
+[ "$(mode_of "$STATE/approvals.jsonl")" = 600 ] || fail "the approval ledger must be 0600"
+# Neither the key, the installation token nor the JWT is in any output, state, log or stub file.
+[ -s "$S/realtokens/jwt" ] || fail "the stub never saw a JWT"
+[ -z "$(app_strays "$(cat "$S/realtokens/jwt")")" ] || fail "key material or a token was written outside its file" "$(app_strays "$(cat "$S/realtokens/jwt")")"
+! grep -rqF -- "$(cat "$S/realtokens/jwt")" "$STATE" "$out" "$err" || fail "the JWT reached state, output or logs"
+mc status
+grep -q '^  state: ready$' "$out" || fail "status of a ready approver" "$(cat "$out")"
+grep -q '^  approvals_last_hour: 1$' "$out" && grep -q '^  max_approvals_per_hour: 4$' "$out" || fail "status approval counts" "$(cat "$out")"
+
+# R0 needs no review: the body says so, and the approval still pins the head.
+newcase_app
+apr_pr 31 R0
+want 0 run
+expect 31 merged "approved by merge-captain-approver"
+grep -q "\"body\": \"merge-captain approval: tier R0, reviewer lane none (no review needed), sha $(head_of 31)\"" "$S/reviews_posted.jsonl" ||
+    fail "R0 approval body" "$(cat "$S/reviews_posted.jsonl")"
+
+# A review that found problems is never followed by an approval.
+newcase_app
+fx pr 32 reviewDecision=REVIEW_REQUIRED mergeStateStatus=BLOCKED
+fx class 32 R1
+fx pace 1 lane=claude-sonnet provider=claudeAgent model=claude-sonnet-5-5
+fx rev claude 1 changes
+want 0 run
+expect 32 blocked "review changes"
+no_app_activity "changes review"
+
+# No approval where it is not allowed.
+newcase_app
+fx pr 33 reviewDecision=REVIEW_REQUIRED mergeStateStatus=BLOCKED
+fx class 33 R3 reasons=infra:R3:deploy/x
+want 0 run
+expect 33 needs-human
+no_app_activity "R3"
+newcase_app
+fx pr 34 'author={"login":"stranger","is_bot":false}' reviewDecision=REVIEW_REQUIRED mergeStateStatus=BLOCKED
+fx class 34 R0 tags=docs
+want 0 run
+expect 34 skipped author-not-allowed
+no_app_activity "unlisted author"
+APPROVER=1 newcase
+mkapp
+sed -i 's|^allow = \[|allow = ["merge-captain-approver[bot]", |' "$CFG"
+apr_pr 35 R0 'author={"login":"app/merge-captain-approver","is_bot":true}'
+want 0 run
+expect 35 skipped approver-authored
+no_app_activity "the App's own pull request"
+# approver = false (the default): the ruleset's block shows as before, and the App is never used.
+newcase
+mkapp
+apr_pr 36 R0
+want 0 run
+expect 36 blocked "merge state BLOCKED"
+no_app_activity "approver = false"
+# The block must be the missing approval and nothing else.
+newcase_app
+fx pr 37 mergeStateStatus=BLOCKED
+fx class 37 R0 tags=docs
+want 0 run
+expect 37 blocked "merge state BLOCKED"
+no_app_activity "BLOCKED without REVIEW_REQUIRED"
+newcase_app
+apr_pr 38 R0 'statusCheckRollup=[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"FAILURE"}]'
+want 0 run
+expect 38 blocked "checks failed"
+no_app_activity "failing checks"
+newcase_app
+apr_pr 39 R0
+echo 1 >"$S/threads_39"
+want 0 run
+expect 39 blocked "unresolved review thread"
+no_app_activity "open review threads"
+# A repository that is only being watched writes nothing, and says it would approve.
+newcase_app
+apr_pr 40 R0
+want 0 run --dry-run
+expect 40 would-merge "would approve as the App first"
+no_app_activity "dry run"
+[ -z "$(writes)" ] || fail "a dry run wrote" "$(writes)"
+
+# CODEOWNERS: approval on those paths stays with a person, who is asked once.
+codeowners_case() {  # description, CODEOWNERS text, wanted action, wanted reason
+    newcase_app
+    printf '%b' "$2" >"$S/codeowners.txt"
+    apr_pr 41 R0
+    want 0 run
+    expect 41 "$3" "$4"
+    no_app_activity "$1"
+}
+codeowners_case "a catch-all owner" '* @someone\n' needs-human codeowners-required
+grep -q 'merge-captain:needs-human sha=.* reason=codeowners' "$S/posted_41.txt" || fail "no needs-human comment for CODEOWNERS" "$(cat "$S/posted_41.txt" 2>/dev/null)"
+grep -q '"name": "needs-human"' "$S/pr_41.json" || fail "needs-human label not set" "$(cat "$S/pr_41.json")"
+codeowners_case "a directory owner" '# owners\n/src/ @team  # ours\n' needs-human codeowners-required
+codeowners_case "a glob owner" '*.py @team\n' needs-human codeowners-required
+codeowners_case "a nested wildcard" 'src/**/*.py @team\n/src/x.py @team\n' needs-human codeowners-required
+codeowners_case "a later line that owns the path again" '* @a\n/src/ @b\n' needs-human codeowners-required
+codeowners_case "a syntax this matcher does not model" '[Docs]\n* @team\n' waiting codeowners-unknown
+codeowners_case "a character class" 'src/[xy].py @team\n' waiting codeowners-unknown
+newcase_app
+echo x >"$S/codeowners_err"
+apr_pr 41 R0
+want 0 run
+expect 41 waiting codeowners-unknown
+no_app_activity "an unreadable CODEOWNERS"
+rm "$S/codeowners_err"
+for flag in coreq_bad_41 files_fail; do
+    newcase_app
+    printf '/docs/ @team\n' >"$S/codeowners.txt"
+    echo x >"$S/$flag"
+    apr_pr 41 R0
+    want 0 run
+    expect 41 waiting codeowners-unknown
+    no_app_activity "$flag"
+done
+newcase_app
+echo x >"$S/coreq_41"
+apr_pr 41 R0
+want 0 run
+expect 41 needs-human codeowners-required
+no_app_activity "a pending code-owner review request"
+# Paths no line owns, a line that releases them, and other CODEOWNERS locations do not stop the approval.
+for text in '/docs/ @team\n' '* @a\n/src/ \n' '/other.py @team\nsrc/y.py @team\n' '\n# only comments\n'; do
+    newcase_app
+    printf '%b' "$text" >"$S/codeowners.txt"
+    apr_pr 42 R0
+    want 0 run
+    expect 42 merged "approved by merge-captain-approver"
+done
+newcase_app
+printf '* @team\n' >"$S/codeowners.txt"
+echo CODEOWNERS >"$S/codeowners_at"
+apr_pr 42 R0
+want 0 run
+expect 42 needs-human codeowners-required
+newcase_app
+printf '*.py @team\n' >"$S/codeowners.txt"
+printf '[{"filename":"README.md"},{"filename":"web/new.ts","previous_filename":"web/old.py"}]' >"$S/files_42.json"
+apr_pr 42 R0
+want 0 run
+expect 42 needs-human codeowners-required
+
+# The head the approval is for is the head that was reviewed; a push in between ends the attempt.
+newcase_app
+apr_pr 43 R0
+printf '%s %s' "$(head_of 43)" "$(head_of 4300)" >"$S/head_seq_43"
+want 0 run
+expect 43 waiting "head moved before approval"
+no_app_activity "a push before the approval"
+# An approval never carries over to a new head: the new head is approved afresh and merged on that approval alone.
+newcase_app
+apr_pr 44 R0
+echo "not mergeable: stub" >"$S/merge_fail"
+want 0 run
+expect 44 blocked "merge refused"
+[ "$(posts)" = 1 ] || fail "first head should be approved once"
+rm "$S/merge_fail"
+fx pr 44 reviewDecision=REVIEW_REQUIRED mergeStateStatus=BLOCKED headRefOid="$(head_of 4400)"
+want 0 run
+expect 44 merged "approved by merge-captain-approver"
+python3 -I - "$S/reviews_posted.jsonl" "$(head_of 44)" "$(head_of 4400)" <<'PY' || fail "approvals per head" "$(cat "$S/reviews_posted.jsonl")"
+import json, sys
+rows = [json.loads(line)["fields"]["commit_id"] for line in open(sys.argv[1])]
+assert rows == [sys.argv[2], sys.argv[3]], rows
+PY
+grep -qx "pr merge 44 --repo acme/live --rebase --match-head-commit $(head_of 4400)" "$S/gh.log" || fail "merge not on the new head" "$(grep '^pr merge' "$S/gh.log")"
+# An approval on file for an older head is no reason to skip, and none for this head is invented.
+newcase_app
+apr_pr 45 R0
+mkdir -p "$STATE"
+printf '{"repo":"acme/live","pr":45,"head":"%s","tier":"R0","lane":null,"at":"2026-10-23T19:50:00Z"}\n' "$(head_of 4500)" >"$STATE/approvals.jsonl"
+want 0 run
+expect 45 merged
+grep -q "\"commit_id\": \"$(head_of 45)\"" "$S/reviews_posted.jsonl" || fail "the old head's approval was reused" "$(cat "$S/reviews_posted.jsonl")"
+# The same head approved once and still held: no second approval, no loop.
+newcase_app
+apr_pr 46 R0
+echo x >"$S/review_noeffect"
+want 0 run
+expect 46 blocked "merge refused"
+want 0 run
+expect 46 waiting approval-not-accepted
+[ "$(posts)" = 1 ] || fail "the same head was approved twice" "$(cat "$S/reviews_posted.jsonl")"
+
+# Caps and the kill switch stop approvals.
+newcase_app max_approvals_per_hour=1
+apr_pr 47 R0
+apr_pr 48 R0
+want 0 run
+[ "$(grep -c ',merged,' "$out")" = 1 ] && [ "$(grep -c ',skipped,approval-cap$' "$out")" = 1 ] || fail "one approval per hour" "$(cat "$out")"
+[ "$(posts)" = 1 ] || fail "cap exceeded" "$(cat "$S/reviews_posted.jsonl")"
+want 0 run
+[ "$(posts)" = 1 ] || fail "the cap did not hold on the next run"
+NOW_SAVE="$NOW"
+NOW="2026-10-23T21:30:00Z"
+STUB_NOW_EPOCH="$(date -u -d "$NOW" +%s)"
+want 0 run
+NOW="$NOW_SAVE"
+STUB_NOW_EPOCH="$(date -u -d "$NOW" +%s)"
+export STUB_NOW_EPOCH
+[ "$(posts)" = 2 ] || fail "an hour later the other pull request should be approved" "$(cat "$out")"
+newcase_app
+for n in 50 51 52 53 54; do apr_pr "$n" R0; done
+want 0 run
+[ "$(grep -c ',merged,' "$out")" = 4 ] && [ "$(grep -c ',skipped,approval-cap$' "$out")" = 1 ] || fail "four approvals per hour by default" "$(cat "$out")"
+newcase_app
+apr_pr 55 R0
+want 0 pause --reason test
+want 0 run
+[ ! -s "$S/gh.log" ] || fail "a paused run called gh" "$(cat "$S/gh.log")"
+no_app_activity "pause"
+newcase_app
+apr_pr 56 R0
+echo x >"$S/pause_on_files"
+want 0 run
+expect 56 skipped paused
+no_app_activity "pause during the run"
+
+# Missing or unsafe key material: the pull request waits with a named reason and nothing is called.
+app_wait() {  # description
+    want 0 run
+    expect 57 waiting approver-missing
+    no_app_activity "$1"
+    ! grep -q '/files' "$S/gh.log" || fail "$1: the captain went on to read the pull request's files"
+}
+APPROVER=1 newcase
+apr_pr 57 R0
+app_wait "no key at all"
+newcase_app
+rm "$TOKDIR/approver.key"
+apr_pr 57 R0
+app_wait "no key file"
+newcase_app
+rm "$TOKDIR/approver.json"
+apr_pr 57 R0
+app_wait "no id file"
+newcase_app
+chmod 644 "$TOKDIR/approver.key"
+apr_pr 57 R0
+app_wait "a world-readable key"
+mc status
+grep -q 'approver wanted by acme/live but is insecure' "$out" && grep -q 'group or world accessible' "$out" || fail "status does not say why" "$(cat "$out")"
+! grep -qF -- "$KEYBODY" "$out" || fail "status printed the key"
+newcase_app
+chmod 640 "$TOKDIR/approver.json"
+apr_pr 57 R0
+app_wait "group-readable ids"
+newcase_app
+chmod 755 "$TOKDIR"
+apr_pr 57 R0
+want 1 run
+grep -q 'acme/live,-,-,skipped,insecure-token-file' "$out" || fail "a loose token directory did not stop the run" "$(cat "$out")"
+no_app_activity "a loose token directory"
+newcase_app
+mv "$TOKDIR/approver.key" "$tmp/moved.pem"
+ln -s "$tmp/moved.pem" "$TOKDIR/approver.key"
+apr_pr 57 R0
+app_wait "a symlinked key"
+rm -f "$tmp/moved.pem"
+newcase_app
+printf 'not a key\n' >"$TOKDIR/approver.key"
+apr_pr 57 R0
+app_wait "a malformed key"
+newcase_app
+printf '{"app_id":"x","installation_id":"1"}\n' >"$TOKDIR/approver.json"
+apr_pr 57 R0
+app_wait "malformed ids"
+# A key that fails to sign, a GitHub that refuses the token or the approval: waiting or blocked, never merged, never printed.
+newcase_app
+printf '%s\nAAAA\n%s\n' "-----BEGIN ""PRIVATE KEY-----" "-----END ""PRIVATE KEY-----" >"$TOKDIR/approver.key"
+apr_pr 58 R0
+want 0 run
+expect 58 waiting approver-signing-failed
+no_app_activity "a key that does not parse"
+newcase_app
+echo x >"$S/mint_fail"
+apr_pr 58 R0
+want 0 run
+expect 58 waiting approver-token-refused
+no_app_activity "a refused token exchange"
+[ -z "$(app_strays "$(cat "$S/realtokens/jwt")")" ] && ! grep -rqF -- "$(cat "$S/realtokens/jwt")" "$STATE" "$out" "$err" || fail "a failed exchange leaked the JWT"
+newcase_app
+echo x >"$S/review_fail"
+apr_pr 58 R0
+want 0 run
+expect 58 blocked "approval refused"
+grep -q 'redacted' "$out" || fail "the refusal did not show the cut token" "$(cat "$out")"
+[ -z "$(app_strays)" ] && [ ! -s "$STATE/approvals.jsonl" ] || fail "a refused approval leaked or was recorded" "$(app_strays)"
+[ "$(count '^pr merge' "$S/gh.log")" = 0 ] || fail "merged after a refused approval"
+
+# Config: approver is a boolean, the cap a positive integer, and both have safe defaults.
+for bad in '"yes"' '1' '[true]'; do
+    newcase
+    sed -i "s|^name = \"acme/live\"\$|&\napprover = $bad|" "$CFG"
+    want 1 status
+    grep -q 'approver must be true or false' "$out" || fail "approver = $bad was not rejected" "$(cat "$out")"
+done
+for bad in 0 -1 '"4"' true; do
+    newcase "max_approvals_per_hour=$bad"
+    want 1 status
+    grep -q 'max_approvals_per_hour must be a positive integer' "$out" || fail "max_approvals_per_hour = $bad was not rejected" "$(cat "$out")"
+done
+newcase
+want 0 status
+grep -q '^  max_approvals_per_hour: 4$' "$out" && grep -q '^  state: missing$' "$out" || fail "approver defaults" "$(cat "$out")"
+! grep -q 'approver wanted' "$out" || fail "warned about an approver nobody asked for"
+CFG_SAVE="$CFG"
+CFG="$shipped_cfg"
+want 0 status
+CFG="$CFG_SAVE"
+grep -q '^  repos\[3\]: jdwlabs/apps,jdwlabs/infrastructure,jdwlabs/platform$' "$out" || fail "the shipped approver repositories" "$(cat "$out")"
+grep -q '^  max_approvals_per_hour: 4$' "$out" || fail "the shipped cap" "$(cat "$out")"
+
+# auth-app: a person at a terminal only; the key is copied, never shown; the ids are typed hidden.
+cat >"$tmp/ptyrun2.py" <<'PY'
+import os, pty, select, sys, time
+replies, outfile = sys.argv[1].split(",") if sys.argv[1] else [], sys.argv[2]
+argv = sys.argv[3:]
+pid, fd = pty.fork()
+if pid == 0:
+    os.execv(argv[0], argv)
+buf, sent, deadline = b"", 0, time.time() + 30
+while time.time() < deadline:
+    if not select.select([fd], [], [], 0.2)[0]:
+        continue
+    try:
+        data = os.read(fd, 4096)
+    except OSError:
+        break
+    if not data:
+        break
+    buf += data
+    if sent < len(replies) and buf.count(b"input hidden") > sent:
+        os.write(fd, replies[sent].encode() + b"\n")
+        sent += 1
+if time.time() >= deadline:
+    os.kill(pid, 9)
+rc = os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1])
+open(outfile, "w").write(buf.decode(errors="replace"))
+open(outfile + ".rc", "w").write(str(rc))
+PY
+ptyapp() {  # replies(comma separated) args...: `merge-captain <args>` on a pty, answering each hidden prompt in turn
+    local replies="$1"
+    shift
+    mc_env
+    env "${MCENV[@]}" python3 -I "$tmp/ptyrun2.py" "$replies" "$tmp/pty.out" "$tool" "$@"
+    pty_rc="$(cat "$tmp/pty.out.rc")"
+    pty_out="$(tr -d '\r' <"$tmp/pty.out")"
+}
+cp "$tmp/app_key.pem" "$tmp/src.pem"
+chmod 644 "$tmp/src.pem"
+newcase
+for mode in none stdin stderr; do
+    for extra in "--key-file $tmp/src.pem" "--remove"; do
+        # shellcheck disable=SC2086  # the extra words are meant to split
+        ptyrun "$mode" - auth-app $extra
+        [ "$pty_rc" = 2 ] && grep -q 'auth-app needs a person at a terminal' <<<"$pty_out" || fail "auth-app ($mode, $extra) did not insist on a terminal" "$pty_out"
+        [ ! -e "$TOKDIR" ] || fail "auth-app ($mode) touched the token directory"
+    done
+done
+ptyapp "" auth-app
+[ "$pty_rc" = 2 ] && grep -q 'needs --key-file' <<<"$pty_out" || fail "auth-app without a key file" "$pty_out"
+ptyapp "" auth-app --remove --key-file "$tmp/src.pem"
+[ "$pty_rc" = 2 ] || fail "--remove with --key-file" "$pty_out"
+refused_app() {  # description, wanted exit, wanted words, replies, args...
+    local what="$1" want_rc="$2" words="$3" replies="$4"
+    shift 4
+    newcase
+    ptyapp "$replies" "$@"
+    [ "$pty_rc" = "$want_rc" ] || fail "$what: exited $pty_rc, want $want_rc" "$pty_out"
+    grep -qF -- "$words" <<<"$pty_out" || fail "$what: no '$words' in the message" "$pty_out"
+    ! grep -qF -- "$KEYBODY" <<<"$pty_out" || fail "$what: the key was printed"
+    [ ! -e "$TOKDIR/approver.key" ] && [ ! -e "$TOKDIR/approver.json" ] || fail "$what: a file was written"
+}
+printf 'hello\n' >"$tmp/plain.txt"
+printf '%s\nAAAA\n%s\n' "-----BEGIN ""PRIVATE KEY-----" "-----END ""PRIVATE KEY-----" >"$tmp/bad.pem"
+refused_app "missing key file" 1 "cannot read the key file" "$APP_ID,$INST_ID" auth-app --key-file "$tmp/nothing.pem"
+refused_app "not a key" 1 "not an unencrypted PEM" "$APP_ID,$INST_ID" auth-app --key-file "$tmp/plain.txt"
+refused_app "a key that cannot sign" 1 "cannot sign" "$APP_ID,$INST_ID" auth-app --key-file "$tmp/bad.pem"
+refused_app "a directory" 1 "cannot read the key file" "$APP_ID,$INST_ID" auth-app --key-file "$tmp"
+refused_app "a non-numeric App ID" 1 "App ID must be a number" "abc,$INST_ID" auth-app --key-file "$tmp/src.pem"
+refused_app "a non-numeric installation ID" 1 "Installation ID must be a number" "$APP_ID,0x1" auth-app --key-file "$tmp/src.pem"
+refused_app "nothing typed" 1 "must be a number" " " auth-app --key-file "$tmp/src.pem"
+! grep -rlF -- "$KEYBODY" "$tmp/state" "$TOKDIR" 2>/dev/null | grep -q . || fail "a refused auth-app left the key somewhere"
+
+APPROVER=1 newcase
+ptyapp "$APP_ID,$INST_ID" auth-app --key-file "$tmp/src.pem"
+[ "$pty_rc" = 0 ] || fail "auth-app failed" "$pty_out"
+grep -q "^app_id: \"$APP_ID\"\$" <<<"$pty_out" && grep -q "^installation_id: \"$INST_ID\"\$" <<<"$pty_out" || fail "auth-app output" "$pty_out"
+grep -q "Delete the source key file now: shred -u $tmp/src.pem" <<<"$pty_out" || fail "auth-app did not say to delete the source" "$pty_out"
+! grep -qF -- "$KEYBODY" <<<"$pty_out" || fail "auth-app printed the key"
+[ "$(wc -l <"$tmp/pty.out")" -le 6 ] || fail "auth-app printed more than the ids and the hint" "$pty_out"
+[ "$(mode_of "$TOKDIR")" = 700 ] && [ "$(mode_of "$TOKDIR/approver.key")" = 600 ] && [ "$(mode_of "$TOKDIR/approver.json")" = 600 ] ||
+    fail "approver files need 0700/0600" "$(stat -c '%n %a' "$TOKDIR" "$TOKDIR"/*)"
+cmp -s "$tmp/src.pem" "$TOKDIR/approver.key" || fail "the stored key is not the key that was supplied"
+cmp -s "$tmp/app_key.pem" "$tmp/src.pem" || fail "auth-app altered the source"
+[ "$(find "$TOKDIR" -mindepth 1 -printf '%f\n' | sort | tr '\n' ' ')" = "approver.json approver.key " ] || fail "stray files" "$(find "$TOKDIR" -mindepth 1)"
+python3 -I - "$TOKDIR/approver.json" "$APP_ID" "$INST_ID" <<'PY' || fail "approver ids" "$(cat "$TOKDIR/approver.json")"
+import json, sys
+m = json.load(open(sys.argv[1]))
+assert m["app_id"] == sys.argv[2] and m["installation_id"] == sys.argv[3] and m["saved_at"] and len(m) == 3, m
+PY
+[ -z "$(app_strays)" ] || fail "auth-app wrote the key outside its file" "$(app_strays)"
+[ ! -s "$S/gh.log" ] || fail "auth-app called GitHub" "$(cat "$S/gh.log")"
+mc status
+grep -q '^  state: ready$' "$out" || fail "status after auth-app" "$(cat "$out")"
+# What it saved is what the next run signs with.
+printf '%s' "$APP_ID" >"$S/app_id"
+printf '%s' "$INST_ID" >"$S/installation_id"
+mkdir -p "$S/realtokens"
+printf '%s' "$INST_TOKEN" >"$S/realtokens/inst_token"
+apr_pr 60 R0
+want 0 run
+expect 60 merged "approved by merge-captain-approver"
+# A replaced key and a second save both work; a removal deletes both files, and refuses a link.
+ptyapp "$APP_ID,$INST_ID" auth-app --key-file "$tmp/src.pem"
+[ "$pty_rc" = 0 ] || fail "saving the approver twice" "$pty_out"
+ptyapp "" auth-app --remove
+[ "$pty_rc" = 0 ] && grep -q '^approver: removed$' <<<"$pty_out" || fail "auth-app --remove" "$pty_out"
+[ ! -e "$TOKDIR/approver.key" ] && [ ! -e "$TOKDIR/approver.json" ] || fail "remove left files"
+ptyapp "" auth-app --remove
+grep -q '^approver: none saved$' <<<"$pty_out" || fail "a second remove" "$pty_out"
+mkapp
+mv "$TOKDIR/approver.key" "$tmp/moved.pem"
+ln -s "$tmp/moved.pem" "$TOKDIR/approver.key"
+ptyapp "" auth-app --remove
+[ "$pty_rc" = 1 ] && grep -q 'is a symlink' <<<"$pty_out" && [ -e "$TOKDIR/approver.json" ] || fail "remove through a link" "$pty_out"
+rm -f "$tmp/moved.pem"
 
 # ── Global: nothing, in any case above, ever asked for a bypass or another merge style ──
 cat "$S/gh.log" >>"$tmp/all_gh.log"

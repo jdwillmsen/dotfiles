@@ -253,7 +253,23 @@ blocked "appended override" Bash command 'MERGE_CAPTAIN_GH+=x true'
 blocked "override on a later line" Bash command $'true\nMERGE_CAPTAIN_GH=/tmp/evil merge-captain run'
 blocked "the test switch" Bash command 'MERGE_CAPTAIN_TEST_HARNESS=1 merge-captain run'
 blocked "the API override" Bash command 'MERGE_CAPTAIN_API_URL=http://127.0.0.1:1 merge-captain run'
+blocked "python assigning one" Bash command "python3 -c 'import os; os.environ[\"MERGE_CAPTAIN_GH\"] = \"/tmp/x\"'"
+blocked "python update" Bash command "python3 -c 'import os; os.environ.update(MERGE_CAPTAIN_GH=\"/tmp/x\")'"
+blocked "python setdefault" Bash command "python3 -c \"import os; os.environ.setdefault('MERGE_CAPTAIN_GH', '/tmp/x')\""
+blocked "python putenv" Bash command "python3 -c \"import os; os.putenv('MERGE_CAPTAIN_GH', '/tmp/x')\""
+blocked "perl assigning one" Bash command "perl -e '\$ENV{MERGE_CAPTAIN_GH} = \"/tmp/x\"; exec @ARGV' merge-captain run"
+blocked "ruby assigning one" Bash command "ruby -e 'ENV[\"MERGE_CAPTAIN_GH\"] = \"/tmp/x\"'"
+blocked "node assigning one" Bash command "node -e 'process.env.MERGE_CAPTAIN_GH = \"/tmp/x\"'"
+blocked "bash -c export" Bash command "bash -c 'export MERGE_CAPTAIN_GH; merge-captain run'"
+blocked "export after a pipe" Bash command 'true | export MERGE_CAPTAIN_GH'
+blocked "a systemd drop-in" Bash command "printf 'Environment=MERGE_CAPTAIN_GH=/tmp/x' > /tmp/override.conf"
 allowed "reading an override name" Bash command 'grep MERGE_CAPTAIN_GH docs/merge-captain.md'
+allowed "grep -rn over tests" Bash command 'grep -rn MERGE_CAPTAIN_ tests/scripts'
+allowed "rg over tests" Bash command 'rg MERGE_CAPTAIN_ tests/'
+allowed "rg with a glob" Bash command "rg -n 'MERGE_CAPTAIN_[A-Z]+' --glob '*.sh' tests/"
+allowed "grep for the word export" Bash command 'grep -rn "export" home/ | grep MERGE_CAPTAIN_'
+allowed "grep for env beside the name" Bash command 'grep -n env MERGE_CAPTAIN_NOTES.txt'
+allowed "a pipeline reading one" Bash command 'cat tests/scripts/x.sh | grep MERGE_CAPTAIN_ | head'
 allowed "echoing one" Bash command 'echo "$MERGE_CAPTAIN_STATE"'
 # ...and these never touch a token.
 allowed "saving a token" Bash command 'merge-captain auth jdwlabs'

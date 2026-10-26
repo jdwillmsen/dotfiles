@@ -275,7 +275,7 @@ form but never read the generated key):
    the installation's settings URL). Generate a private key. Make sure the three
    rulesets dismiss stale approvals on push.
 2. In a normal terminal: `merge-captain auth-app --key-file ~/Downloads/<key>.pem`
-   and type the two ids at the hidden prompts. The key file must be a plain file of
+   and type the two ids at the prompts (they are public numbers, shown as typed). The key file must be a plain file of
    yours with mode 0600. The command refuses without a terminal, inside an agent
    session (`CLAUDECODE` set) and under `script`, `expect` and similar wrappers; that
    last check is best effort, a pty made some other way (for example Python's

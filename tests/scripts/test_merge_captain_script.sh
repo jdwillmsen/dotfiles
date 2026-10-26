@@ -41,7 +41,7 @@ export STUB_DIR="$S"
 # ── Stubs ──
 cat >"$bin/gh" <<'PY'
 #!/usr/bin/env python3
-import hashlib, json, os, sys
+import hashlib, json, os, sys, time
 S = os.environ["STUB_DIR"]
 SELF = "captain-bot"
 args = sys.argv[1:]
@@ -87,6 +87,14 @@ def save_pr(n, pr):
         json.dump(pr, f)
 
 
+def app_reviews(n):
+    """The App's reviews that reached GitHub for this pull request, as its API lists them."""
+    posted = [json.loads(line) for line in open(f"{S}/reviews_posted.jsonl")] if os.path.exists(f"{S}/reviews_posted.jsonl") else []
+    gone = {json.loads(line)["review"] for line in open(f"{S}/dismissed.jsonl")} if os.path.exists(f"{S}/dismissed.jsonl") else set()
+    return [{"id": r["id"], "user": {"login": "merge-captain-approver[bot]"}, "commit_id": r["fields"]["commit_id"],
+             "state": "DISMISSED" if str(r["id"]) in gone else "APPROVED"} for r in posted if r["pr"] == n and r["landed"]]
+
+
 if rd("gh_down") is not None:
     fail("gh: dial tcp: lookup api.github.com: no such host")
 head2 = args[:2]
@@ -101,16 +109,19 @@ if args[:3] == ["api", "-X", "POST"] and "/pulls/" in args[3] and args[3].endswi
     k = len(open(f"{S}/reviews_posted.jsonl").readlines()) + 1 if os.path.exists(f"{S}/reviews_posted.jsonl") else 1
     with open(f"{S}/reviews_posted.jsonl", "a") as f:
         f.write(json.dumps({"pr": n, "fields": fields, "id": k, "ledger_at_post": ledger,
+                            "landed": rd("review_drop") is None and rd("review_fail") is None,
                             "token_sha": hashlib.sha256(os.environ["GH_TOKEN"].encode()).hexdigest()}) + "\n")
     if rd("review_fail") is not None:
         fail("HTTP 422: Unprocessable: refused for " + os.environ["GH_TOKEN"])
-    if rd("review_garbage") is not None:
-        print("not json")
-        sys.exit(0)
     pr = jload(f"pr_{n}.json", {})
-    if rd("review_noeffect") is None and fields["commit_id"] == pr.get("headRefOid"):
+    if rd("review_drop") is None and rd("review_noeffect") is None and fields["commit_id"] == pr.get("headRefOid"):
         pr.update(reviewDecision="APPROVED", mergeStateStatus="CLEAN")
         save_pr(n, pr)
+    if rd("pause_after_review") is not None:
+        open(os.path.join(os.environ["MERGE_CAPTAIN_STATE"], "PAUSED"), "w").write("stub\n")
+    if rd("review_garbage") is not None or rd("review_drop") is not None:
+        print("not json")
+        sys.exit(0)
     say({"id": k, "state": "APPROVED", "commit_id": fields["commit_id"]})
 if args[:3] == ["api", "-X", "PUT"] and args[3].endswith("/dismissals"):
     n = args[3].split("/")[4]
@@ -135,6 +146,8 @@ if head2 == ["pr", "view"]:
     if pr is None:
         fail("Could not resolve to a PullRequest")
     if flag("--json").startswith("headRefOid,state"):
+        if rd("sleep_after_review") is not None and os.path.exists(f"{S}/reviews_posted.jsonl"):
+            time.sleep(15)
         seq = rd(f"head_seq_{n}")
         if seq:
             lines = seq.split()
@@ -184,7 +197,9 @@ if head2 == ["pr", "merge"]:
     if msg:
         fail(msg)
     pr = jload(f"pr_{n}.json", {})
-    if pr.get("reviewDecision") == "REVIEW_REQUIRED":
+    counted = rd("merge_counts_reviews") is not None and any(
+        r["commit_id"] == pr.get("headRefOid") and r["state"] == "APPROVED" for r in app_reviews(n))
+    if pr.get("reviewDecision") == "REVIEW_REQUIRED" and not counted:
         fail("Pull request is not mergeable: the base branch policy prohibits the merge.")
     pr["state"] = "MERGED"
     save_pr(n, pr)
@@ -239,6 +254,10 @@ if args[:2] == ["api", "graphql"]:
     k = int(rd(f"threads_{n}", "0"))
     nodes = [{"isResolved": False}] * k + [{"isResolved": True}]
     say({"data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": nodes, "pageInfo": {"hasNextPage": False}}}}}})
+if args[0] == "api" and "/pulls/" in args[1] and "/reviews?" in args[1]:
+    if rd("reviews_list_fail") is not None:
+        fail("gh: Server Error (HTTP 500)")
+    say(app_reviews(args[1].split("/pulls/")[1].split("/")[0]))
 if args[0] == "api" and "/pulls/" in args[1] and "/files?" in args[1]:
     n = args[1].split("/pulls/")[1].split("/")[0]
     if rd("pause_on_files") is not None:
@@ -3803,27 +3822,164 @@ apr_pr 116 R0
 want 0 run
 expect 116 merged
 [ ! -e "$S/dismissed.jsonl" ] || fail "a merged pull request had its approval dismissed"
-# The attempt counts against the cap even when its reply was lost, and a second approval on that head is refused.
+# M-b: an attempt nobody confirmed is looked up on GitHub, not blocked for ever and not repeated blindly.
 newcase_app max_approvals_per_hour=1
 apr_pr 117 R0
 echo x >"$S/review_garbage"
+echo x >"$S/review_noeffect"
+echo x >"$S/merge_counts_reviews"
 want 0 run
 expect 117 blocked "approval not confirmed"
-grep -q '"status": "attempted"' "$STATE/approvals.jsonl" && ! grep -q '"status": "confirmed"' "$STATE/approvals.jsonl" || fail "attempt rows" "$(cat "$STATE/approvals.jsonl")"
+grep -q '"status": "attempted"' "$STATE/approvals.jsonl" && ! grep -q '"status": "confirmed"' "$STATE/approvals.jsonl" ||
+    fail "attempt rows" "$(cat "$STATE/approvals.jsonl")"
 rm "$S/review_garbage"
-apr_pr 118 R0
 want 0 run
-expect 117 skipped approval-cap
-expect 118 skipped approval-cap
-[ "$(posts)" = 1 ] || fail "a lost reply allowed a second approval" "$(cat "$S/reviews_posted.jsonl")"
+expect 117 merged "approved by"
+[ "$(posts)" = 1 ] || fail "an unconfirmed approval that had gone through was posted again" "$(cat "$S/reviews_posted.jsonl")"
+python3 -I - "$STATE/approvals.jsonl" <<'PY' || fail "resume rows" "$(cat "$STATE/approvals.jsonl")"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+assert [r["status"] for r in rows] == ["attempted", "confirmed"] and rows[1]["resumed"] is True and rows[1]["review_id"] == 1, rows
+PY
+[ ! -e "$S/dismissed.jsonl" ] || fail "a resumed approval was dismissed"
+# One that never reached GitHub is posted again, within the cap.
+newcase_app
+apr_pr 119 R0
+echo x >"$S/review_drop"
+want 0 run
+expect 119 blocked "approval not confirmed"
+rm "$S/review_drop"
+want 0 run
+expect 119 merged "approved by"
+[ "$(posts)" = 2 ] || fail "a dropped approval was not retried" "$(cat "$S/reviews_posted.jsonl")"
+[ "$(grep -c '"status": "attempted"' "$STATE/approvals.jsonl")" = 2 ] || fail "both attempts must be on file" "$(cat "$STATE/approvals.jsonl")"
+# ...but not past the cap, and not when GitHub cannot be asked.
+newcase_app max_approvals_per_hour=1
+apr_pr 119 R0
+echo x >"$S/review_drop"
+want 0 run
+rm "$S/review_drop"
+want 0 run
+expect 119 skipped approval-cap
+[ "$(posts)" = 1 ] || fail "a retry went past the cap"
 newcase_app
 apr_pr 119 R0
 echo x >"$S/review_garbage"
+echo x >"$S/review_noeffect"
+echo x >"$S/reviews_list_fail"
 want 0 run
-expect 119 blocked "approval not confirmed"
+want 0 run
+expect 119 waiting approval-unverified
+[ "$(posts)" = 1 ] || fail "posted again without being able to look" "$(cat "$S/reviews_posted.jsonl")"
+# A confirmed approval that the host still does not count blocks the head: no loop.
+newcase_app
+apr_pr 119 R0
+echo x >"$S/review_noeffect"
+echo "HTTP 502: Bad Gateway" >"$S/merge_fail"
+want 0 run
+expect 119 blocked "merge refused"
 want 0 run
 expect 119 waiting approval-not-accepted
-[ "$(posts)" = 1 ] || fail "a head with an attempt on file was approved again" "$(cat "$S/reviews_posted.jsonl")"
+[ "$(posts)" = 1 ] || fail "approved again while the first approval stood" "$(cat "$S/reviews_posted.jsonl")"
+
+# M-b: only a lasting refusal takes the approval back; anything that may pass leaves it for the next run.
+newcase_app
+apr_pr 150 R0
+echo "HTTP 502: Bad Gateway" >"$S/merge_fail"
+want 0 run
+expect 150 blocked "merge refused"
+[ ! -e "$S/dismissed.jsonl" ] || fail "a transient merge failure withdrew the approval" "$(cat "$S/dismissed.jsonl")"
+grep -q '"status": "confirmed"' "$STATE/approvals.jsonl" && ! grep -q 'withdrawn' "$STATE/approvals.jsonl" || fail "ledger after a transient failure" "$(cat "$STATE/approvals.jsonl")"
+rm "$S/merge_fail"
+want 0 run
+expect 150 merged
+[ "$(posts)" = 1 ] || fail "the approval was not reused after a transient failure" "$(cat "$S/reviews_posted.jsonl")"
+newcase_app
+apr_pr 151 R0
+echo "Base branch was modified. Review and try the merge again." >"$S/merge_fail"
+want 0 run
+expect 151 blocked "merge refused"
+[ ! -e "$S/dismissed.jsonl" ] || fail "a 'try again' refusal withdrew the approval"
+newcase_app
+apr_pr 152 R0
+echo x >"$S/pause_after_review"
+want 0 run
+expect 152 skipped paused
+[ ! -e "$S/dismissed.jsonl" ] || fail "a pause withdrew the approval"
+want 0 resume
+rm "$S/pause_after_review"
+want 0 run
+expect 152 merged
+[ "$(posts)" = 1 ] || fail "a pause caused a second approval"
+newcase_app
+apr_pr 153 R0
+printf '%s %s %s %s' "$(head_of 153)" "$(head_of 153)" "$(head_of 153)" "$(head_of 15300)" >"$S/head_seq_153"
+want 0 run
+expect 153 waiting "head moved before merge"
+[ "$(wc -l <"$S/dismissed.jsonl")" = 1 ] || fail "a changed head did not withdraw the approval" "$(cat "$S/dismissed.jsonl" 2>/dev/null)"
+# M-c: a deadline between the post and the merge result takes the approval back.
+newcase_app
+apr_pr 154 R0
+echo x >"$S/sleep_after_review"
+mc_env
+env "${MCENV[@]}" MERGE_CAPTAIN_HARD_DEADLINE_S=8 "$tool" run >"$out" 2>"$err" || true
+grep -q '^hard_deadline: true$' "$out" || fail "the run did not hit its hard deadline" "$(cat "$out" "$err")"
+[ "$(wc -l <"$S/dismissed.jsonl")" = 1 ] || fail "the deadline left the approval standing" "$(cat "$S/dismissed.jsonl" 2>/dev/null)"
+[ "$(wc -l <"$STATE/approvals.jsonl")" = 3 ] && grep -q '"status": "withdrawn"' "$STATE/approvals.jsonl" || fail "ledger after a deadline" "$(cat "$STATE/approvals.jsonl")"
+[ "$(wc -l <"$S/revoked")" = "$(wc -l <"$S/minted")" ] || fail "a token outlived the deadline"
+python3 -I - "$tool" "$tmp" <<'PY' || fail "approval deadline unit checks failed"
+import importlib.machinery, importlib.util, json, os, sys
+tool, tmp = sys.argv[1:3]
+sys.dont_write_bytecode = True
+os.makedirs(tmp + "/mb-state", exist_ok=True)
+os.environ.update(MERGE_CAPTAIN_STATE=tmp + "/mb-state", MERGE_CAPTAIN_CONFIG=tmp + "/none.toml",
+                  MERGE_CAPTAIN_TOKENS=tmp + "/mb-tokens")
+spec = importlib.util.spec_from_loader("mc", importlib.machinery.SourceFileLoader("mc", tool))
+mc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mc)
+Stop = mc.Stop
+for e, want in ((Stop("blocked", "merge refused: Pull request is not mergeable: the base branch policy prohibits the merge."), True),
+                (Stop("blocked", "merge refused: 2 of 2 required status checks are expected."), True),
+                (Stop("blocked", "merge refused: HTTP 502: Bad Gateway"), False),
+                (Stop("blocked", "merge refused: Base branch was modified. Review and try the merge again."), False),
+                (Stop("blocked", "merge refused: connection timed out, policy unknown"), False),
+                (Stop("blocked", "merge refused: something odd"), False),
+                (Stop("skipped", "paused"), False), (Stop("skipped", "hourly-cap"), False),
+                (Stop("waiting", "deadline"), False), (Stop("waiting", "head moved before merge"), True),
+                (Stop("merged", "done"), False), (RuntimeError("x"), True), (mc.HardDeadline(), True)):
+    assert mc.Captain.should_withdraw(e) is want, (getattr(e, "reason", e), want)
+# A deadline that fires after the post went out, while the confirmation is being written, still records it.
+head = "a" * 40
+cap = mc.Captain({"limits": dict(mc.LIMIT_DEFAULTS), "allow": ["jdwillmsen"]})
+cap.live, cap.repo = True, "acme/live"
+cap.fetch_head = lambda r, n: (head, {"state": "OPEN", "labels": []})
+cap.stale_dismissal_on = lambda *a: True
+cap.codeowners_covered = lambda *a: False
+cap.mint_installation_token = lambda *a, **k: "tok"
+cap.revoke_installation_token = lambda t: None
+cap.app_gh = lambda *a, **k: mc.Result(0, json.dumps({"id": 7, "commit_id": head}), "")
+mc.load_approver = lambda: {"state": "ready", "problem": None}
+real, calls = mc.append_jsonl, {"n": 0}
+
+
+def flaky(path, row, durable=False):
+    if row.get("status") == "confirmed" and calls["n"] == 0:
+        calls["n"] += 1
+        raise mc.HardDeadline()
+    return real(path, row, durable)
+
+
+mc.append_jsonl = flaky
+try:
+    cap.approve({"name": "acme/live", "approver": True}, 5, head, "R0", None, [],
+                {"author": {"login": "jdwillmsen", "is_bot": False}, "baseRefName": "main"})
+    raise SystemExit("the deadline was swallowed")
+except mc.HardDeadline:
+    pass
+rows = [json.loads(line) for line in open(tmp + "/mb-state/approvals.jsonl")]
+assert [r["status"] for r in rows] == ["attempted", "confirmed"] and rows[1]["review_id"] == 7, rows
+assert cap.standing == {"pr": 5, "head": head, "id": 7}, cap.standing
+PY
 
 # M4: an R0 approval never carries the lane of the pull request before it.
 newcase_app

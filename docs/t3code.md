@@ -159,6 +159,7 @@ starting a thread is a choice of stream rather than of repo:
 | `JDWLABS` | `~/projects/jdwlabs` |
 | `DOTA` | `~/projects/dotablaze-tech` |
 | `DOTFILES` | the chezmoi source directory |
+| `FWB` | `~/projects/fwb-minecraft` |
 
 Each project carries its org's logo, so the sidebar groups by stream at a
 glance: cyan for `jdwlabs`, red for `jdwillmsen` (`JDW`, `DOTFILES`, and the

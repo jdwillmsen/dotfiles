@@ -168,8 +168,10 @@ glance: cyan for `jdwlabs`, red for `jdwillmsen` (`JDW`, `DOTFILES`, and the
 
 ```bash
 # via the t3-code MCP: t3_project_update { projectId, faviconPath }
-~/.t3/project-icons/<owner>-logo.svg
+/home/dev-admin/.t3/project-icons/<owner>-logo.svg
 ```
+
+The value must be a literal absolute path; `~` is not expanded.
 
 `faviconPath` lives in `state.sqlite`, not in a file chezmoi can own, so a
 re-registered project needs it set again.

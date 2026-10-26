@@ -17,6 +17,7 @@ import getpass
 import json
 import math
 import os
+import pwd
 import re
 import shlex
 import shutil
@@ -68,12 +69,15 @@ TIERS = ("R0", "R1", "R2", "R3")
 MODES = ("live", "dry-run", "off")
 # R3 is never mergeable here, so it is not a legal ceiling.
 CEILINGS = ("R0", "R1", "R2")
-# Variables that move a tool or a directory the captain trusts with credentials. Honoured by the tests only: set in
-# production they would hand the owner tokens and the App key to whatever they point at, so credentials are not loaded.
-OVERRIDE_VARS = ("MERGE_CAPTAIN_OPENSSL", "MERGE_CAPTAIN_GH", "MERGE_CAPTAIN_CLASS", "MERGE_CAPTAIN_STATE",
-                 "MERGE_CAPTAIN_TOKENS", "MERGE_CAPTAIN_API_URL")
-# The test suite's opt-in. Not a secret: the hook refuses any command that assigns a MERGE_CAPTAIN_ variable.
-HARNESS_VAR = "MERGE_CAPTAIN_TEST_HARNESS"
+# Anything that moves a tool, a config file or a directory the captain trusts with credentials is an override, so any
+# variable with this prefix counts, and so does one added later. Overrides exist for the tests: set in a real run they
+# would hand the owner tokens and the App key to whatever they point at, so no credential is loaded.
+OVERRIDE_PREFIX = "MERGE_CAPTAIN_"
+OVERRIDE_NAMES = ("AGENT_EVAL_STATE", "AGENT_PACE_LANES", "AGENT_EVAL_LANES")
+# Default places the XDG variables must not move: they decide where the config, state and tokens are.
+XDG_DEFAULTS = (("XDG_CONFIG_HOME", ".config"), ("XDG_STATE_HOME", ".local/state"))
+# A test run is one whose tokens and state live under these, never the real home.
+TEMP_ROOTS = ("/tmp", "/var/tmp")
 # The App that approves on the captain's behalf. Its id, installation id and key sit beside the owner tokens; the
 # dots keep these names from ever matching an owner, which cannot contain one.
 APPROVER_IDS, APPROVER_KEY = "approver.json", "approver.key"
@@ -401,13 +405,42 @@ def read_meta(owner):
     return meta if isinstance(meta, dict) else {}
 
 
+ACCOUNT_HOME = pwd.getpwuid(os.getuid()).pw_dir
+INSTALLED = Path(ACCOUNT_HOME) / ".local/bin/merge-captain"
+
+
+def override_names(environ, home):
+    """Names of the variables in `environ` that redirect where the captain looks or what it runs."""
+    names = sorted(k for k, v in environ.items() if k.startswith(OVERRIDE_PREFIX) and v)
+    names += [k for k in OVERRIDE_NAMES if environ.get(k)]
+    if environ.get("HOME") and environ["HOME"] != home:
+        names.append("HOME")
+    for var, default in XDG_DEFAULTS:
+        if environ.get(var) and os.path.normpath(environ[var]) != os.path.join(home, default):
+            names.append(var)
+    return names
+
+
+def under_temp(path):
+    real = os.path.realpath(path)
+    return any(real == r or real.startswith(r + "/") for r in map(os.path.realpath, TEMP_ROOTS))
+
+
+def test_mode():
+    """True only for a copy of this file whose tokens and state live under a temp directory: the test suite. The
+    installed command is never in test mode, and a real token directory is never under /tmp, so nothing an agent
+    can set in the environment makes a real run honour an override. No variable switches this on."""
+    if os.path.realpath(sys.argv[0]) == os.path.realpath(INSTALLED):
+        return False
+    return under_temp(TOKENS) and under_temp(STATE)
+
+
 def override_problem():
     """Why no credential may be loaded or saved right now, or None."""
-    if os.environ.get(HARNESS_VAR) == "1":
+    if test_mode():
         return None
-    if any(os.environ.get(v) for v in OVERRIDE_VARS):
-        return "a MERGE_CAPTAIN_ tool or path override is set"
-    return None
+    names = override_names(os.environ, ACCOUNT_HOME)
+    return f"a path or tool override is set ({names[0]})" if names else None
 
 
 def private_problem(st, what):
@@ -626,7 +659,7 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 
 def api_base():
     override = os.environ.get("MERGE_CAPTAIN_API_URL")
-    return override if override and os.environ.get(HARNESS_VAR) == "1" else API_URL
+    return override if override and test_mode() else API_URL
 
 
 def github_api(method, path, secret, body=None):

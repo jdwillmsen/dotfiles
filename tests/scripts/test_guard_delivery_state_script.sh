@@ -263,6 +263,23 @@ blocked "node assigning one" Bash command "node -e 'process.env.MERGE_CAPTAIN_GH
 blocked "bash -c export" Bash command "bash -c 'export MERGE_CAPTAIN_GH; merge-captain run'"
 blocked "export after a pipe" Bash command 'true | export MERGE_CAPTAIN_GH'
 blocked "a systemd drop-in" Bash command "printf 'Environment=MERGE_CAPTAIN_GH=/tmp/x' > /tmp/override.conf"
+blocked "export on a later line after a read" Bash command $'read -r MERGE_CAPTAIN_GH <<< /tmp/x\nexport MERGE_CAPTAIN_GH'
+blocked "export in a brace group" Bash command '{ export MERGE_CAPTAIN_GH; }'
+blocked "export after a bang" Bash command '! export MERGE_CAPTAIN_GH'
+blocked "export after then" Bash command 'if true; then export MERGE_CAPTAIN_GH; fi'
+blocked "export after do" Bash command 'for i in 1; do export MERGE_CAPTAIN_GH; done'
+blocked "export after else" Bash command 'if false; then true; else export MERGE_CAPTAIN_GH; fi'
+blocked "export in backticks" Bash command 'x=`export MERGE_CAPTAIN_GH`'
+blocked "export in a subshell" Bash command '(export MERGE_CAPTAIN_GH)'
+blocked "declare on a later line" Bash command $'echo hi\ndeclare -x MERGE_CAPTAIN_GH'
+blocked "python env dict" Bash command "python3 -c 'import subprocess; subprocess.run([\"merge-captain\", \"run\"], env={\"MERGE_CAPTAIN_GH\": \"/tmp/x\"})'"
+blocked "python env copy then subscript" Bash command "python3 -c 'import os; e = dict(os.environ); e[\"MERGE_CAPTAIN_GH\"] = \"/tmp/x\"'"
+blocked "python subscript with a single quote" Bash command "python3 -c \"e = {}; e['MERGE_CAPTAIN_GH'] += 'x'\""
+blocked "node env option" Bash command "node -e 'require(\"child_process\").execSync(\"merge-captain run\", {env:{MERGE_CAPTAIN_GH:\"/tmp/x\"}})'"
+blocked "node env option with a space" Bash command "node -e 'spawn(\"merge-captain\", [], { env: { MERGE_CAPTAIN_GH: \"/tmp/x\" } })'"
+allowed "python reading one" Bash command "grep -n \"os.environ.get(\\\"MERGE_CAPTAIN_\" tests/scripts/x.py"
+allowed "grep for a subscript read" Bash command "grep -n 'os.environ\\[\"MERGE_CAPTAIN_' tests/scripts/x.py"
+allowed "rg for getenv" Bash command "rg 'environ.get.MERGE_CAPTAIN_' tests/"
 allowed "reading an override name" Bash command 'grep MERGE_CAPTAIN_GH docs/merge-captain.md'
 allowed "grep -rn over tests" Bash command 'grep -rn MERGE_CAPTAIN_ tests/scripts'
 allowed "rg over tests" Bash command 'rg MERGE_CAPTAIN_ tests/'

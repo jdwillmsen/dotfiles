@@ -103,6 +103,8 @@ if args[:3] == ["api", "-X", "POST"] and "/pulls/" in args[3] and args[3].endswi
     if os.environ.get("GH_TOKEN") != rd("realtokens/inst_token"):
         fail("HTTP 401: Bad credentials")
     fields = dict(a.split("=", 1) for a in args[4:] if "=" in a)
+    if rd("review_wrong_commit") is not None:
+        fields["commit_id"] = "f" * 40
     ledger = [json.loads(line)["status"] if "status" in json.loads(line) else None
               for line in open(os.environ["MERGE_CAPTAIN_STATE"] + "/approvals.jsonl")] if os.path.exists(
         os.environ["MERGE_CAPTAIN_STATE"] + "/approvals.jsonl") else []
@@ -3947,6 +3949,8 @@ for e, want in ((Stop("blocked", "merge refused: Pull request is not mergeable: 
                 (Stop("blocked", "merge refused: something odd"), False),
                 (Stop("skipped", "paused"), False), (Stop("skipped", "hourly-cap"), False),
                 (Stop("waiting", "deadline"), False), (Stop("waiting", "head moved before merge"), True),
+                (Stop("blocked", "approval landed on another commit"), True),
+                (Stop("blocked", "approval not confirmed for this head"), False),
                 (Stop("merged", "done"), False), (RuntimeError("x"), True), (mc.HardDeadline(), True)):
     assert mc.Captain.should_withdraw(e) is want, (getattr(e, "reason", e), want)
 # A deadline that fires after the post went out, while the confirmation is being written, still records it.
@@ -3980,6 +3984,78 @@ except mc.HardDeadline:
 rows = [json.loads(line) for line in open(tmp + "/mb-state/approvals.jsonl")]
 assert [r["status"] for r in rows] == ["attempted", "confirmed"] and rows[1]["review_id"] == 7, rows
 assert cap.standing == {"pr": 5, "head": head, "id": 7}, cap.standing
+PY
+
+# A withdrawal that failed is tried again when the merge is refused for a lasting reason, not when it may pass.
+newcase_app
+apr_pr 170 R0
+echo "not mergeable: stub" >"$S/merge_fail"
+echo x >"$S/dismiss_fail"
+want 0 run
+expect 170 blocked "merge refused"
+grep -q '"status": "withdraw-failed"' "$STATE/approvals.jsonl" || fail "first withdrawal should have failed" "$(cat "$STATE/approvals.jsonl")"
+rm "$S/dismiss_fail"
+want 0 run
+expect 170 blocked "merge refused"
+[ "$(tail -n1 "$STATE/approvals.jsonl" | grep -c '"status": "withdrawn"')" = 1 ] || fail "a stuck approval was not taken back" "$(cat "$STATE/approvals.jsonl")"
+[ "$(wc -l <"$S/dismissed.jsonl")" = 2 ] || fail "second dismissal missing" "$(cat "$S/dismissed.jsonl")"
+newcase_app
+apr_pr 171 R0
+echo "not mergeable: stub" >"$S/merge_fail"
+echo x >"$S/dismiss_fail"
+want 0 run
+rm "$S/dismiss_fail"
+echo "HTTP 502: Bad Gateway" >"$S/merge_fail"
+want 0 run
+expect 171 blocked "merge refused"
+[ "$(wc -l <"$S/dismissed.jsonl")" = 1 ] || fail "a transient refusal retried the withdrawal" "$(cat "$S/dismissed.jsonl")"
+# An approval that landed on another commit is found among the App's reviews and dismissed.
+newcase_app
+apr_pr 172 R0
+echo x >"$S/review_wrong_commit"
+want 0 run
+expect 172 blocked "approval landed on another commit"
+[ "$(wc -l <"$S/dismissed.jsonl")" = 1 ] && grep -q '"status": "withdrawn"' "$STATE/approvals.jsonl" || fail "a misplaced approval stands" "$(cat "$S/dismissed.jsonl" "$STATE/approvals.jsonl" 2>&1)"
+[ "$(count '^pr merge' "$S/gh.log")" = 0 ] || fail "merged after an approval on another commit"
+python3 -I - "$tool" "$tmp" <<'PY' || fail "withdraw unit checks failed"
+import importlib.machinery, importlib.util, json, os, sys
+tool, tmp = sys.argv[1:3]
+sys.dont_write_bytecode = True
+os.makedirs(tmp + "/wd-state", exist_ok=True)
+os.environ.update(MERGE_CAPTAIN_STATE=tmp + "/wd-state", MERGE_CAPTAIN_CONFIG=tmp + "/none.toml",
+                  MERGE_CAPTAIN_TOKENS=tmp + "/wd-tokens")
+spec = importlib.util.spec_from_loader("mc", importlib.machinery.SourceFileLoader("mc", tool))
+mc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mc)
+cap = mc.Captain({"limits": dict(mc.LIMIT_DEFAULTS), "allow": []})
+cap.live, cap.repo = True, "a/b"
+head, rc = "a" * 40, {"name": "a/b"}
+mc.load_approver = lambda: {"state": "ready", "problem": None}
+cap.find_app_review = lambda *a: ("found", 3)
+for standing in (None, ["not", "a", "dict"], {"id": "x"}):
+    cap.standing = standing
+    cap.mint_installation_token = lambda *a, **k: (_ for _ in ()).throw(OSError("boom"))
+    cap.withdraw(rc, 5, head)          # must not raise
+rows = [json.loads(line) for line in open(tmp + "/wd-state/approvals.jsonl")]
+assert [r["status"] for r in rows] == ["withdraw-failed"] * 3, rows
+real = mc.append_jsonl
+mc.append_jsonl = lambda *a, **k: (_ for _ in ()).throw(OSError("disk"))
+cap.withdraw(rc, 5, head)              # a ledger that cannot be written does not raise either
+mc.append_jsonl = real
+cap.mint_installation_token = lambda *a, **k: (_ for _ in ()).throw(mc.HardDeadline())
+cap.standing = {"id": 3}
+try:
+    cap.withdraw(rc, 5, head)
+except mc.HardDeadline:
+    pass
+else:
+    raise SystemExit("a deadline was swallowed")
+# CODEOWNERS: the last matching line wins, and a file with too many rules is unknown.
+cover = mc.codeowners_cover
+assert cover("* @a\n/src/x.py\n* @b\n", ["src/x.py"]) is True
+assert cover("* @a\n/src/x.py\n", ["src/x.py"]) is False
+assert cover("".join(f"/d{i}/ @t\n" for i in range(mc.CODEOWNER_MAX_RULES)), ["z/y"]) is False
+assert cover("".join(f"/d{i}/ @t\n" for i in range(mc.CODEOWNER_MAX_RULES + 1)), ["z/y"]) is None
 PY
 
 # M4: an R0 approval never carries the lane of the pull request before it.

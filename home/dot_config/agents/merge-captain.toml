@@ -92,7 +92,7 @@ name = "jdwlabs/apps"
 mode = "live"
 max_tier = "R2"
 require_token = true
-approver = false
+approver = true
 
 [[repo]]
 name = "jdwlabs/deployments"
@@ -105,14 +105,14 @@ name = "jdwlabs/infrastructure"
 mode = "live"
 max_tier = "R2"
 require_token = true
-approver = false
+approver = true
 
 [[repo]]
 name = "jdwlabs/platform"
 mode = "live"
 max_tier = "R2"
 require_token = true
-approver = false
+approver = true
 
 [[repo]]
 name = "dotablaze-tech/apps"

@@ -3751,7 +3751,7 @@ mc.test_mode = lambda: True
 assert mc.tool_path("MERGE_CAPTAIN_GH", "gh") == evil + "/gh", "a test run may name its tools"
 del os.environ["MERGE_CAPTAIN_GH"]
 assert mc.tool_path("MERGE_CAPTAIN_GH", "gh") == "/usr/bin/gh", "PATH was consulted"
-assert mc.TRUSTED_DIRS == ("/usr/bin", "/usr/local/bin", "/bin") and mc.TRUSTED_PATH == "/usr/local/bin:/usr/bin:/bin"
+assert mc.SYSTEM_BIN_DIRS == ("/usr/bin", "/usr/local/bin", "/bin") and mc.SYSTEM_BIN_PATH == "/usr/local/bin:/usr/bin:/bin"
 # The scrub.
 drop = ["SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS", "HTTPS_PROXY",
         "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "NO_PROXY", "no_proxy", "PYTHONPATH", "PYTHONSTARTUP",

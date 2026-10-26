@@ -128,20 +128,25 @@ For each of the three owners:
    tokens > Generate new token.
 2. **Resource owner**: that owner (your user for `jdwillmsen`, the organization for
    the others). A token can name only one.
-3. **Repository access**: Only select repositories, and pick exactly the repositories
-   listed for that owner in `merge-captain.toml` (`merge-captain status` lists them
-   under `repos`), whatever their mode.
-4. **Expiration**: 90 days.
+3. **Repository access**: All repositories. The captain acts only on repositories
+   listed in `merge-captain.toml`, so a repository added there needs no new token.
+   The trade-off is that a leaked token reaches every repository the owner can write
+   to; choose Only select repositories (the ones under `repos` in `merge-captain
+   status`) if that matters more than not reissuing.
+4. **Expiration**: none for the personal account; the organizations cap tokens at 366
+   days, so use that and rotate before `merge-captain status` warns.
 5. **Repository permissions**, and nothing else (no Administration, no Workflows
    write):
    - Contents: Read and write
    - Pull requests: Read and write
    - Issues: Read and write
    - Metadata: Read
-   - Checks: Read
    - Commit statuses: Read
    - Actions: Read
    - Code scanning alerts: Read
+
+   There is no Checks permission on fine-grained tokens; check state comes from
+   commit statuses and Actions.
 6. Generate it. An organization can require an owner to approve a fine-grained token
    before it works; if the organization asks for that, approve it under the
    organization's Settings > Personal access tokens.

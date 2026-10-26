@@ -3280,7 +3280,7 @@ grep -q 'merge-captain:needs-human sha=.* reason=codeowners' "$S/posted_41.txt" 
 grep -q '"name": "needs-human"' "$S/pr_41.json" || fail "needs-human label not set" "$(cat "$S/pr_41.json")"
 codeowners_case "a directory owner" '# owners\n/src/ @team  # ours\n' needs-human codeowners-required
 codeowners_case "a glob owner" '*.py @team\n' needs-human codeowners-required
-codeowners_case "a nested wildcard in the last segment" 'src/**/*.py @team\n/src/x.py @team\n' waiting codeowners-unknown
+codeowners_case "a nested wildcard" 'src/**/*.py @team\n/src/x.py @team\n' needs-human codeowners-required
 codeowners_case "a later line that owns the path again" '* @a\n/src/ @b\n' needs-human codeowners-required
 codeowners_case "a syntax this matcher does not model" '[Docs]\n* @team\n' waiting codeowners-unknown
 codeowners_case "a character class" 'src/[xy].py @team\n' waiting codeowners-unknown
@@ -4033,11 +4033,82 @@ env "${MCENV[@]}" "$tmp/script" -I "$tmp/ptyrun2.py" "$APP_ID,$INST_ID" "$tmp/pt
 pty_out="$(tr -d '\r' <"$tmp/pty.out")"
 [ "$(cat "$tmp/pty.out.rc")" = 2 ] && grep -q 'not one made by script' <<<"$pty_out" && [ ! -e "$TOKDIR" ] || fail "auth-app ran under a pty wrapper" "$pty_out"
 
-# M3/L4: CODEOWNERS patterns this matcher cannot judge are unknown, never a guess.
-for text in '/docs/* @team\n' 'docs/*.md @team\n' '/*.md @team\n' 'src/** @team\n' 'a/*/ @team\n' \
-    '*a*b*c*d*e*f*g* @team\n'; do
-    codeowners_case "pattern $text" "$text" waiting codeowners-unknown
+# Ordinary CODEOWNERS lines are decided; syntax this matcher does not model is unknown, never a guess.
+owned_case() {  # description, CODEOWNERS text, changed files (JSON), covered | free
+    newcase_app
+    printf '%b' "$2" >"$S/codeowners.txt"
+    printf '%s' "$3" >"$S/files_160.json"
+    apr_pr 160 R0
+    want 0 run
+    if [ "$4" = covered ]; then
+        expect 160 needs-human codeowners-required
+        no_app_activity "$1"
+    else
+        expect 160 merged "approved by"
+    fi
+}
+owned_case "a trailing ** covers everything below" '/apps/** @team\n' '[{"filename":"apps/web/deep/x.ts"}]' covered
+owned_case "a trailing ** leaves the rest" '/apps/** @team\n' '[{"filename":"libs/x.ts"}]' free
+owned_case "a last-segment * is one level" '/docs/* @team\n' '[{"filename":"docs/a.md"}]' covered
+owned_case "a last-segment * stops at one level" '/docs/* @team\n' '[{"filename":"docs/sub/a.md"}]' free
+owned_case "a ** in the middle" 'docs/**/*.md @team\n' '[{"filename":"docs/a/b/c.md"}]' covered
+owned_case "a ** in the middle, zero levels" 'docs/**/*.md @team\n' '[{"filename":"docs/c.md"}]' covered
+owned_case "a ** in the middle, another suffix" 'docs/**/*.md @team\n' '[{"filename":"docs/a/b/c.py"}]' free
+owned_case "an anchored pattern is not floating" 'docs/**/*.md @team\n' '[{"filename":"x/docs/a.md"}]' free
+owned_case "a rooted wildcard" '/*.md @team\n' '[{"filename":"README.md"}]' covered
+owned_case "a rooted wildcard stays at the root" '/*.md @team\n' '[{"filename":"docs/README.md"}]' free
+owned_case "a floating extension" '*.ts @team\n' '[{"filename":"a/b/c.ts"}]' covered
+owned_case "a floating directory" 'build/ @team\n' '[{"filename":"x/build/out.js"}]' covered
+owned_case "a directory pattern does not own a file of that name" 'build/ @team\n' '[{"filename":"x/build"}]' free
+owned_case "seven wildcards are no longer a reason to give up" '*a*b*c*d*e*f*g* @team\n' '[{"filename":"src/x.py"}]' free
+for text in 'a/*/ @team\n' '[x].py @team\n' 'a\\b @team\n' '!x @team\n' 'a**b/c @team\n' "$(printf 'a%.0s' $(seq 1 600)) @team\\n"; do
+    codeowners_case "pattern ${text:0:20}" "$text" waiting codeowners-unknown
 done
+# L4: a pattern built to make a backtracking regex blow up costs nothing.
+newcase_app
+printf 'a*a*a*a*a*a*b @team\n' >"$S/codeowners.txt"
+printf '[{"filename":"src/%s"}]' "$(printf 'a%.0s' $(seq 1 900))" >"$S/files_161.json"
+apr_pr 161 R0
+start=$SECONDS
+want 0 run
+[ $((SECONDS - start)) -lt 15 ] || fail "a hostile CODEOWNERS pattern took $((SECONDS - start))s"
+expect 161 merged "approved by"
+python3 -I - "$tool" "$tmp" <<'PY' || fail "CODEOWNERS matcher unit checks failed"
+import importlib.machinery, importlib.util, os, sys, time
+tool, tmp = sys.argv[1:3]
+sys.dont_write_bytecode = True
+os.environ.update(MERGE_CAPTAIN_STATE=tmp + "/co-state", MERGE_CAPTAIN_CONFIG=tmp + "/none.toml",
+                  MERGE_CAPTAIN_TOKENS=tmp + "/co-tokens")
+spec = importlib.util.spec_from_loader("mc", importlib.machinery.SourceFileLoader("mc", tool))
+mc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mc)
+cover = mc.codeowners_cover
+table = [("/apps/**", "apps/x/y.py", True), ("/apps/**", "other/x", False), ("/apps/**", "apps", True),
+         ("/docs/*", "docs/a.md", True), ("/docs/*", "docs/sub/a.md", False), ("/docs/*", "docs", False),
+         ("docs/**/*.md", "docs/a.md", True), ("docs/**/*.md", "docs/a/b/c.md", True),
+         ("docs/**/*.md", "docs/a/b/c.py", False), ("docs/**/*.md", "x/docs/a.md", False),
+         ("*.py", "a/b/c.py", True), ("*.py", "a/b/c.pyc", False), ("*", "any/thing", True),
+         ("docs/", "x/docs/y", True), ("docs/", "docs", False), ("/src/x.py", "src/x.py", True),
+         ("/src/", "src/x", True), ("src/y.py", "src/x.py", False), ("/*.md", "README.md", True),
+         ("/*.md", "a/README.md", False), ("/**", "a/b", True), ("**/x.py", "a/b/x.py", True),
+         ("**/**/**/x.py", "x.py", True), ("a?c", "abc", True), ("a?c", "ac", False), ("/a/?/c", "a/b/c", True),
+         ("*a*a*a*a*a*a*b", "a" * 800, False), ("/*/*/*/*/*/*/*/*/x", "a/a/a/a/a/a/a/a/y", False)]
+for pattern, path, want in table:
+    got = cover(pattern + " @t\n", [path])
+    assert got is want, (pattern, path, got, want)
+assert cover("* @a\n/src/\n", ["src/x"]) is False, "a line with no owner releases the path"
+assert cover("* @a\n/src/ @b\n", ["src/x"]) is True
+assert cover("/docs/ @a\n", ["src/x"]) is False
+for bad in ("[a]", "a\\b", "!a", "a/*/", "a**b", "", "x" * 600):
+    assert bad == "" or cover(bad + " @t\n", ["a/b"]) is None, bad
+assert cover("# only a comment\n\n", ["a"]) is False
+assert cover("/a @t\n", ["x/" * 40 + "y"]) is None and cover("/a @t\n", ["y" * 2000]) is None
+start = time.time()
+for _ in range(50):
+    assert cover("a*a*a*a*a*a*a*a*b @t\n", ["a" * 1000]) is False
+    assert cover("**/**/**/**/**/**/**/**/a*a*a*b @t\n", ["/".join(["a" * 30] * 30)]) is False
+assert time.time() - start < 5, time.time() - start
+PY
 newcase_app
 printf '*.md @team\n' >"$S/codeowners.txt"
 apr_pr 129 R0

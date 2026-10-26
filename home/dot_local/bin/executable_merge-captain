@@ -121,8 +121,8 @@ APP_NUMBER = re.compile(r"[1-9][0-9]{0,19}")
 PEM_KEY = re.compile(r"-----BEGIN (?:RSA )?PRIVATE KEY-----\n[A-Za-z0-9+/=\n]+-----END (?:RSA )?PRIVATE KEY-----\n?")
 KEY_MAX_BYTES = 16384
 CODEOWNER_FILES = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")
-# Wildcards one CODEOWNERS pattern may carry before it is called too costly to judge.
-CODEOWNER_WILDCARDS = 6
+# Bounds on what the CODEOWNERS matcher will look at, so its work is bounded whatever a file or a pull request holds.
+CODEOWNER_MAX_PATTERN, CODEOWNER_MAX_PATH, CODEOWNER_MAX_SEGMENTS = 512, 1024, 32
 API_URL = "https://api.github.com"
 DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
 SHA = re.compile(r"[0-9a-f]{40}")
@@ -717,58 +717,89 @@ def github_api(method, path, secret, body=None):
         return status, None
 
 
-def codeowner_regex(pattern):
-    """A full-match regex for one CODEOWNERS pattern, or None for syntax this matcher does not model, which the
-    caller treats as undeterminable rather than guessing: sections, character classes, escapes, too many wildcards,
-    and a wildcard in the last segment of a pattern that has a slash (GitHub matches those one level deep, which the
-    directory-covers-everything rule below would overstate or understate)."""
-    if any(c in pattern for c in "[]\\!"):
-        return None
-    pattern = re.sub(r"\*{3,}", "**", pattern)
-    while "**/**/" in pattern:
-        pattern = pattern.replace("**/**/", "**/")
-    if len(re.findall(r"\*+|\?", pattern)) > CODEOWNER_WILDCARDS:
-        return None
-    last = pattern.strip("/").rsplit("/", 1)[-1]
-    if "/" in pattern and ("*" in last or "?" in last):
-        return None
-    anchored = pattern.startswith("/") or "/" in pattern.rstrip("/")
-    body, out, i = pattern.strip("/"), [], 0
-    while i < len(body):
-        if body.startswith("**/", i):
-            out.append("(?:.*/)?")
-            i += 3
-        elif body.startswith("**", i):
-            out.append(".*")
-            i += 2
-        elif body[i] == "*":
-            out.append("[^/]*")
-            i += 1
-        elif body[i] == "?":
-            out.append("[^/]")
-            i += 1
+def glob_segment(pat, text):
+    """Whether one path segment matches a glob of `*` and `?`. Greedy with a single place to backtrack to, so the work
+    is at most the product of the two lengths however many stars there are."""
+    p = t = 0
+    star = mark = -1
+    while t < len(text):
+        if p < len(pat) and pat[p] == "*":
+            star, mark = p, t
+            p += 1
+        elif p < len(pat) and (pat[p] == "?" or pat[p] == text[t]):
+            p += 1
+            t += 1
+        elif star >= 0:
+            mark += 1
+            p, t = star + 1, mark
         else:
-            out.append(re.escape(body[i]))
-            i += 1
-    # A pattern naming a directory covers everything beneath it; one that names a file may also name a directory.
-    tail = "/.*" if pattern.endswith("/") else "(?:/.*)?"
-    return re.compile(("" if anchored else "(?:.*/)?") + "".join(out) + tail, re.S)
+            return False
+    while p < len(pat) and pat[p] == "*":
+        p += 1
+    return p == len(pat)
+
+
+def codeowner_matcher(pattern):
+    """A function from a path's segments to whether the pattern covers the path, or None for syntax this matcher
+    does not model (sections, character classes, escapes, negation, empty or oversized parts), which the caller
+    treats as undeterminable rather than guessing. A pattern covers a file it names and everything below a directory
+    it names. A trailing `**` covers everything below; a wildcard in the last segment of a pattern that has a slash
+    matches that one level only, as on GitHub."""
+    if len(pattern) > CODEOWNER_MAX_PATTERN or any(c in pattern for c in "[]\\!"):
+        return None
+    dir_only = pattern.endswith("/")
+    segs = pattern.strip("/").split("/")
+    if len(segs) > CODEOWNER_MAX_SEGMENTS or any(not x for x in segs):
+        return None
+    segs = [re.sub(r"\*{2,}", "**", x) for x in segs]
+    if any("**" in x and x != "**" for x in segs):
+        return None
+    segs = [x for i, x in enumerate(segs) if not (x == "**" and i and segs[i - 1] == "**")]
+    anchored = pattern.startswith("/") or "/" in pattern.rstrip("/")
+    wild_last = segs[-1] != "**" and ("*" in segs[-1] or "?" in segs[-1])
+    if anchored and dir_only and wild_last:
+        return None
+    exact = anchored and wild_last
+
+    def match(ps):
+        n = len(ps)
+        if not anchored:
+            return any(glob_segment(segs[0], ps[i]) and (not dir_only or i + 1 < n) for i in range(n))
+        ends = {0}
+        for seg in segs:
+            nxt = set()
+            for j in ends:
+                if seg == "**":
+                    nxt.update(range(j, n + 1))
+                elif j < n and glob_segment(seg, ps[j]):
+                    nxt.add(j + 1)
+            ends = nxt
+            if not ends:
+                return False
+        if exact:
+            return n in ends
+        return any(e >= 1 and (not dir_only or e < n) for e in ends)
+
+    return match
 
 
 def codeowners_cover(text, paths):
-    """True when a code owner is assigned to any of `paths`, False when none is, None when the file cannot be
-    judged. As on GitHub the last matching line wins, and a line with no owner releases the path."""
+    """True when a code owner is assigned to any of `paths`, False when none is, None when the file or a path cannot
+    be judged. As on GitHub the last matching line wins, and a line with no owner releases the path."""
     rules = []
     for line in text.splitlines():
         words = line.split("#", 1)[0].split()
         if not words:
             continue
-        rx = codeowner_regex(words[0])
-        if rx is None:
+        matcher = codeowner_matcher(words[0])
+        if matcher is None:
             return None
-        rules.append((rx, len(words) > 1))
+        rules.append((matcher, len(words) > 1))
     for path in paths:
-        owned = [has_owner for rx, has_owner in rules if rx.fullmatch(path)]
+        segments = path.split("/")
+        if len(path) > CODEOWNER_MAX_PATH or len(segments) > CODEOWNER_MAX_SEGMENTS:
+            return None
+        owned = [has_owner for matcher, has_owner in rules if matcher(segments)]
         if owned and owned[-1]:
             return True
     return False

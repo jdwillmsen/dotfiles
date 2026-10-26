@@ -1843,7 +1843,7 @@ class Captain:
         """A fresh installation token for this one approval, kept in memory and limited to the one repository and the
         one permission. The exchange is made in this process, so the JWT is never on a command line."""
         self.app_guard(retract)
-        jwt = app_jwt(creds, self.now)
+        jwt = app_jwt(creds, now_epoch())
         if jwt is None:
             raise Stop("waiting", "approver-signing-failed")
         KNOWN_SECRETS.add(jwt)

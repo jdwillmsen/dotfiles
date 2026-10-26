@@ -2904,8 +2904,10 @@ def cmd_auth_app(args):
         is_saved = False
     ids = []
     for what in ("App ID", "Installation ID"):
+        # The ids are public numbers, so they are read in the clear; only the key is secret.
         try:
-            value = getpass.getpass(f"{what} (input hidden): ").strip()
+            print(f"{what}: ", end="", file=sys.stderr, flush=True)
+            value = sys.stdin.readline().strip()
         except (EOFError, KeyboardInterrupt):
             die(EXIT_FAIL, f"no {what} entered")
         if not APP_NUMBER.fullmatch(value):

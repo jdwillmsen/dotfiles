@@ -88,47 +88,40 @@ def save_pr(n, pr):
 if rd("gh_down") is not None:
     fail("gh: dial tcp: lookup api.github.com: no such host")
 head2 = args[:2]
-if args[:3] == ["api", "-X", "POST"]:
-    path = args[3]
-    if path.startswith("app/installations/"):
-        import base64, subprocess, tempfile
-        jwt = flag("-H").removeprefix(BEARER)
-        if os.environ.get("GH_TOKEN") != jwt:
-            fail("stub gh: the JWT must also be the process credential")
-        os.makedirs(f"{S}/realtokens", exist_ok=True)
-        open(f"{S}/realtokens/jwt", "w").write(jwt)
-        if rd("mint_fail") is not None:
-            fail("HTTP 401: A JSON web token could not be decoded: " + jwt)
-        head, payload, sig = jwt.split(".")
-        b = lambda t: base64.urlsafe_b64decode(t + "=" * (-len(t) % 4))
-        claims = json.loads(b(payload))
-        now = int(os.environ["STUB_NOW_EPOCH"])
-        assert json.loads(b(head)) == {"alg": "RS256", "typ": "JWT"}, head
-        assert claims == {"iat": now - 60, "exp": now + 540, "iss": int(rd("app_id"))}, claims
-        assert path == f"app/installations/{rd('installation_id')}/access_tokens", path
-        with tempfile.TemporaryDirectory() as d:
-            open(f"{d}/sig", "wb").write(b(sig))
-            ok = subprocess.run(["openssl", "dgst", "-sha256", "-verify", os.environ["STUB_PUB"], "-signature", f"{d}/sig"],
-                                input=f"{head}.{payload}".encode(), capture_output=True).returncode == 0
-        if not ok:
-            fail("HTTP 401: Bad credentials (signature)")
-        with open(f"{S}/minted", "a") as f:
-            f.write("1\n")
-        say({"token": rd("realtokens/inst_token"), "expires_at": "2026-10-23T21:00:00Z"})
-    if "/pulls/" in path and path.endswith("/reviews"):
-        n = path.split("/")[4]
-        if os.environ.get("GH_TOKEN") != rd("realtokens/inst_token"):
-            fail("HTTP 401: Bad credentials")
-        fields = dict(a.split("=", 1) for a in args[4:] if "=" in a)
-        with open(f"{S}/reviews_posted.jsonl", "a") as f:
-            f.write(json.dumps({"pr": n, "fields": fields, "token_sha": hashlib.sha256(os.environ["GH_TOKEN"].encode()).hexdigest()}) + "\n")
-        if rd("review_fail") is not None:
-            fail("HTTP 422: Unprocessable: refused for " + os.environ["GH_TOKEN"])
-        pr = jload(f"pr_{n}.json", {})
-        if rd("review_noeffect") is None and fields["commit_id"] == pr.get("headRefOid"):
-            pr.update(reviewDecision="APPROVED", mergeStateStatus="CLEAN")
-            save_pr(n, pr)
-        say({"id": 1, "state": "APPROVED", "commit_id": fields["commit_id"]})
+if args[:3] == ["api", "-X", "POST"] and "/pulls/" in args[3] and args[3].endswith("/reviews"):
+    n = args[3].split("/")[4]
+    if os.environ.get("GH_TOKEN") != rd("realtokens/inst_token"):
+        fail("HTTP 401: Bad credentials")
+    fields = dict(a.split("=", 1) for a in args[4:] if "=" in a)
+    ledger = [json.loads(line)["status"] if "status" in json.loads(line) else None
+              for line in open(os.environ["MERGE_CAPTAIN_STATE"] + "/approvals.jsonl")] if os.path.exists(
+        os.environ["MERGE_CAPTAIN_STATE"] + "/approvals.jsonl") else []
+    k = len(open(f"{S}/reviews_posted.jsonl").readlines()) + 1 if os.path.exists(f"{S}/reviews_posted.jsonl") else 1
+    with open(f"{S}/reviews_posted.jsonl", "a") as f:
+        f.write(json.dumps({"pr": n, "fields": fields, "id": k, "ledger_at_post": ledger,
+                            "token_sha": hashlib.sha256(os.environ["GH_TOKEN"].encode()).hexdigest()}) + "\n")
+    if rd("review_fail") is not None:
+        fail("HTTP 422: Unprocessable: refused for " + os.environ["GH_TOKEN"])
+    if rd("review_garbage") is not None:
+        print("not json")
+        sys.exit(0)
+    pr = jload(f"pr_{n}.json", {})
+    if rd("review_noeffect") is None and fields["commit_id"] == pr.get("headRefOid"):
+        pr.update(reviewDecision="APPROVED", mergeStateStatus="CLEAN")
+        save_pr(n, pr)
+    say({"id": k, "state": "APPROVED", "commit_id": fields["commit_id"]})
+if args[:3] == ["api", "-X", "PUT"] and args[3].endswith("/dismissals"):
+    n = args[3].split("/")[4]
+    if os.environ.get("GH_TOKEN") != rd("realtokens/inst_token"):
+        fail("HTTP 401: Bad credentials")
+    with open(f"{S}/dismissed.jsonl", "a") as f:
+        f.write(json.dumps({"pr": n, "review": args[3].split("/")[6]}) + "\n")
+    if rd("dismiss_fail") is not None:
+        fail("HTTP 403")
+    pr = jload(f"pr_{n}.json", {})
+    pr.update(reviewDecision="REVIEW_REQUIRED", mergeStateStatus="BLOCKED")
+    save_pr(n, pr)
+    say({"id": int(args[3].split("/")[6]), "state": "DISMISSED"})
 if head2 == ["pr", "list"]:
     repo = flag("--repo")
     if rd("list_fail_" + repo.replace("/", "_")) is not None:
@@ -251,6 +244,12 @@ if args[0] == "api" and "/pulls/" in args[1] and "/files?" in args[1]:
     if rd("files_fail") is not None:
         fail("gh: Server Error (HTTP 500)")
     say(jload(f"files_{n}.json", [{"filename": "src/x.py"}]))
+if args[0] == "api" and "/rules/branches/" in args[1]:
+    if rd("rules_fail") is not None:
+        fail("gh: Server Error (HTTP 500)")
+    if rd("rules_none") is not None:
+        say([{"type": "required_status_checks", "parameters": {}}])
+    say([{"type": "pull_request", "parameters": {"dismiss_stale_reviews_on_push": rd("no_stale") is None}}])
 if args[0] == "api" and "/contents/" in args[1]:
     where = args[1].split("/contents/")[1].split("?")[0]
     if rd("codeowners_err") is not None:
@@ -504,6 +503,7 @@ DEFAULT_TOKEN="${GP}testsecretvalue0000000000000"
 mc_env() {  # rebuilt per call: a test may point CFG somewhere else
     MCENV=(MERGE_CAPTAIN_CONFIG="$CFG" MERGE_CAPTAIN_STATE="$STATE" MERGE_CAPTAIN_NOW="$NOW" MERGE_CAPTAIN_TOKENS="$TOKDIR"
         MERGE_CAPTAIN_GH="$bin/gh" MERGE_CAPTAIN_CLASS="$bin/change-class" MERGE_CAPTAIN_PACE="$bin/agent-pace"
+        MERGE_CAPTAIN_OPENSSL="$bin/openssl" MERGE_CAPTAIN_API_URL="${APIURL:-http://127.0.0.1:9}" CLAUDECODE= CLAUDE_CODE_ENTRYPOINT=
         MERGE_CAPTAIN_TEST_HARNESS=1 MERGE_CAPTAIN_EVAL="$bin/agent-eval" MERGE_CAPTAIN_CLAUDE="$bin/claude" MERGE_CAPTAIN_OPENCODE="$bin/opencode"
         AGENT_PACE_LANES="$tmp/lanes.toml" STUB_DIR="$S" AGENT_EVAL_STATE="$S/evalstate" HOME="$tmp/home"
         GH_TOKEN="$DEFAULT_TOKEN" SOME_API_KEY="${SK}testtesttesttesttest" PLATFORMCTL_JDWLABS_NVIDIA_API_KEY=nv-keep-me
@@ -2978,6 +2978,91 @@ openssl rsa -in "$tmp/app_key.pem" -pubout -out "$tmp/app_pub.pem" 2>/dev/null
 export STUB_PUB="$tmp/app_pub.pem"
 STUB_NOW_EPOCH="$(date -u -d "$NOW" +%s)"
 export STUB_NOW_EPOCH
+openssl genrsa -out "$tmp/other_key.pem" 2048 2>/dev/null
+cat >"$bin/openssl" <<'SH'
+#!/usr/bin/env bash
+# A recording stand-in for openssl; with swap_key present it replaces the key file just before signing.
+echo "$*" >>"$STUB_DIR/openssl.log"
+if [ -e "$STUB_DIR/swap_key" ]; then mv -f "$STUB_DIR/other.copy" "$(cat "$STUB_DIR/swap_key")"; fi
+exec /usr/bin/openssl "$@"
+SH
+chmod +x "$bin/openssl"
+cat >"$tmp/apisrv.py" <<'PY'
+import base64, hashlib, http.server, json, os, subprocess, sys, tempfile
+S = os.environ["STUB_DIR"]
+
+
+def rd(name, default=None):
+    p = f"{S}/{name}"
+    return open(p).read() if os.path.exists(p) else default
+
+
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def send(self, code, obj=None):
+        body = json.dumps(obj).encode() if obj is not None else b""
+        self.send_response(code)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def note(self, body):
+        auth = self.headers.get("Authorization", "")
+        with open(f"{S}/api.log", "a") as f:
+            f.write(json.dumps({"method": self.command, "path": self.path, "body": body,
+                                "auth_sha": hashlib.sha256(auth.encode()).hexdigest()}) + "\n")
+
+    def do_POST(self):
+        raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        body = json.loads(raw) if raw else None
+        self.note(body)
+        if self.path != f"/app/installations/{rd('installation_id')}/access_tokens":
+            return self.send(404, {})
+        jwt = self.headers.get("Authorization", "").removeprefix("Bearer ")
+        os.makedirs(f"{S}/realtokens", exist_ok=True)
+        open(f"{S}/realtokens/jwt", "w").write(jwt)
+        if rd("mint_fail") is not None:
+            return self.send(401, {"message": "bad credentials " + jwt})
+        head, payload, sig = jwt.split(".")
+        b = lambda t: base64.urlsafe_b64decode(t + "=" * (-len(t) % 4))
+        now = int(rd("now_epoch"))
+        ok = json.loads(b(head)) == {"alg": "RS256", "typ": "JWT"} and json.loads(b(payload)) == {
+            "iat": now - 60, "exp": now + 540, "iss": int(rd("app_id"))}
+        with tempfile.TemporaryDirectory() as d:
+            open(f"{d}/sig", "wb").write(b(sig))
+            ok = ok and subprocess.run(["openssl", "dgst", "-sha256", "-verify", os.environ["STUB_PUB"], "-signature", f"{d}/sig"],
+                                       input=f"{head}.{payload}".encode(), capture_output=True).returncode == 0
+        if not ok:
+            return self.send(401, {"message": "Bad credentials"})
+        if body != {"repositories": [rd("mint_repo", "live")], "permissions": {"pull_requests": "write"}}:
+            return self.send(422, {"message": "unexpected scope"})
+        with open(f"{S}/minted", "a") as f:
+            f.write("1\n")
+        self.send(201, {"token": rd("realtokens/inst_token"), "expires_at": "2026-10-23T21:00:00Z"})
+
+    def do_DELETE(self):
+        self.note(None)
+        if self.path == "/installation/token" and self.headers.get("Authorization") == "Bearer " + rd("realtokens/inst_token", ""):
+            with open(f"{S}/revoked", "a") as f:
+                f.write("1\n")
+            return self.send(204)
+        self.send(401, {})
+
+
+srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+open(sys.argv[1], "w").write(str(srv.server_port))
+srv.serve_forever()
+PY
+export no_proxy=127.0.0.1 NO_PROXY=127.0.0.1
+python3 -I "$tmp/apisrv.py" "$tmp/api.port" &
+API_PID=$!
+# shellcheck disable=SC2064  # the pid and $tmp must expand now: the trap outlives their scope
+trap "kill $API_PID 2>/dev/null; chmod -R u+w '$tmp' 2>/dev/null; rm -rf '$tmp'" EXIT
+for _ in $(seq 1 50); do [ -s "$tmp/api.port" ] && break; sleep 0.1; done
+[ -s "$tmp/api.port" ] || fail "the stub API did not start"
+APIURL="http://127.0.0.1:$(cat "$tmp/api.port")"
 KEYBODY="$(sed -n 2p "$tmp/app_key.pem")"
 [ "${#KEYBODY}" -ge 32 ] || fail "the throwaway key has no body line to search for"
 mkapp() {  # the App's files exactly as `auth-app` leaves them, and what the stub must hand out
@@ -2990,6 +3075,7 @@ mkapp() {  # the App's files exactly as `auth-app` leaves them, and what the stu
     printf '%s' "$APP_ID" >"$S/app_id"
     printf '%s' "$INST_ID" >"$S/installation_id"
     printf '%s' "$INST_TOKEN" >"$S/realtokens/inst_token"
+    printf '%s' "$STUB_NOW_EPOCH" >"$S/now_epoch"
 }
 newcase_app() { APPROVER=1 newcase "$@"; mkapp; }
 apr_pr() {  # N tier [fx pr args...]: held by the ruleset for one approval, with its review queued from R1 up
@@ -3029,7 +3115,14 @@ assert row["pr"] == "30" and f["event"] == "APPROVE" and f["commit_id"] == sys.a
 assert f["body"] == f"merge-captain approval: tier R1, reviewer lane claude-sonnet, sha {sys.argv[2]}", f["body"]
 assert row["token_sha"] == sys.argv[3], "the approval was not made with the installation token"
 PY
-[ "$(wc -l <"$S/minted")" = 1 ] || fail "one installation token per approval"
+[ "$(wc -l <"$S/minted")" = 1 ] && [ "$(wc -l <"$S/revoked")" = 1 ] || fail "one installation token per approval, revoked after it"
+python3 -I - "$S/api.log" "$(sha "$INST_TOKEN")" <<'PY' || fail "token exchange content" "$(cat "$S/api.log")"
+import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+assert [r["method"] for r in rows] == ["POST", "DELETE"], rows
+assert rows[0]["body"] == {"repositories": ["live"], "permissions": {"pull_requests": "write"}}, rows[0]
+PY
+! grep -qE 'Bearer|access_tokens|Authorization' "$S/gh.log" || fail "a JWT or exchange went through gh" "$(grep -E 'Bearer|access_tokens' "$S/gh.log")"
 review_line="$(grep -n '^api -X POST repos/acme/live/pulls/30/reviews ' "$S/gh.log" | cut -d: -f1)"
 merge_line="$(grep -n '^pr merge 30 ' "$S/gh.log" | cut -d: -f1)"
 [ -n "$review_line" ] && [ -n "$merge_line" ] && [ "$review_line" -lt "$merge_line" ] || fail "approve before merge" "$(cat "$S/gh.log")"
@@ -3041,11 +3134,17 @@ for line in open(sys.argv[1]):
     if c["argv"][:2] == ["pr", "merge"]:
         assert c["gh_token_sha"] == sys.argv[2], c
 PY
-python3 -I - "$STATE/approvals.jsonl" "$(head_of 30)" <<'PY' || fail "approval ledger" "$(cat "$STATE/approvals.jsonl")"
+python3 -I - "$STATE/approvals.jsonl" "$(head_of 30)" "$S/reviews_posted.jsonl" <<'PY' || fail "approval ledger" "$(cat "$STATE/approvals.jsonl")"
 import json, sys
-row = json.loads(open(sys.argv[1]).readline())
-assert {k: row[k] for k in ("repo", "pr", "head", "tier", "lane")} == {"repo": "acme/live", "pr": 30, "head": sys.argv[2], "tier": "R1", "lane": "claude-sonnet"}, row
-assert row["at"], row
+rows = [json.loads(line) for line in open(sys.argv[1])]
+assert [r["status"] for r in rows] == ["attempted", "confirmed"], rows
+for row in rows:
+    assert {k: row[k] for k in ("repo", "pr", "head", "tier", "lane")} == {"repo": "acme/live", "pr": 30, "head": sys.argv[2], "tier": "R1", "lane": "claude-sonnet"}, row
+    assert row["at"], row
+assert rows[1]["review_id"] == 1, rows
+# The attempt was on file before the review was posted.
+post = json.loads(open(sys.argv[3]).readline())
+assert post["ledger_at_post"] == ["attempted"], post
 PY
 [ "$(mode_of "$STATE/approvals.jsonl")" = 600 ] || fail "the approval ledger must be 0600"
 # Neither the key, the installation token nor the JWT is in any output, state, log or stub file.
@@ -3061,8 +3160,9 @@ newcase_app
 apr_pr 31 R0
 want 0 run
 expect 31 merged "approved by merge-captain-approver"
-grep -q "\"body\": \"merge-captain approval: tier R0, reviewer lane none (no review needed), sha $(head_of 31)\"" "$S/reviews_posted.jsonl" ||
+grep -q "\"body\": \"merge-captain approval: tier R0, no review required (R0), sha $(head_of 31)\"" "$S/reviews_posted.jsonl" ||
     fail "R0 approval body" "$(cat "$S/reviews_posted.jsonl")"
+grep -q '"lane": "no review required (R0)"' "$STATE/approvals.jsonl" || fail "R0 approval ledger lane" "$(cat "$STATE/approvals.jsonl")"
 
 # A review that found problems is never followed by an approval.
 newcase_app
@@ -3227,8 +3327,9 @@ echo x >"$S/review_noeffect"
 want 0 run
 expect 46 blocked "merge refused"
 want 0 run
-expect 46 waiting approval-not-accepted
+expect 46 waiting approval-withdrawn
 [ "$(posts)" = 1 ] || fail "the same head was approved twice" "$(cat "$S/reviews_posted.jsonl")"
+[ "$(wc -l <"$S/dismissed.jsonl")" = 1 ] || fail "a refused merge left the approval standing" "$(cat "$S/dismissed.jsonl" 2>/dev/null)"
 
 # Caps and the kill switch stop approvals.
 newcase_app max_approvals_per_hour=1
@@ -3242,6 +3343,7 @@ want 0 run
 NOW_SAVE="$NOW"
 NOW="2026-10-23T21:30:00Z"
 STUB_NOW_EPOCH="$(date -u -d "$NOW" +%s)"
+printf '%s' "$STUB_NOW_EPOCH" >"$S/now_epoch"
 want 0 run
 NOW="$NOW_SAVE"
 STUB_NOW_EPOCH="$(date -u -d "$NOW" +%s)"
@@ -3333,7 +3435,9 @@ apr_pr 58 R0
 want 0 run
 expect 58 blocked "approval refused"
 grep -q 'redacted' "$out" || fail "the refusal did not show the cut token" "$(cat "$out")"
-[ -z "$(app_strays)" ] && [ ! -s "$STATE/approvals.jsonl" ] || fail "a refused approval leaked or was recorded" "$(app_strays)"
+[ -z "$(app_strays)" ] || fail "a refused approval leaked" "$(app_strays)"
+[ "$(wc -l <"$STATE/approvals.jsonl")" = 1 ] && grep -q '"status": "attempted"' "$STATE/approvals.jsonl" || fail "a refused approval must leave only its attempt" "$(cat "$STATE/approvals.jsonl")"
+[ "$(wc -l <"$S/minted")" = 1 ] && [ "$(wc -l <"$S/revoked")" = 1 ] || fail "the token of a refused approval was not revoked"
 [ "$(count '^pr merge' "$S/gh.log")" = 0 ] || fail "merged after a refused approval"
 
 # Config: approver is a boolean, the cap a positive integer, and both have safe defaults.
@@ -3396,7 +3500,7 @@ ptyapp() {  # replies(comma separated) args...: `merge-captain <args>` on a pty,
     pty_out="$(tr -d '\r' <"$tmp/pty.out")"
 }
 cp "$tmp/app_key.pem" "$tmp/src.pem"
-chmod 644 "$tmp/src.pem"
+chmod 600 "$tmp/src.pem"
 newcase
 for mode in none stdin stderr; do
     for extra in "--key-file $tmp/src.pem" "--remove"; do
@@ -3421,11 +3525,13 @@ refused_app() {  # description, wanted exit, wanted words, replies, args...
     [ ! -e "$TOKDIR/approver.key" ] && [ ! -e "$TOKDIR/approver.json" ] || fail "$what: a file was written"
 }
 printf 'hello\n' >"$tmp/plain.txt"
+chmod 600 "$tmp/plain.txt"
 printf '%s\nAAAA\n%s\n' "-----BEGIN ""PRIVATE KEY-----" "-----END ""PRIVATE KEY-----" >"$tmp/bad.pem"
+chmod 600 "$tmp/bad.pem"
 refused_app "missing key file" 1 "cannot read the key file" "$APP_ID,$INST_ID" auth-app --key-file "$tmp/nothing.pem"
 refused_app "not a key" 1 "not an unencrypted PEM" "$APP_ID,$INST_ID" auth-app --key-file "$tmp/plain.txt"
 refused_app "a key that cannot sign" 1 "cannot sign" "$APP_ID,$INST_ID" auth-app --key-file "$tmp/bad.pem"
-refused_app "a directory" 1 "cannot read the key file" "$APP_ID,$INST_ID" auth-app --key-file "$tmp"
+refused_app "a directory" 1 "not a regular file" "$APP_ID,$INST_ID" auth-app --key-file "$tmp"
 refused_app "a non-numeric App ID" 1 "App ID must be a number" "abc,$INST_ID" auth-app --key-file "$tmp/src.pem"
 refused_app "a non-numeric installation ID" 1 "Installation ID must be a number" "$APP_ID,0x1" auth-app --key-file "$tmp/src.pem"
 refused_app "nothing typed" 1 "must be a number" " " auth-app --key-file "$tmp/src.pem"
@@ -3457,6 +3563,7 @@ printf '%s' "$APP_ID" >"$S/app_id"
 printf '%s' "$INST_ID" >"$S/installation_id"
 mkdir -p "$S/realtokens"
 printf '%s' "$INST_TOKEN" >"$S/realtokens/inst_token"
+printf '%s' "$STUB_NOW_EPOCH" >"$S/now_epoch"
 apr_pr 60 R0
 want 0 run
 expect 60 merged "approved by merge-captain-approver"
@@ -3527,6 +3634,138 @@ env "${MCENV[@]}" python3 -I "$tmp/ptyrun.py" full "$TOK_ACME" "$tmp/pty.out" "$
 pty_out="$(tr -d '\r' <"$tmp/pty.out")"
 [ "$(cat "$tmp/pty.out.rc")" = 1 ] && grep -q 'nothing was saved' <<<"$pty_out" && [ ! -e "$TOKDIR/acme" ] || fail "auth saved a token under an override" "$pty_out"
 ! grep -qF -- "$TOK_ACME" <<<"$pty_out" || fail "auth printed the token"
+
+# M1: approve only where a push dismisses the approval; M2: the attempt is on file before the post.
+no_stale_case() {  # description, marker
+    newcase_app
+    echo x >"$S/$2"
+    apr_pr 110 R0
+    want 0 run
+    expect 110 waiting approver-no-stale-dismissal
+    no_app_activity "$1"
+}
+no_stale_case "a ruleset that keeps approvals across pushes" no_stale
+no_stale_case "no pull request rule at all" rules_none
+no_stale_case "rules that cannot be read" rules_fail
+newcase_app
+apr_pr 111 R0
+want 0 run
+expect 111 merged
+grep -q '^api repos/acme/live/rules/branches/main' "$S/gh.log" || fail "the branch rules were not read" "$(cat "$S/gh.log")"
+APPROVER=1 newcase
+apr_pr 112 R0
+want 0 run
+expect 112 waiting approver-missing
+! grep -q 'rules/branches' "$S/gh.log" || fail "rules read before the key was known to exist"
+# The head is read again after the file-list check and before the token is minted.
+newcase_app
+apr_pr 113 R0
+printf '%s %s %s' "$(head_of 113)" "$(head_of 113)" "$(head_of 11300)" >"$S/head_seq_113"
+want 0 run
+expect 113 waiting "head moved before approval"
+no_app_activity "a push during the file-list check"
+[ ! -e "$S/minted" ] || fail "a token was minted for a moved head"
+# A merge that fails after a good approval takes the approval back (and says so in the ledger).
+newcase_app
+apr_pr 114 R0
+echo "not mergeable: stub" >"$S/merge_fail"
+want 0 run
+expect 114 blocked "merge refused"
+python3 -I - "$S/dismissed.jsonl" "$STATE/approvals.jsonl" "$S/api.log" <<'PY' || fail "withdrawal" "$(cat "$S/dismissed.jsonl" "$STATE/approvals.jsonl")"
+import json, sys
+assert [json.loads(l) for l in open(sys.argv[1])] == [{"pr": "114", "review": "1"}]
+assert [json.loads(l)["status"] for l in open(sys.argv[2])] == ["attempted", "confirmed", "withdrawn"]
+methods = [json.loads(l)["method"] for l in open(sys.argv[3])]
+assert methods == ["POST", "DELETE", "POST", "DELETE"], methods
+PY
+grep -q '"reviewDecision": "REVIEW_REQUIRED"' "$S/pr_114.json" || fail "the approval still stands"
+# A dismissal that fails is recorded as such and the pull request is not merged.
+newcase_app
+apr_pr 115 R0
+echo "not mergeable: stub" >"$S/merge_fail"
+echo x >"$S/dismiss_fail"
+want 0 run
+expect 115 blocked "merge refused"
+grep -q '"status": "withdraw-failed"' "$STATE/approvals.jsonl" || fail "a failed withdrawal is not recorded" "$(cat "$STATE/approvals.jsonl")"
+# A merge that succeeds takes nothing back.
+newcase_app
+apr_pr 116 R0
+want 0 run
+expect 116 merged
+[ ! -e "$S/dismissed.jsonl" ] || fail "a merged pull request had its approval dismissed"
+# The attempt counts against the cap even when its reply was lost, and a second approval on that head is refused.
+newcase_app max_approvals_per_hour=1
+apr_pr 117 R0
+echo x >"$S/review_garbage"
+want 0 run
+expect 117 blocked "approval not confirmed"
+grep -q '"status": "attempted"' "$STATE/approvals.jsonl" && ! grep -q '"status": "confirmed"' "$STATE/approvals.jsonl" || fail "attempt rows" "$(cat "$STATE/approvals.jsonl")"
+rm "$S/review_garbage"
+apr_pr 118 R0
+want 0 run
+expect 117 skipped approval-cap
+expect 118 skipped approval-cap
+[ "$(posts)" = 1 ] || fail "a lost reply allowed a second approval" "$(cat "$S/reviews_posted.jsonl")"
+newcase_app
+apr_pr 119 R0
+echo x >"$S/review_garbage"
+want 0 run
+expect 119 blocked "approval not confirmed"
+want 0 run
+expect 119 waiting approval-not-accepted
+[ "$(posts)" = 1 ] || fail "a head with an attempt on file was approved again" "$(cat "$S/reviews_posted.jsonl")"
+
+# M4: an R0 approval never carries the lane of the pull request before it.
+newcase_app
+apr_pr 120 R1
+fx pr 121 reviewDecision=REVIEW_REQUIRED mergeStateStatus=BLOCKED
+fx class 121 R0 tags=docs reasons=docs:R0:README.md
+want 0 run
+expect 120 merged
+expect 121 merged
+grep -q "tier R0, no review required (R0), sha $(head_of 121)" "$S/reviews_posted.jsonl" || fail "R0 approval named a reviewer" "$(cat "$S/reviews_posted.jsonl")"
+grep -q '"pr": 121.*"lane": "no review required (R0)"' "$STATE/approvals.jsonl" || fail "R0 ledger lane" "$(cat "$STATE/approvals.jsonl")"
+
+# L5: openssl is handed the descriptor that was checked, never the path, so a swap cannot change the key.
+newcase_app
+apr_pr 140 R0
+want 0 run
+expect 140 merged
+grep -q -- '-sign /dev/fd/[0-9]' "$S/openssl.log" || fail "openssl was not given a descriptor" "$(cat "$S/openssl.log")"
+! grep -q 'approver.key' "$S/openssl.log" || fail "openssl was given the key path" "$(cat "$S/openssl.log")"
+newcase_app
+cp "$tmp/other_key.pem" "$S/other.copy"
+chmod 600 "$S/other.copy"
+printf '%s' "$TOKDIR/approver.key" >"$S/swap_key"
+apr_pr 141 R0
+want 0 run
+expect 141 merged "approved by"
+cmp -s "$TOKDIR/approver.key" "$tmp/other_key.pem" || fail "the swap did not happen, so the test proves nothing"
+
+# L6: the source key must be private and a plain file; saving what is already saved says nothing about deleting it.
+newcase
+chmod 644 "$tmp/src.pem"
+ptyapp "$APP_ID,$INST_ID" auth-app --key-file "$tmp/src.pem"
+[ "$pty_rc" = 1 ] && grep -q 'readable by group or others' <<<"$pty_out" && [ ! -e "$TOKDIR/approver.key" ] || fail "a group-readable source key was accepted" "$pty_out"
+chmod 600 "$tmp/src.pem"
+ln -sf "$tmp/src.pem" "$tmp/src.link"
+ptyapp "$APP_ID,$INST_ID" auth-app --key-file "$tmp/src.link"
+[ "$pty_rc" = 1 ] && grep -q 'is a symlink' <<<"$pty_out" && [ ! -e "$TOKDIR/approver.key" ] || fail "a symlinked source key was accepted" "$pty_out"
+ptyapp "$APP_ID,$INST_ID" auth-app --key-file "$tmp/src.pem"
+[ "$pty_rc" = 0 ] || fail "auth-app" "$pty_out"
+ptyapp "$APP_ID,$INST_ID" auth-app --key-file "$TOKDIR/approver.key"
+[ "$pty_rc" = 0 ] && grep -q 'That file is the saved key' <<<"$pty_out" && ! grep -q 'shred' <<<"$pty_out" || fail "the saved key was offered for deletion" "$pty_out"
+cmp -s "$TOKDIR/approver.key" "$tmp/src.pem" || fail "saving the saved key changed it"
+# Not under an agent, and not under a program that fakes a terminal.
+rm -rf "$TOKDIR"
+mc_env
+env "${MCENV[@]}" CLAUDECODE=1 python3 -I "$tmp/ptyrun2.py" "$APP_ID,$INST_ID" "$tmp/pty.out" "$tool" auth-app --key-file "$tmp/src.pem"
+pty_out="$(tr -d '\r' <"$tmp/pty.out")"
+[ "$(cat "$tmp/pty.out.rc")" = 2 ] && grep -q 'not one made by an agent session' <<<"$pty_out" && [ ! -e "$TOKDIR" ] || fail "auth-app ran under an agent" "$pty_out"
+ln -sf "$(command -v python3)" "$tmp/script"
+env "${MCENV[@]}" "$tmp/script" -I "$tmp/ptyrun2.py" "$APP_ID,$INST_ID" "$tmp/pty.out" "$tool" auth-app --key-file "$tmp/src.pem"
+pty_out="$(tr -d '\r' <"$tmp/pty.out")"
+[ "$(cat "$tmp/pty.out.rc")" = 2 ] && grep -q 'not one made by script' <<<"$pty_out" && [ ! -e "$TOKDIR" ] || fail "auth-app ran under a pty wrapper" "$pty_out"
 
 # ── Global: nothing, in any case above, ever asked for a bypass or another merge style ──
 cat "$S/gh.log" >>"$tmp/all_gh.log"

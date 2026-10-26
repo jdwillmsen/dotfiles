@@ -405,6 +405,12 @@ def read_meta(owner):
     return meta if isinstance(meta, dict) else {}
 
 
+# A merge the host refused for a reason that will not go away by itself, and one it refused for now. Only the first
+# justifies taking the App's approval back; after the second the approval still stands and the next run merges.
+POLICY_REFUSAL = re.compile(r"(?i)policy|protected branch|not mergeable|required|conflict|cannot be merged|"
+                            r"not allowed|prohibit|blocked")
+TRANSIENT_REFUSAL = re.compile(r"(?i)\b5\d\d\b|time[d ]?-? ?out|connect|temporar|rate limit|again|unavailable|"
+                               r"bad gateway|resolve|dial|reset by peer|modified")
 # gh and openssl handle the owner tokens and the App key, so they are found in these directories only, in this order,
 # and run with this PATH, whatever PATH the caller has.
 TRUSTED_DIRS = ("/usr/bin", "/usr/local/bin", "/bin")
@@ -1084,6 +1090,7 @@ class Captain:
         self.hard_deadline_s = deadline_from_env("MERGE_CAPTAIN_HARD_DEADLINE_S", HARD_DEADLINE_S)
         self.pending = None
         self.recorded_lane = None
+        self.standing = None
         self.open_assignment = None
         self.lanes = None
         self.deadline_logged = False
@@ -1904,10 +1911,24 @@ class Captain:
             return codeowners_cover(text, paths)
         return False if found == "none" else None
 
+    def find_app_review(self, repo, n, head):
+        """("found", id), ("none", None) or ("unknown", None): the App's approval of exactly `head`, as GitHub has it."""
+        r = self.gh(["api", f"repos/{repo}/pulls/{n}/reviews?per_page=100"])
+        try:
+            rows = json.loads(r.out)
+        except ValueError:
+            return "unknown", None
+        if not (r.ok and isinstance(rows, list) and len(rows) < 100):
+            return "unknown", None
+        ids = [x["id"] for x in rows if isinstance(x, dict) and isinstance(x.get("id"), int)
+               and (x.get("user") or {}).get("login") == APPROVER_LOGIN and x.get("commit_id") == head
+               and x.get("state") == "APPROVED"]
+        return ("found", ids[-1]) if ids else ("none", None)
+
     def approve(self, rc, n, head, tier, lane, reasons, details):
         """Approve as the App on exactly `head`, or end the pull request with the reason it was not approved. Every
         condition is checked here again, close to the call, whatever the caller already established. Returns the id
-        of the review submitted."""
+        of the review, which may be unknown. Once the post has gone out `self.standing` says so, whatever happens next."""
         repo = rc["name"]
         if PAUSED.exists():
             raise Stop("skipped", "paused")
@@ -1919,14 +1940,18 @@ class Captain:
             raise Stop("skipped", "author-not-allowed")
         if TIERS.index(tier) > TIERS.index("R2"):
             raise Stop("skipped", f"{tier} above R2")
-        if approvals_since(self.now) >= self.limits["max_approvals_per_hour"]:
+        # Only an approval that was confirmed, or taken back, ends the matter for this head. An attempt nobody
+        # confirmed is looked up below: it may have gone through.
+        seen = {row.get("status") for row in read_jsonl(APPROVALS)
+                if row.get("repo") == repo and row.get("pr") == n and row.get("head") == head}
+        if seen & {"withdrawn", "withdraw-failed"}:
+            raise Stop("waiting", "approval-withdrawn")
+        if seen & {None, "confirmed"}:
+            raise Stop("waiting", "approval-not-accepted")
+        resumable = "attempted" in seen
+        cap_hit = approvals_since(self.now) >= self.limits["max_approvals_per_hour"]
+        if cap_hit and not resumable:
             raise Stop("skipped", "approval-cap")
-        prior = [row for row in read_jsonl(APPROVALS)
-                 if row.get("repo") == repo and row.get("pr") == n and row.get("head") == head]
-        if prior:
-            # Attempted, approved or withdrawn already, yet GitHub still wants a review: another would change nothing.
-            raise Stop("waiting", "approval-withdrawn" if any(r.get("status") == "withdrawn" for r in prior)
-                       else "approval-not-accepted")
         now_head, state = self.fetch_head(repo, n)
         names = {x.get("name") for x in state.get("labels") or [] if isinstance(x, dict)}
         if now_head != head:
@@ -1952,37 +1977,79 @@ class Captain:
         who = f"reviewer lane {md_safe(lane or 'unknown', 60)}" if tier != "R0" else NO_REVIEW_R0
         body = f"merge-captain approval: tier {tier}, {who}, sha {head}"
         row = {"repo": repo, "pr": n, "head": head, "tier": tier, "lane": lane or (NO_REVIEW_R0 if tier == "R0" else None)}
+        if resumable:
+            found, review_id = self.find_app_review(repo, n, head)
+            if found == "unknown":
+                raise Stop("waiting", "approval-unverified")
+            if found == "found":
+                self.standing = {"pr": n, "head": head, "id": review_id}
+                append_jsonl(APPROVALS, {**row, "status": "confirmed", "review_id": review_id, "resumed": True,
+                                         "at": iso(self.now)}, durable=True)
+                self.step("approve", f"found on {head[:12]}")
+                return review_id
+            if cap_hit:
+                raise Stop("skipped", "approval-cap")
         token = self.mint_installation_token(creds, repo)
+        posted = confirmed = False
         try:
-            # Written before the post: an approval whose reply is lost still counts toward the cap and still stops a
-            # second one on this head.
+            # Written before the post: an approval whose reply is lost still counts toward the cap, and is looked up
+            # rather than repeated.
             append_jsonl(APPROVALS, {**row, "status": "attempted", "at": iso(self.now)}, durable=True)
             r = self.app_gh(["api", "-X", "POST", f"repos/{repo}/pulls/{n}/reviews", "-f", "event=APPROVE", "-f",
                              f"commit_id={head}", "-f", f"body={body}"], token)
             if not r.ok:
                 why = clean(r.err.splitlines()[0], 100) if r.err.strip() else "no reason given"
                 raise Stop("blocked", f"approval refused: {why}")
+            posted = True
+            self.standing = {"pr": n, "head": head, "id": None}
             try:
                 reply = json.loads(r.out)
             except ValueError:
                 reply = None
             if not (isinstance(reply, dict) and reply.get("commit_id") == head):
                 raise Stop("blocked", "approval not confirmed for this head")
+            review_id = reply.get("id") if isinstance(reply.get("id"), int) else None
+            self.standing["id"] = review_id
+            append_jsonl(APPROVALS, {**row, "status": "confirmed", "review_id": review_id, "at": iso(self.now)},
+                         durable=True)
+            confirmed = True
+        except Stop:
+            raise
+        except BaseException:
+            # A deadline or crash after the post went out: the approval exists, so say so.
+            if posted and not confirmed:
+                append_jsonl(APPROVALS, {**row, "status": "confirmed", "review_id": self.standing["id"],
+                                         "at": iso(self.now)}, durable=True)
+            raise
         finally:
             self.revoke_installation_token(token)
-        review_id = reply.get("id") if isinstance(reply.get("id"), int) else None
-        append_jsonl(APPROVALS, {**row, "status": "confirmed", "review_id": review_id, "at": iso(self.now)},
-                     durable=True)
         self.step("approve", f"submitted on {head[:12]}")
         return review_id
 
-    def withdraw(self, rc, n, head, review_id):
-        """Dismiss the App's own approval after the merge did not happen, so it cannot be merged on later by someone
-        who trusts the green check. Best effort and recorded either way."""
+    @staticmethod
+    def should_withdraw(e):
+        """Whether an approval that stands and was not merged on should be taken back after `e`. Yes when the head
+        changed or the host refused the merge for a lasting reason; yes for a deadline or anything unexpected, where
+        nothing is known; no for a pause, a cap or a refusal that may pass, where the next run merges on it."""
+        if isinstance(e, Stop):
+            if e.action == "merged":
+                return False
+            if e.reason.startswith("head moved"):
+                return True
+            return (e.action == "blocked" and e.reason.startswith("merge refused")
+                    and POLICY_REFUSAL.search(e.reason) is not None and TRANSIENT_REFUSAL.search(e.reason) is None)
+        return True
+
+    def withdraw(self, rc, n, head):
+        """Dismiss the App's own approval, so it cannot be merged on later by someone who trusts the green check.
+        Best effort and recorded either way."""
         repo, done = rc["name"], False
+        review_id = (self.standing or {}).get("id")
         try:
+            if review_id is None:
+                found, review_id = self.find_app_review(repo, n, head)
             creds = load_approver()
-            if creds["state"] == "ready":
+            if review_id is not None and creds["state"] == "ready":
                 token = self.mint_installation_token(creds, repo, retract=True)
                 try:
                     r = self.app_gh(["api", "-X", "PUT", f"repos/{repo}/pulls/{n}/reviews/{review_id}/dismissals",
@@ -2011,6 +2078,7 @@ class Captain:
         self.pending = d
         self.consumed = False
         self.recorded_lane = None
+        self.standing = None
         try:
             self.decide(rc, pr, mode, d)
         except Stop as s:
@@ -2099,19 +2167,14 @@ class Captain:
 
         if not self.live:
             raise Stop("would-merge", reason + ("; would approve as the App first" if needs_approval else ""))
-        review_id = None
-        if needs_approval:
-            review_id = self.approve(rc, n, head, tier, None if tier == "R0" else lane or self.recorded_lane,
-                                     reasons, details)
-            reason += "; approved by merge-captain-approver"
         try:
+            if needs_approval:
+                self.approve(rc, n, head, tier, None if tier == "R0" else lane or self.recorded_lane, reasons, details)
+                reason += "; approved by merge-captain-approver"
             self.merge(repo, n, head, d, reason, lane)
-        except Exception as e:
-            if needs_approval and not (isinstance(e, Stop) and e.action == "merged"):
-                if review_id is None:
-                    log(f"no review id to dismiss on {repo}#{n}")
-                else:
-                    self.withdraw(rc, n, head, review_id)
+        except BaseException as e:
+            if self.standing and self.should_withdraw(e):
+                self.withdraw(rc, n, head)
             raise
 
     def merge(self, repo, n, head, d, reason, lane):

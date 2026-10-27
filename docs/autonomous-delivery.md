@@ -23,7 +23,7 @@ the options considered and the data behind them are in
 | Tier | Merge gate | Human |
 |---|---|---|
 | R0 trivial | green CI | no |
-| R1 low | one agent review from another model family | no |
+| R1 low | one agent review, any family (another family when one is free) | no |
 | R2 medium | Sonnet-or-better review, bot findings resolved | no |
 | R3 critical | Opus review | interview before work, approval before merge |
 

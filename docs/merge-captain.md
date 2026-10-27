@@ -148,8 +148,9 @@ Actions runs API:
 - A failing push run is blame only with a green baseline: the same workflow passed on
   the base commit or, if it did not run there, on its latest push run on the default
   branch before the merge within 7 days. Red there is `preexisting-red`, none is
-  `no-baseline`; both are noted in the row and never blamed. A `workflow_run` release
-  or an `E2E` dispatch run that fails is blame as it stands.
+  `no-baseline`; both are noted in the row and never blamed. A failing rollout signal
+  (the `rollout_workflow` run, push-triggered or not, the `gitops` CI run, or the
+  `E2E` dispatch run) is blame as it stands, with no baseline.
 - `gitops`: if `dispatch-e2e` was skipped (nothing released) the row is live on CI
   alone. Otherwise the signal is the first `repository_dispatch` `health_check` run in
   the target created after that job finished, unless another release's
@@ -158,7 +159,9 @@ Actions runs API:
   is not checked.
 - A release workflow or delivery that never started (path-filtered, nothing to
   release) leaves the push checks as the signal once nothing has moved for 10 minutes;
-  a `ci-only` row with no eligible run at all by then is `no-signal`.
+  a `ci-only` row with no eligible run at all by then is `no-signal`. A `ci-only` row
+  waits for the same 10 quiet minutes before it closes `live`, so a check that starts
+  late can still fail it.
 
 States: `live` (the signal succeeded), `no-signal`, `suspect` (one blame failure),
 `failed` (two failures that are two signals: the same run failing again in a later
@@ -167,8 +170,11 @@ never counts twice, and two different checks failing on one push stay `suspect`)
 `unknown` (the window passed without a signal, or passed while paused). `suspect`
 stays open until the deadline so a second failure is still seen; the rest close.
 
-On `suspect` and on `failed` the original PR gets the `needs-human` label and one
-comment each, linking the failing runs. `unknown`, `live` and `no-signal` are only
+On `suspect` the original PR gets the `needs-human` label and one comment linking the
+failing runs; a row that later turns `failed` gets a second comment saying so, and no
+state is commented on twice. A comment or label GitHub refuses is tried again on the
+next runs, three times in all; then the row stops asking and the log says the alert was
+not delivered (a pause or the run deadline does not count as a try). `unknown`, `live` and `no-signal` are only
 logged. Log actions: `live`, `no-signal`, `rollout-suspect`, `rollout-failed`,
 `rollout-unknown`. The run prints a `rollouts` table for the rows it checked;
 `status` shows `rollouts` (the stage, each repository's kind, counts for the last 7

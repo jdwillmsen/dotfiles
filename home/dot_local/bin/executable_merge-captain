@@ -163,6 +163,7 @@ BASELINE_S = 7 * 24 * HOUR_S
 QUIET_S = 600
 DISPATCH_JOB = "dispatch-e2e"
 ALERT_STATES = ("suspect", "failed")
+MAX_ALERT_TRIES = 3
 ROLLOUT_ACTIONS = {"live": "live", "no-signal": "no-signal", "suspect": "rollout-suspect", "failed": "rollout-failed",
                    "unknown": "rollout-unknown"}
 
@@ -2392,14 +2393,21 @@ class Captain:
     # -- rollout verification (stage 1: observe and alert) --------------------
 
     def record_rollout(self, rc, d):
-        """Append a pending row for a merge this run made. Reads only, and never raises an Exception: the merge is
-        done and logged, and a row it could not complete is finished by the verification walk or closes unknown."""
+        """Append a pending row for a merge this run made, before any read, then again with the landed range. Never
+        raises an Exception: the merge is done and logged. A row cut short (an error, or the hard deadline after the
+        first line) has no head yet; the verification walk reads it later, or closes the row unknown."""
         repo, n = rc["name"], d["pr"]
         self.repo = repo
         row = {"repo": repo, "pr": n, "tier": d["tier"], "kind": rc["rollout"], "state": "pending",
                "merged_at": iso(self.now), "deadline": None, "head": None, "base": None, "commits": None,
                "fingerprint": "unknown", "failures": [], "alerted": [], "closed": False, "checked": None,
                "reason": "merged"}
+        row["deadline"] = iso(self.now + rc["rollout_window_m"] * 60)
+        try:
+            append_jsonl(ROLLOUTS, row, durable=True)
+        except OSError as e:
+            log(f"rollout row for {repo}#{n} not written: {e.strerror}")
+            return
         try:
             row.update(self.landed_range(repo, n))
         except (Stop, Refused) as e:
@@ -2579,10 +2587,13 @@ class Captain:
                 out["pending"] = True
             elif r.get("conclusion") == "success":
                 check_ok = True
+            elif r.get("conclusion") == "failure" and r["id"] in signal_ids:
+                # The rollout signal itself failed: blame as it stands, like any rollout signal.
+                failure(r, "rollout")
             elif r.get("conclusion") == "failure":
                 base = self.baseline(repo, r, row, default)
                 if base == "success":
-                    failure(r, "rollout" if r["id"] in signal_ids else "check")
+                    failure(r, "check")
                 else:
                     out["notes"].append(f"{'preexisting-red' if base else 'no-baseline'} {clean(r.get('name'), 40)}")
             # cancelled, timed_out, startup_failure, stale, skipped, neutral: runner trouble or nothing run, never blame
@@ -2621,7 +2632,8 @@ class Captain:
         elif quiet or kind == "ci-only":
             # ci-only, or a release or delivery that never started (path-filtered, nothing to release): the checks
             # on the landed head are all there is.
-            out["ok"] = check_ok
+            # Quiet first: a check that starts late must still be able to fail the row.
+            out["ok"] = check_ok and quiet
             out["none"] = not checks and quiet
         if out["pending"]:
             out["ok"] = out["none"] = False
@@ -2696,12 +2708,24 @@ class Captain:
         before = row.get("state")
         new = {**row, "failures": [f for f in row.get("failures") or [] if valid_failure(f)],
                "alerted": [a for a in row.get("alerted") or [] if a in ALERT_STATES]}
+        gave_up = False
         try:
             if not new.get("closed"):
                 self.judge_rollout(rc, new)
             if new["state"] in ALERT_STATES and new["state"] not in new["alerted"]:
-                self.rollout_alert(rc, new)
-                new["alerted"].append(new["state"])
+                try:
+                    self.rollout_alert(rc, new)
+                    new["alerted"].append(new["state"])
+                    new["alert_errors"] = 0
+                except Stop as s:
+                    # A pause or the run deadline is not the alert's fault; a refused write is, and is tried
+                    # MAX_ALERT_TRIES times before the row stops asking.
+                    if s.action == "error":
+                        new["alert_errors"] = (new.get("alert_errors") or 0) + 1
+                        if new["alert_errors"] >= MAX_ALERT_TRIES:
+                            new["alerted"].append(new["state"])
+                            gave_up = True
+                    raise
         except Stop as s:
             new["reason"] = clean(f"{new.get('reason') or ''}; not finished: {s.reason}".lstrip("; "), 160)
             # Signals that stay unreadable past the deadline must not keep a row open for ever.
@@ -2713,6 +2737,10 @@ class Captain:
             new["reason"] = f"internal: {type(e).__name__}"
         new["checked"] = iso(self.now)
         append_jsonl(ROLLOUTS, new, durable=True)
+        if gave_up:
+            self.write_log(run_id, {"repo": repo, "pr": new["pr"], "head": new.get("head"), "tier": new.get("tier"),
+                                    "action": ROLLOUT_ACTIONS[new["state"]], "mode": "live", "lane": None,
+                                    "reason": f"alert not delivered after {MAX_ALERT_TRIES} tries; given up"})
         if new["state"] != before and new["state"] in ROLLOUT_ACTIONS:
             self.write_log(run_id, {"repo": repo, "pr": new["pr"], "head": new.get("head"), "tier": new.get("tier"),
                                     "action": ROLLOUT_ACTIONS[new["state"]], "reason": new.get("reason") or "",
@@ -3119,6 +3147,7 @@ def cmd_status(args):
     runs = [r for r in read_log() if r.get("action") == "run"][-5:]
     out["last_runs"] = [{"at": r.get("at"), "result": r.get("reason")} for r in reversed(runs)]
     emit(out)
+    return 0
 
 
 def rollout_report(cfg, now):
@@ -3134,7 +3163,6 @@ def rollout_report(cfg, now):
                       for r in cfg["repos"]],
             "watch": [{"repo": r["repo"], "pr": r["pr"], "state": r["state"], "deadline": r.get("deadline") or "-",
                        "reason": clean(r.get("reason") or "", 100)} for r in shown]}
-    return 0
 
 
 def cmd_pause(args):

@@ -104,6 +104,78 @@ edit. The option only withholds: an insecure or expired token keeps its own
 `insecure-token-file` / `token-expired` row, and a repository without it behaves as
 before, on the default login.
 
+## Rollout verification (stage 1: observe)
+
+Design: `docs/superpowers/specs/2026-10-27-captain-rollback-design.md`. `[rollback]
+stage` is `0` (off, the shipped default: no row, no check, no alert) or `1` (observe).
+`2` and `3` (reverts) are not built: either runs as `1` and `status` warns. Stage 1
+never re-runs, reverts, freezes, dispatches or applies anything, and does not change
+how a pull request is merged. Turn it on with `stage = 1` in the chezmoi source and
+`chezmoi apply`; turn it off again with `stage = 0` or pause the captain.
+
+Each `[[repo]]` has `rollout` (default `none`):
+
+| Kind | Window | Signal on the landed head |
+|---|---|---|
+| `none` | - | none; the row closes `no-signal` |
+| `ci-only` | 30 min | its push checks on the default branch |
+| `release-workflow` | 60 min | the run of `rollout_workflow` (a file name, e.g. `semantic-release.yml`) |
+| `gitops` | 90 min | its CI run, then the `health_check` run in `rollout_target` (same owner) its `dispatch-e2e` job started |
+
+`rollout_window_m` overrides the window. A missing required key, or a key that does
+not go with the kind, is a config error. `[limits] max_verifies_per_run` (10) caps the
+rows checked per run; `max_reverts_per_day` is read but unused until stage 2.
+
+After each merge the captain appends a `pending` row to `rollouts.jsonl` (repo, PR,
+tier, kind, merged time, deadline, landed head and base, commit count, fingerprint).
+Rebase merge rewrites SHAs, so the landed head is the PR's `mergeCommit` and the base
+its ancestor N first-parent steps down (N the PR's commit count); the range's diff is
+compared with the PR's ignoring hunk positions and whitespace (`match`, `mismatch` or
+`unknown`; only the verdict is kept). Rows hold no diff text and no credential.
+
+Every non-dry run then checks the open rows of live repositories, least recently
+checked first, skipping rows merged in the last two minutes. Signals come from the
+Actions runs API:
+
+- Blame-eligible: a `push` run on the default branch for the landed head, the
+  `rollout_workflow` run, or the matched `health_check` run. Never: `schedule` or
+  `workflow_dispatch` runs (so a canary never counts), pull-request and other
+  `repository_dispatch` or `workflow_run` runs, and workflows named `codeql`,
+  `prd-drift`, `promote-prd`, `update-pages`, `model-audit` or `audit-admin-bypass`.
+  Only conclusion `failure` counts; `cancelled`, `timed_out`, `startup_failure` and
+  `stale` are never blame.
+- A failing push run is blame only with a green baseline: the same workflow passed on
+  the base commit or, if it did not run there, on its latest push run on the default
+  branch before the merge within 7 days. Red there is `preexisting-red`, none is
+  `no-baseline`; both are noted in the row and never blamed. A `workflow_run` release
+  or an `E2E` dispatch run that fails is blame as it stands.
+- `gitops`: if `dispatch-e2e` was skipped (nothing released) the row is live on CI
+  alone. Otherwise the signal is the first `repository_dispatch` `health_check` run in
+  the target created after that job finished, unless another release's
+  `dispatch-e2e` also finished before it was created; then there is no E2E signal and
+  the row ends `unknown`. The API does not show the dispatch type, so `apps-deployed`
+  is not checked.
+- A release workflow or delivery that never started (path-filtered, nothing to
+  release) leaves the push checks as the signal once nothing has moved for 10 minutes;
+  a `ci-only` row with no eligible run at all by then is `no-signal`.
+
+States: `live` (the signal succeeded), `no-signal`, `suspect` (one blame failure),
+`failed` (two failures that are two signals: the same run failing again in a later
+attempt, or a rollout signal failing in a run other than another failure's; one run
+never counts twice, and two different checks failing on one push stay `suspect`),
+`unknown` (the window passed without a signal, or passed while paused). `suspect`
+stays open until the deadline so a second failure is still seen; the rest close.
+
+On `suspect` and on `failed` the original PR gets the `needs-human` label and one
+comment each, linking the failing runs. `unknown`, `live` and `no-signal` are only
+logged. Log actions: `live`, `no-signal`, `rollout-suspect`, `rollout-failed`,
+`rollout-unknown`. The run prints a `rollouts` table for the rows it checked;
+`status` shows `rollouts` (the stage, each repository's kind, counts for the last 7
+days, and the rows still pending or alerting). The design's Jira ticket on an alert is
+not filed: the captain holds no Jira credential.
+
+`merge-captain pause` stops verification with everything else.
+
 ## Kill switch
 
 ```
@@ -386,6 +458,8 @@ Other files in the state directory, all written by the captain only:
   together with the ledgers (below).
 - `attempts.jsonl`: failed review calls, for the 6-hour backoff.
 - `human.jsonl`: which `needs-human` comments were posted, so each head gets one.
+- `rollouts.jsonl`: one line per rollout check, the last line per repo and PR is
+  the row's state (see "Rollout verification").
 - `rotation.json` and `examined.json`: the fair-rotation cursors and examination
   times above; each is replaced whole and kept 0600. Deleting either only resets the
   rotation.

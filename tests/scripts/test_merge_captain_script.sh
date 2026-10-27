@@ -204,6 +204,9 @@ if head2 == ["pr", "merge"]:
     if pr.get("reviewDecision") == "REVIEW_REQUIRED" and not counted:
         fail("Pull request is not mergeable: the base branch policy prohibits the merge.")
     pr["state"] = "MERGED"
+    # Rebase merge writes new commits, so the landed head is never the pull request's own head.
+    pr["mergeCommit"] = {"oid": (rd(f"landed_{n}") or f"{0xA000 + int(n):040x}").strip()}
+    pr["mergedAt"] = os.environ.get("MERGE_CAPTAIN_NOW")
     save_pr(n, pr)
     if rd("merge_then_fail") is not None:
         fail("error connecting to api.github.com")
@@ -304,6 +307,44 @@ if args[0] == "api" and "code-scanning" in args[1]:
     if v.strip() == "403":
         fail("gh: Advanced Security must be enabled for this repository to use code scanning. (HTTP 403)")
     say([{"number": i} for i in range(int(v))])
+if args[0] == "api" and "/compare/" in args[-1]:
+    # The landed range's diff; by default the pull request's own.
+    if rd("compare_fail") is not None:
+        fail("gh: Server Error (HTTP 500)")
+    sys.stdout.write(rd("compare.txt", rd("diff_1.txt", "diff --git a/x b/x\n+x\n")))
+    sys.exit(0)
+if args[0] == "api" and "/commits?" in args[-1]:
+    import urllib.parse
+    q = dict(urllib.parse.parse_qsl(args[-1].split("?", 1)[1]))
+    chain = jload("main.json", [])
+    if q["sha"] not in chain:
+        fail("gh: Not Found (HTTP 404)")
+    i = chain.index(q["sha"])
+    say([{"sha": c, "parents": [{"sha": chain[j + 1]}] if j + 1 < len(chain) else []}
+         for j, c in enumerate(chain) if i <= j < i + int(q["per_page"])])
+if args[0] == "api" and "/actions/" in args[-1]:
+    import urllib.parse
+    path, _, query = args[-1].partition("?")
+    q = dict(urllib.parse.parse_qsl(query))
+    parts = path.split("/")
+    repo = parts[1] + "/" + parts[2]
+    if rd("runs_fail") is not None:
+        fail("gh: Server Error (HTTP 500)")
+    runs = [r for r in jload("runs.json", []) if r["repo"] == repo]
+    if parts[4] == "runs" and len(parts) == 7 and parts[6] == "jobs":
+        say({"jobs": jload(f"jobs_{parts[5]}.json", [])})
+    if parts[4] == "runs" and len(parts) == 8 and parts[6] == "attempts":
+        a = jload(f"attempt_{parts[5]}_{parts[7]}.json", None)
+        if a is None:
+            fail("gh: Not Found (HTTP 404)")
+        say(a)
+    if parts[4] == "workflows":
+        runs = [r for r in runs if str(r["workflow_id"]) == parts[5]]
+    # loose_filters: answer as if the API ignored the event filter, so the captain's own check is what is tested.
+    keys = ("head_sha",) if rd("loose_filters") is not None else ("head_sha", "event")
+    sel = [r for r in runs if all(str(r.get(k)) == v for k, v in q.items() if k in keys)
+           and ("branch" not in q or r["head_branch"] == q["branch"])]
+    say({"total_count": len(sel), "workflow_runs": sorted(sel, key=lambda r: r["created_at"], reverse=True)})
 fail("stub gh: unhandled: " + " ".join(args))
 PY
 cat >"$bin/change-class" <<'PY'
@@ -453,6 +494,19 @@ elif cmd == "class":
     open(f"{S}/class_{n}.txt", "w").write(
         f"tier: {tier}\ntags[{len(tags)}]: {','.join(tags)}\nmerge: agent-review\nreviewer: review@x\nhuman: false\n"
         f"interview: false\nlabels[0]:\nreasons[{len(reasons)}]{{rule,tier,where}}:\n{rows}\nfiles: 1\nlines: 2\n")
+elif cmd == "run":
+    # One workflow run as the Actions API lists it; a later call with the same id replaces it.
+    kv = kvs(sys.argv[2:])
+    name = kv.get("name", "ci")
+    r = {"id": int(kv["id"]), "repo": kv.get("repo", "acme/live"), "name": name, "event": kv.get("event", "push"),
+         "path": ".github/workflows/" + kv.get("file", name + ".yml"), "head_sha": kv["sha"],
+         "head_branch": kv.get("branch", "main"), "status": kv.get("status", "completed"),
+         "conclusion": None if kv.get("status") == "in_progress" else kv.get("conclusion", "success"),
+         "run_attempt": int(kv.get("attempt", 1)), "workflow_id": int(kv.get("wid", 1)),
+         "created_at": kv.get("created", "2026-10-23T20:01:00Z"), "updated_at": kv.get("updated", "2026-10-23T20:05:00Z")}
+    p = f"{S}/runs.json"
+    runs = [x for x in (json.load(open(p)) if os.path.exists(p) else []) if x["id"] != r["id"]]
+    json.dump(runs + [r], open(p, "w"))
 elif cmd == "pace":
     k = sys.argv[2]
     kv = kvs(sys.argv[3:])
@@ -522,8 +576,11 @@ cfg() {  # limit overrides as key=value; LIVE_MAX sets the live repo's ceiling
         printf '[[repo]]\nname = "acme/live"\nmode = "live"\nmax_tier = "%s"\n' "${LIVE_MAX:-R2}"
         if [ -n "${ALLOW_NO_CHECKS:-}" ]; then echo 'allow_no_checks = true'; fi
         if [ -n "${APPROVER:-}" ]; then echo 'approver = true'; fi
+        if [ -n "${ROLLOUT:-}" ]; then printf 'rollout = "%s"\n' "$ROLLOUT"; fi
+        if [ -n "${ROLLOUT_KEYS:-}" ]; then printf '%s\n' "$ROLLOUT_KEYS"; fi
         printf '[[repo]]\nname = "acme/dry"\nmode = "dry-run"\nmax_tier = "R2"\n'
         printf '[[repo]]\nname = "acme/off"\nmode = "off"\nmax_tier = "R2"\n'
+        if [ -n "${STAGE:-}" ]; then printf '[rollback]\nstage = %s\n' "$STAGE"; fi
     } >"$CFG"
 }
 newcase() {
@@ -4235,6 +4292,411 @@ want 0 run
 expect 131 merged "approved by"
 grep -q 'contents/?ref=main' "$S/gh.log" || fail "the base tree was not listed" "$(cat "$S/gh.log")"
 
+# ── Rollout verification, stage 1: observe and alert, never revert ──
+LANDED="$(printf '%040x' $((0xA001)))"
+MID="$(printf '%040x' $((0xA100)))"
+BASE="$(printf '%040x' $((0xB000)))"
+OLDER="$(printf '%040x' $((0xB001)))"
+at() { NOW="2026-10-23T$1:00Z"; }
+roll_merge() {  # PR 1 (R0, two commits) merges at 20:00 and leaves the open list
+    at 20:00
+    fx pr 1 'commits=[{"oid":"c1"},{"oid":"c2"}]'
+    fx class 1 R0 tags=docs reasons=docs:R0:README.md
+    printf '["%s","%s","%s","%s"]' "$LANDED" "$MID" "$BASE" "$OLDER" >"$S/main.json"
+    want 0 run
+    expect 1 merged
+    echo '[]' >"$S/list_acme_live.json"
+}
+roll_case() {  # kind [extra repo keys]: stage 1 with acme/live of that kind, PR 1 merged at 20:00
+    ROLLOUT="$1" ROLLOUT_KEYS="${2:-}" STAGE=1 newcase
+    roll_merge
+}
+rq() {  # field: the latest rollout row of PR 1, as JSON
+    python3 -I -c 'import json, sys
+rows = [json.loads(line) for line in open(sys.argv[1])]
+print(json.dumps([r for r in rows if r["pr"] == 1][-1][sys.argv[2]]))' "$STATE/rollouts.jsonl" "$1"
+}
+rstate() { rq state | tr -d '"'; }
+verify() {  # HH:MM wanted-state: a run at that time leaves PR 1's row in that state
+    at "$1"
+    want 0 run
+    [ "$(rstate)" = "$2" ] || fail "rollout at $1 should be $2, is $(rstate): $(rq reason)" "$(cat "$out" "$STATE/rollouts.jsonl")"
+}
+alerts() { count '^pr comment 1 ' "$S/gh.log"; }
+labelled() { grep -q '^pr edit 1 --repo acme/live --add-label needs-human$' "$S/gh.log"; }
+quiet_rollout() {  # description: no label, no comment for PR 1 after its merge
+    [ "$(alerts)" = 0 ] || fail "$1 commented" "$(cat "$S/gh.log")"
+    if labelled; then fail "$1 labelled needs-human"; fi
+}
+no_revert() {  # description: stage 1 only ever labels and comments, and keeps no freeze or revert ledger
+    if writes | grep -vqE '^(pr edit [0-9]+ --repo acme/live --add-label [^ ]+( --add-label [^ ]+)*|pr comment 1 --repo acme/live --body-file -|label create [^ ]+ --repo acme/live .*|pr merge 1 --repo acme/live --rebase --match-head-commit [0-9a-f]{40})$'; then
+        fail "$1 made a write stage 1 does not make" "$(writes)"
+    fi
+    if grep -qE 'rerun|dispatches|pr create|pr close|^api -X' "$S/gh.log"; then fail "$1 re-ran, dispatched or opened something" "$(cat "$S/gh.log")"; fi
+    [ ! -e "$STATE/frozen.json" ] && [ ! -e "$STATE/reverts.jsonl" ] || fail "$1 wrote a freeze or revert ledger"
+}
+green_base() {  # workflow id: it passed on the base commit
+    fx run id=$((900 + $1)) sha="$BASE" wid="$1" name="w$1" created=2026-10-23T19:30:00Z
+}
+
+# Stage 0 (the default) records nothing, checks nothing and merges exactly as before.
+ROLLOUT=ci-only newcase
+roll_merge
+stage0_writes="$(writes)"
+[ ! -e "$STATE/rollouts.jsonl" ] || fail "stage 0 wrote a rollout row" "$(cat "$STATE/rollouts.jsonl")"
+fx run id=11 sha="$LANDED" conclusion=failure
+green_base 1
+at 20:20
+want 0 run
+[ ! -e "$STATE/rollouts.jsonl" ] || fail "stage 0 wrote a rollout row on a later run"
+if grep -qE 'actions/|compare/|commits\?' "$S/gh.log"; then fail "stage 0 read rollout signals" "$(cat "$S/gh.log")"; fi
+grep -q '^rollouts' "$out" && fail "stage 0 reported rollouts" "$(cat "$out")"
+quiet_rollout "stage 0"
+want 0 status
+grep -qx '  stage: 0' "$out" && grep -qx '  stage_running: 0' "$out" || fail "status must show stage 0" "$(cat "$out")"
+
+# A row left from stage 1 is not checked once the stage is back to 0.
+roll_case ci-only
+fx run id=11 sha="$LANDED" conclusion=failure
+green_base 1
+ROLLOUT=ci-only STAGE=0 cfg
+at 20:20
+want 0 run
+[ "$(rstate)" = pending ] && [ "$(wc -l <"$STATE/rollouts.jsonl")" = 1 ] || fail "stage 0 touched a stage-1 row" "$(cat "$STATE/rollouts.jsonl")"
+grep -q 'actions/' "$S/gh.log" && fail "stage 0 read rollout signals for an old row" "$(cat "$S/gh.log")"
+quiet_rollout "stage 0 with an old row"
+
+# Stage 1 merges exactly as stage 0 does; the row is written after the merge, never instead of it.
+roll_case ci-only
+[ "$(writes)" = "$stage0_writes" ] || fail "stage 1 changed the merge's writes" "$(writes)"
+[ "$(rq state)" = '"pending"' ] && [ "$(rq kind)" = '"ci-only"' ] && [ "$(rq tier)" = '"R0"' ] || fail "pending row" "$(cat "$STATE/rollouts.jsonl")"
+[ "$(rq deadline)" = '"2026-10-23T20:30:00Z"' ] || fail "ci-only window is 30 minutes" "$(rq deadline)"
+grep -q '"action": "merged"' "$STATE/log.jsonl" || fail "the merge was not logged"
+no_revert "a stage-1 merge"
+
+# Dry-run records nothing, at stage 1 too, and neither does a dry-run repository.
+ROLLOUT=ci-only STAGE=1 newcase
+fx pr 1
+fx class 1 R0
+fx pr 2 repo=acme/dry
+fx class 2 R0
+want 0 run --dry-run
+expect 1 would-merge
+expect 2 would-merge
+echo '[]' >"$S/list_acme_live.json"
+want 0 run
+expect 2 would-merge
+[ ! -e "$STATE/rollouts.jsonl" ] || fail "a dry run wrote a rollout row" "$(cat "$STATE/rollouts.jsonl")"
+
+# The landed range is read from main after the rebase merge, and hunk positions do not change its fingerprint.
+ROLLOUT=ci-only STAGE=1 newcase
+printf 'diff --git a/x b/x\nindex 1..2 100644\n--- a/x\n+++ b/x\n@@ -1,2 +1,3 @@\n ctx\n+x\n' >"$S/diff_1.txt"
+printf 'diff --git a/x b/x\nindex 7..8 100644\n--- a/x\n+++ b/x\n@@ -40,2 +41,3 @@\n ctx\n+x\n' >"$S/compare.txt"
+roll_merge
+[ "$(rq head)" = "\"$LANDED\"" ] && [ "$(rq base)" = "\"$BASE\"" ] && [ "$(rq commits)" = 2 ] ||
+    fail "landed range" "$(cat "$STATE/rollouts.jsonl")"
+[ "$(rq fingerprint)" = '"match"' ] || fail "a rebased range with moved hunks must match" "$(rq fingerprint)"
+grep -qF "compare/$BASE...$LANDED" "$S/gh.log" || fail "the range diff was not read from main" "$(cat "$S/gh.log")"
+grep -qE 'testsecretvalue|diff --git|ctx|\+x' "$STATE/rollouts.jsonl" && fail "a rollout row holds a token or diff text" "$(cat "$STATE/rollouts.jsonl")"
+# A range whose diff differs is recorded as a mismatch, and a failure on it still only alerts.
+ROLLOUT=ci-only STAGE=1 newcase
+printf 'diff --git a/x b/x\n+y\n' >"$S/compare.txt"
+roll_merge
+[ "$(rq fingerprint)" = '"mismatch"' ] || fail "a different range must be a mismatch" "$(rq fingerprint)"
+fx run id=11 sha="$LANDED" conclusion=failure
+green_base 1
+verify 20:10 suspect
+no_revert "a fingerprint mismatch"
+# A chain that is not first-parent linked gives no base and no fingerprint, never a guess.
+ROLLOUT=ci-only STAGE=1 newcase
+at 20:00
+fx pr 1 'commits=[{"oid":"c1"},{"oid":"c2"}]'
+fx class 1 R0
+printf '["%s","%s"]' "$LANDED" "$BASE" >"$S/main.json"
+want 0 run
+expect 1 merged
+[ "$(rq base)" = null ] && [ "$(rq fingerprint)" = '"unknown"' ] || fail "a short chain must leave the range unknown" "$(cat "$STATE/rollouts.jsonl")"
+
+# ci-only: live on its push checks; logged, no label, no comment.
+roll_case ci-only
+fx run id=11 sha="$LANDED"
+verify 20:20 live
+grep -q '"action": "live"' "$STATE/log.jsonl" || fail "live not logged"
+grep -qE '^rollouts\[1\]\{repo,pr,state,reason\}:$' "$out" && grep -qE '^  acme/live,1,live,' "$out" || fail "run output lacks the rollout" "$(cat "$out")"
+quiet_rollout "a live rollout"
+at 20:40
+want 0 run
+[ "$(grep -c '"action": "live"' "$STATE/log.jsonl")" = 1 ] || fail "a closed row was checked again"
+# A row merged in the last two minutes is left for the next run.
+roll_case ci-only
+fx run id=11 sha="$LANDED"
+verify 20:01 pending
+grep -q 'actions/' "$S/gh.log" && fail "a row merged a minute ago was checked" "$(cat "$S/gh.log")"
+# Still running at the deadline: unknown, logged only.
+roll_case ci-only
+fx run id=11 sha="$LANDED" status=in_progress
+verify 20:20 pending
+verify 20:31 unknown
+grep -q '"action": "rollout-unknown"' "$STATE/log.jsonl" || fail "unknown not logged"
+quiet_rollout "an unknown rollout"
+want 0 status
+grep -qE '^    unknown: 1$' "$out" || fail "status should count the unknown row" "$(cat "$out")"
+# Runs that cannot be read leave the row pending, and unknown once its window has passed.
+roll_case ci-only
+echo x >"$S/runs_fail"
+verify 20:20 pending
+rq reason | grep -q 'workflow runs unavailable' || fail "unreadable runs not noted" "$(rq reason)"
+verify 20:31 unknown
+quiet_rollout "unreadable runs"
+# No run at all (a path-filtered workflow the range did not trigger): no-signal once things are quiet.
+roll_case ci-only
+verify 20:05 pending
+verify 20:11 no-signal
+grep -q '"action": "no-signal"' "$STATE/log.jsonl" || fail "no-signal not logged"
+quiet_rollout "a no-signal rollout"
+# rollout = none closes as no-signal without a single signal read.
+roll_case none
+verify 20:10 no-signal
+grep -q 'actions/' "$S/gh.log" && fail "rollout none read workflow runs" "$(cat "$S/gh.log")"
+
+# Never blame: schedule, dispatch, the named workflows and runner trouble, each with a green baseline.
+roll_case ci-only
+fx run id=11 sha="$LANDED" wid=1 name=ci
+k=2
+for spec in "event=schedule" "event=workflow_dispatch" "name=CodeQL" "name=prd-drift" "name=x file=promote-prd.yml" \
+    "name=update-pages" "name=model-audit" "name=audit-admin-bypass" "conclusion=cancelled" "conclusion=timed_out" \
+    "conclusion=startup_failure" "conclusion=stale" "event=pull_request" "event=workflow_run" "event=repository_dispatch"; do
+    # shellcheck disable=SC2086  # each spec is several fixture words
+    fx run id=$((20 + k)) sha="$LANDED" wid="$k" conclusion=failure $spec
+    green_base "$k"
+    k=$((k + 1))
+done
+verify 20:20 live
+quiet_rollout "never-blame runs"
+
+# The baseline decides whether a failure is blame.
+roll_case ci-only
+fx run id=11 sha="$LANDED" conclusion=failure name=ci
+green_base 1
+verify 20:10 suspect
+labelled || fail "a suspect rollout must label needs-human" "$(cat "$S/gh.log")"
+[ "$(alerts)" = 1 ] || fail "a suspect rollout must comment once" "$(cat "$S/gh.log")"
+grep -q 'merge-captain:rollout sha='"$LANDED"' state=suspect' "$S/posted_1.txt" && grep -q 'actions/runs/11' "$S/posted_1.txt" ||
+    fail "suspect comment" "$(cat "$S/posted_1.txt")"
+grep -q '"action": "rollout-suspect"' "$STATE/log.jsonl" || fail "suspect not logged"
+verify 20:20 suspect
+[ "$(alerts)" = 1 ] || fail "a suspect rollout was commented on twice"
+verify 20:31 suspect
+[ "$(rq closed)" = true ] || fail "a suspect row closes at its deadline"
+want 0 status
+grep -qE '^    acme/live,1,suspect,' "$out" || fail "status must list the suspect rollout" "$(cat "$out")"
+no_revert "a suspect rollout"
+# Red on the base too: preexisting-red, never blamed.
+roll_case ci-only
+fx run id=11 sha="$LANDED" conclusion=failure
+fx run id=901 sha="$BASE" wid=1 conclusion=failure created=2026-10-23T19:30:00Z
+verify 20:20 pending
+rq reason | grep -q 'preexisting-red' || fail "preexisting red not noted" "$(rq reason)"
+verify 20:31 unknown
+quiet_rollout "a preexisting red"
+# The base never ran it: the latest earlier run on main is the baseline.
+roll_case ci-only
+fx run id=11 sha="$LANDED" conclusion=failure
+fx run id=901 sha="$OLDER" wid=1 created=2026-10-23T19:00:00Z
+fx run id=902 sha="$OLDER" wid=1 conclusion=failure created=2026-10-23T18:00:00Z
+verify 20:10 suspect
+grep -q 'workflows/1/runs?branch=main&event=push' "$S/gh.log" || fail "the earlier run was not looked up" "$(cat "$S/gh.log")"
+roll_case ci-only
+fx run id=11 sha="$LANDED" conclusion=failure
+fx run id=901 sha="$OLDER" wid=1 conclusion=failure created=2026-10-23T19:00:00Z
+fx run id=902 sha="$OLDER" wid=1 created=2026-10-23T18:00:00Z
+verify 20:10 pending
+# Older than seven days is no baseline.
+roll_case ci-only
+fx run id=11 sha="$LANDED" conclusion=failure
+fx run id=901 sha="$OLDER" wid=1 created=2026-10-15T19:00:00Z
+verify 20:10 pending
+rq reason | grep -q 'no-baseline' || fail "no baseline not noted" "$(rq reason)"
+quiet_rollout "a failure with no baseline"
+
+# failed takes two failures from different runs: a later attempt of the suspect check, seen as it happens ...
+roll_case ci-only
+fx run id=11 sha="$LANDED" conclusion=failure
+green_base 1
+verify 20:10 suspect
+fx run id=11 sha="$LANDED" conclusion=failure attempt=2 updated=2026-10-23T20:12:00Z
+verify 20:15 failed
+[ "$(alerts)" = 2 ] || fail "failed must add one comment of its own" "$(cat "$S/gh.log")"
+grep -q 'state=failed' "$S/posted_1.txt" || fail "failed comment" "$(cat "$S/posted_1.txt")"
+grep -q '"action": "rollout-failed"' "$STATE/log.jsonl" || fail "failed not logged"
+no_revert "a failed rollout"
+# ... or both attempts already over when first looked at.
+roll_case ci-only
+fx run id=11 sha="$LANDED" conclusion=failure attempt=2
+echo '{"id": 11, "status": "completed", "conclusion": "failure", "run_attempt": 1}' >"$S/attempt_11_1.json"
+green_base 1
+verify 20:10 failed
+# A re-run that passed is one failure.
+roll_case ci-only
+fx run id=11 sha="$LANDED" conclusion=failure attempt=2
+echo '{"id": 11, "status": "completed", "conclusion": "success", "run_attempt": 1}' >"$S/attempt_11_1.json"
+green_base 1
+verify 20:10 suspect
+# Two different checks failing on one push are one failure of one change: suspect, never failed.
+roll_case ci-only
+fx run id=11 sha="$LANDED" conclusion=failure wid=1 name=lint
+fx run id=12 sha="$LANDED" conclusion=failure wid=2 name=test
+green_base 1
+green_base 2
+verify 20:10 suspect
+verify 20:31 suspect
+[ "$(alerts)" = 1 ] || fail "two checks of one push alerted twice"
+
+# release-workflow: the release run for the landed head is the signal; a 60-minute window.
+REL='rollout_workflow = "semantic-release.yml"'
+roll_case release-workflow "$REL"
+[ "$(rq deadline)" = '"2026-10-23T21:00:00Z"' ] || fail "release window is 60 minutes" "$(rq deadline)"
+fx run id=11 sha="$LANDED"
+fx run id=12 sha="$LANDED" event=workflow_run name=release file=semantic-release.yml wid=2
+verify 20:10 live
+roll_case release-workflow "$REL"
+fx run id=11 sha="$LANDED" conclusion=failure
+green_base 1
+fx run id=12 sha="$LANDED" event=workflow_run name=release file=semantic-release.yml wid=2 conclusion=failure
+verify 20:10 failed
+no_revert "a failed release"
+# The release still running at the deadline: unknown.
+roll_case release-workflow "$REL"
+fx run id=11 sha="$LANDED"
+fx run id=12 sha="$LANDED" event=workflow_run name=release file=semantic-release.yml wid=2 status=in_progress
+verify 20:30 pending
+verify 21:00 unknown
+quiet_rollout "an unfinished release"
+# A release started by hand is never the signal; with the release absent, the push checks speak once things are quiet.
+roll_case release-workflow "$REL"
+fx run id=11 sha="$LANDED"
+fx run id=12 sha="$LANDED" event=workflow_dispatch name=release file=semantic-release.yml wid=2 conclusion=failure
+verify 20:10 pending
+verify 20:20 live
+quiet_rollout "a hand-started release"
+# A push-triggered release that fails is the suspect check and the rollout signal at once: one signal, suspect.
+roll_case release-workflow 'rollout_workflow = "release.yaml"'
+fx run id=12 sha="$LANDED" name=release file=release.yaml wid=2 conclusion=failure
+green_base 2
+verify 20:10 suspect
+verify 21:00 suspect
+[ "$(alerts)" = 1 ] || fail "one release run counted twice"
+
+# gitops: the landed head's CI run, then the E2E run its dispatch started in the target.
+GIT=$'rollout_target = "acme/deploy"\nhealth_check = "E2E"'
+dispatch() {  # run id, conclusion, completed (HH:MM:SS)
+    printf '[{"name":"build","conclusion":"success","completed_at":"2026-10-23T20:03:00Z"},{"name":"dispatch-e2e","conclusion":"%s","completed_at":"2026-10-23T%sZ"}]' "$2" "$3" >"$S/jobs_$1.json"
+}
+roll_case gitops "$GIT"
+[ "$(rq deadline)" = '"2026-10-23T21:30:00Z"' ] || fail "gitops window is 90 minutes" "$(rq deadline)"
+fx run id=11 sha="$LANDED" name=CI
+dispatch 11 skipped 20:05:00
+verify 20:10 live
+rq reason | grep -q 'released nothing' || fail "live on CI alone should say so" "$(rq reason)"
+grep -q 'acme/deploy' "$S/gh.log" && fail "a release that dispatched nothing looked at the target" "$(cat "$S/gh.log")"
+# The repository_dispatch E2E run counts; a workflow_dispatch canary never does.
+roll_case gitops "$GIT"
+fx run id=11 sha="$LANDED" name=CI
+dispatch 11 success 20:05:00
+verify 20:10 pending
+echo x >"$S/loose_filters"
+fx run id=50 repo=acme/deploy sha="$OLDER" event=workflow_dispatch name=E2E conclusion=failure created=2026-10-23T20:05:30Z
+fx run id=51 repo=acme/deploy sha="$OLDER" event=repository_dispatch name=E2E created=2026-10-23T20:06:00Z
+verify 20:20 live
+quiet_rollout "a canary failure"
+# The E2E run failing is the rollout signal failing: suspect.
+roll_case gitops "$GIT"
+fx run id=11 sha="$LANDED" name=CI
+dispatch 11 success 20:05:00
+fx run id=49 repo=acme/deploy sha="$OLDER" event=repository_dispatch name=E2E created=2026-10-23T19:00:00Z
+fx run id=51 repo=acme/deploy sha="$OLDER" event=repository_dispatch name=E2E conclusion=failure created=2026-10-23T20:06:00Z
+verify 20:20 suspect
+grep -q 'acme/deploy/actions/runs/51' "$S/posted_1.txt" || fail "the E2E run is not linked" "$(cat "$S/posted_1.txt")"
+# ... and with another push check failing in its own run, failed.
+roll_case gitops "$GIT"
+fx run id=11 sha="$LANDED" name=CI
+fx run id=12 sha="$LANDED" name=lint wid=2 conclusion=failure
+green_base 2
+dispatch 11 success 20:05:00
+fx run id=51 repo=acme/deploy sha="$OLDER" event=repository_dispatch name=E2E conclusion=failure created=2026-10-23T20:06:00Z
+verify 20:20 failed
+no_revert "a failed gitops rollout"
+# Another release's dispatch finished before the E2E run was created: no E2E signal rather than another merge's.
+roll_case gitops "$GIT"
+fx run id=11 sha="$LANDED" name=CI
+dispatch 11 success 20:05:00
+fx run id=13 sha="$MID" name=CI created=2026-10-23T20:02:00Z updated=2026-10-23T20:05:40Z
+dispatch 13 success 20:05:30
+fx run id=51 repo=acme/deploy sha="$OLDER" event=repository_dispatch name=E2E conclusion=failure created=2026-10-23T20:06:00Z
+verify 20:20 pending
+rq reason | grep -q 'overlapping release' || fail "the overlap was not noted" "$(rq reason)"
+verify 21:30 unknown
+quiet_rollout "an overlapping release"
+# The CI run failing is the suspect check and the rollout signal at once: suspect, not failed.
+roll_case gitops "$GIT"
+fx run id=11 sha="$LANDED" name=CI conclusion=failure
+dispatch 11 skipped 20:05:00
+green_base 1
+verify 20:10 suspect
+verify 21:30 suspect
+
+# Pause stops verification; a window that passes during a pause closes unknown.
+roll_case ci-only
+fx run id=11 sha="$LANDED" conclusion=failure
+green_base 1
+want 0 pause --reason test
+at 20:20
+want 0 run
+at 20:35
+want 0 run
+grep -q 'actions/' "$S/gh.log" && fail "a paused run read rollout signals" "$(cat "$S/gh.log")"
+want 0 resume
+verify 20:45 unknown
+rq reason | grep -q 'during a pause' || fail "pause reason" "$(rq reason)"
+quiet_rollout "a window that passed during a pause"
+
+# max_verifies_per_run: least recently checked first, the rest wait.
+ROLLOUT=ci-only STAGE=1 newcase max_verifies_per_run=1
+at 20:00
+for n in 1 2; do
+    fx pr "$n"
+    fx class "$n" R0
+    fx run id=$((10 + n)) sha="$(printf '%040x' $((0xA000 + n)))"
+done
+want 0 run
+echo '[]' >"$S/list_acme_live.json"
+at 20:10
+want 0 run
+grep -qE '^rollouts\[1\]' "$out" || fail "max_verifies_per_run=1 checked more than one row" "$(cat "$out")"
+at 20:20
+want 0 run
+grep -qE '^rollouts\[1\]' "$out" && grep -qE '^  acme/live,2,live,' "$out" || fail "the second row did not get its turn" "$(cat "$out")"
+
+# Config: a kind's required keys, and keys that do not belong to it.
+for bad in 'rollout = "canary"' 'rollout = "release-workflow"' 'rollout = "gitops"' \
+    $'rollout = "gitops"\nrollout_target = "other/deploy"\nhealth_check = "E2E"' \
+    $'rollout = "gitops"\nrollout_target = "acme/deploy"' 'rollout_workflow = "x.yml"' \
+    $'rollout = "ci-only"\nhealth_check = "E2E"' 'rollout_window_m = 0'; do
+    ROLLOUT_KEYS="$bad" newcase
+    want 1 status
+    grep -q '^error:' "$out" || fail "bad rollout config ($bad) is not an error" "$(cat "$out")"
+done
+for bad in 4 true '"1"'; do
+    STAGE="$bad" newcase
+    want 1 status
+    grep -q 'stage must be one of' "$out" || fail "bad stage ($bad) is not an error" "$(cat "$out")"
+done
+STAGE=3 newcase
+want 0 status
+grep -qx '  stage: 3' "$out" && grep -qx '  stage_running: 1' "$out" && grep -q 'stage 3 is not built yet' "$out" ||
+    fail "an unbuilt stage must run as stage 1 and say so" "$(cat "$out")"
+NOW="2026-10-23T20:00:00Z"
+
 # ── Global: nothing, in any case above, ever asked for a bypass or another merge style ──
 cat "$S/gh.log" >>"$tmp/all_gh.log"
 grep -qE -- '--admin|--squash|--delete-branch|--auto|pr merge .* -[dsm]( |$)| --merge( |$)' "$tmp/all_gh.log" &&
@@ -4244,6 +4706,10 @@ if grep '^pr merge' "$tmp/all_gh.log" | grep -vqE '^pr merge [0-9]+ --repo [^ ]+
 fi
 
 # A run outlasts the JWT lifetime, so each token exchange must be signed with the clock now, never the run's start.
+# Rollout verification only observes: it never re-runs, dispatches or applies anything.
+grep -qE 'rerun|/dispatches' "$tmp/all_gh.log" && fail "a gh call re-ran or dispatched a workflow"
+grep -qE '"chezmoi",' "$tool" && fail "merge-captain runs chezmoi"
+
 if grep -q 'app_jwt(creds, self\.now)' "$tool"; then
     fail "the App JWT is signed with the run's start time" "app_jwt(creds, self.now) found"
 fi

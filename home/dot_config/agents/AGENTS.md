@@ -99,7 +99,7 @@ unsure, classify up. Put the result on the PR and ticket as labels
 | Tier | Examples | Review before merge | Human |
 |---|---|---|---|
 | R0 | docs, tests, comments | green CI | no |
-| R1 | ordinary code, dependencies | one agent reviewer of another model family | no |
+| R1 | ordinary code, dependencies | one agent reviewer, any family (another family when one is free) | no |
 | R2 | CI, deploy config, non-prd rollout, very large diffs | Sonnet-or-better reviewer, bot findings resolved | no |
 | R3 | prd, infra apply, auth and secrets, data and migrations, network, these rules, governance, game servers | Opus reviewer | **interview before work starts; approval before merge** |
 

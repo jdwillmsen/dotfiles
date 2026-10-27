@@ -30,13 +30,17 @@ From each repository's workflow triggers on 2026-10-27:
 | `none` | `fwb-minecraft` (no workflows) | none; the row closes as `no-signal`, logged only |
 | `ci-only` | `dotfiles` (`ci`), `career` (`check`), `jdw-deployments` (`ci`), `jdwlabs/deployments` (`ci`), `jdwlabs/infrastructure` (path-filtered `terraform`, `bootstrap`, `extension-image`, plus `security-scan`), `jdwlabs/platform` (`validate`), `dotablaze-tech/apps` (`ci`) | blame-eligible checks on the landed head |
 | `release-workflow` | `gameops` (`semantic-release.yml`), `countdown-app` (`release.yml`), both `workflow_run` after CI on `main`; `dotablaze-tech/deployments` (`release.yaml`, push to `main` under `charts/**`) | that workflow's run for the landed head |
-| `gitops` | `jdwlabs/apps` → `jdwlabs/deployments`, `health_check = "E2E"` | the landed head's CI run (it releases and delivers), then the first `E2E` run in the target created after it |
+| `gitops` | `jdwlabs/apps` → `jdwlabs/deployments`, `health_check = "E2E"` | the landed head's CI run (it releases and delivers), then the `E2E` run its `dispatch-e2e` job started in the target (below) |
 
 The `release.yml` tag-push workflows elsewhere never run on a merge and are not used.
 A path-filtered workflow that the range does not trigger, or a push that skips
 `security-scan` (docs only), is no signal; a `ci-only` row with no blame-eligible check
 at all closes as `no-signal`. If `jdwlabs/apps` CI released nothing (its
-`dispatch-e2e` job skipped), the row is `live` on CI alone. Dotfiles has no apply timer,
+`dispatch-e2e` job skipped), the row is `live` on CI alone. Otherwise its `E2E` run is
+the first one in `jdwlabs/deployments` with event `repository_dispatch` (`apps-deployed`)
+created after that job finished, and only if no other `jdwlabs/apps` CI run's
+`dispatch-e2e` finished before it was created; when two releases overlap like that, the
+row gets no `E2E` signal rather than another merge's. Dotfiles has no apply timer,
 so `ci-only` is all it can show; an apply timer is a separate, later R3. The captain
 never runs `chezmoi apply`, applies infrastructure or touches a cluster, and does not
 verify prd: Argo CD or cluster health is a later R3.
@@ -51,9 +55,11 @@ diff must match the PR diff's fingerprint (per-file hunks without line numbers, 
 ## Signals and row states
 
 Blame-eligible: a check run triggered by `push` to `main` for the landed head, or the
-repo's own `rollout_workflow` / `health_check`. Never: `schedule`, `workflow_dispatch`,
-other `repository_dispatch` or `workflow_run` runs, and by name `codeql` (schedule),
-`prd-drift`, `promote-prd`, `update-pages`, `model-audit`, `audit-admin-bypass`. Only
+repo's own `rollout_workflow` run for the landed head, or the `health_check` run matched
+above. Never, and this wins over the previous sentence: `schedule` and
+`workflow_dispatch` runs (so an `E2E` canary never counts), other `repository_dispatch`
+or `workflow_run` runs, and by name `codeql` (schedule), `prd-drift`, `promote-prd`,
+`update-pages`, `model-audit`, `audit-admin-bypass`. Only
 conclusion `failure` counts; `cancelled`, `timed_out`, `startup_failure` and `stale` are
 runner trouble, never blame.
 
@@ -66,10 +72,12 @@ Each run moves pending rows (up to `max_verifies_per_run`) to:
 - `live`: the kind's signal succeeded. `no-signal`: nothing to watch.
 - `suspect`: one blame-eligible check failed with a green baseline, or the rollout
   signal failed. Alert.
-- `failed`: a suspect check with a green baseline that also failed a second time on the
-  same head (a re-run someone else started), or a suspect check plus a failed rollout
-  signal. The captain never re-runs anything. Alert; only `failed` may revert or count
-  toward a freeze.
+- `failed`: two failures from different workflow runs for the same landed head: the
+  suspect check failing again in a later attempt (a re-run someone else started), or the
+  rollout signal failing in a run other than the suspect check's. One run never counts
+  twice: when the `gitops` CI run or a `release-workflow` run is itself the suspect
+  check, its failure is one signal, not two. The captain never re-runs anything. Alert;
+  only `failed` may revert or count toward a freeze.
 - `unknown`: window passed without a signal, or it passed during a pause. Logged only:
   no label, no comment.
 - `awaiting-human`: a revert that the rules leave to the owner (below).
@@ -115,8 +123,9 @@ a lasting reason (policy, required check, conflict).
 - `jdwlabs/apps`, `jdwlabs/infrastructure`, `jdwlabs/platform` require an approving
   review, so the revert is authored by `jdwlabs-agent-bot` and the owner can approve it.
   Their CODEOWNERS files make most reverts `needs-human` anyway: `apps` and
-  `infrastructure` have a catch-all `*` line and `platform` owns `.github/`, `tools/`,
-  `bootstrap/`, `tenants/platform/` and `renovate.json`; the approver refuses those.
+  `infrastructure` have a catch-all `*` line and `platform` owns many paths. The
+  approver refuses those, reading the CODEOWNERS file live from the base branch each
+  time, so no list here can go stale.
 - `jdwlabs/deployments` and the `jdwillmsen/*` and `dotablaze-tech/*` repos require no
   approving review, so the owner's per-owner token (`auth`) authors it, as `jdwillmsen`.
   An R3 revert there is approved the AGENTS.md way (the owner merges it or names it in
@@ -174,7 +183,10 @@ at its deadline, and `unknown` writes no label or comment; path-filtered and ski
 workflows give no signal; schedule, dispatch and the named workflows are never blamed;
 `cancelled` and `timed_out` are never blame; baseline taken from the latest earlier run
 when the base has none; one failure is `suspect`, the second-attempt and rollout-signal
-cases are `failed`; no `chezmoi apply`, no re-run; stage 1 opens no revert, writes no
+cases are `failed`; a single failed `gitops` CI or `release-workflow` run that is both
+the suspect check and the rollout signal stays `suspect`; only the `repository_dispatch`
+`E2E` run for this release counts, never a `workflow_dispatch` canary or an overlapping
+release's run; no `chezmoi apply`, no re-run; stage 1 opens no revert, writes no
 freeze and changes no merge; no token or diff text in any row.
 
 Before stage 2: a `createCommitOnBranch` commit made with each owner's fine-grained token
@@ -202,8 +214,8 @@ session; daily cap, pause and each stage hold.
    no automatic re-runs.
 5. Windows: CI 30 min, releases 60, GitOps 90.
 6. Alerts: `needs-human` label plus a `jira-followup` ticket in the repo's own Jira
-   project, not `OPS`. Proposed amendment, awaiting the owner: stage 1 has no Jira
-   ticket (see "Alert, stage 1").
+   project, not `OPS`. Amended: stage 1 files no Jira ticket (see "Alert, stage 1").
+   The owner's approval of this PR is also approval of this amendment.
 7. Freeze a repository after 2 failed rollouts in 24 hours; only the owner lifts it.
 8. Stage 1 (observe only) is built first and runs 1–2 weeks; stages 2 and 3 each need
    the owner's go-ahead.

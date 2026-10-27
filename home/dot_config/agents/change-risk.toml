@@ -12,7 +12,7 @@ interview = false
 [tiers.R1]
 name = "low"
 merge = "agent-review"
-reviewer = "review@other-family"
+reviewer = "review@any-family"
 human = false
 interview = false
 

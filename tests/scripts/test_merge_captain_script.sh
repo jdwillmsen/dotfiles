@@ -690,6 +690,21 @@ for r in jdwillmsen/gameops jdwillmsen/jdw-deployments jdwillmsen/fwb-minecraft 
     jdwillmsen/countdown-app jdwillmsen/dotfiles; do
     if grep -qE "^  $r,yes," "$out"; then fail "$r must not require a token"; fi
 done
+grep -qx '  stage: 0' "$out" || fail "the shipped rollback stage must be 0" "$(cat "$out")"
+for kind in jdwillmsen/dotfiles,ci-only,30 jdwillmsen/gameops,release-workflow,60 jdwillmsen/jdw-deployments,ci-only,30 \
+    jdwillmsen/fwb-minecraft,none,30 jdwillmsen/career,ci-only,30 jdwillmsen/countdown-app,release-workflow,60 \
+    jdwlabs/apps,gitops,90 jdwlabs/deployments,ci-only,30 jdwlabs/infrastructure,ci-only,30 jdwlabs/platform,ci-only,30 \
+    dotablaze-tech/apps,ci-only,30 dotablaze-tech/deployments,release-workflow,60; do
+    grep -qx "    $kind" "$out" || fail "shipped rollout kind $kind" "$(cat "$out")"
+done
+python3 -I - "$CFG" <<'PY' || fail "shipped release workflows and gitops target"
+import sys, tomllib
+repos = {r["name"]: r for r in tomllib.load(open(sys.argv[1], "rb"))["repo"]}
+assert repos["jdwillmsen/gameops"]["rollout_workflow"] == "semantic-release.yml"
+assert repos["jdwillmsen/countdown-app"]["rollout_workflow"] == "release.yml"
+assert repos["dotablaze-tech/deployments"]["rollout_workflow"] == "release.yaml"
+assert repos["jdwlabs/apps"]["rollout_target"] == "jdwlabs/deployments" and repos["jdwlabs/apps"]["health_check"] == "E2E"
+PY
 want 0 run --dry-run
 # No repository has a pull request, and the six whose owner has no token say so instead of staying silent.
 grep -q '^decisions\[6\]' "$out" || fail "the token-gated repositories gave no row" "$(cat "$out")"

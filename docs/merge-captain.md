@@ -113,7 +113,8 @@ never re-runs, reverts, freezes, dispatches or applies anything, and does not ch
 how a pull request is merged. Turn it on with `stage = 1` in the chezmoi source and
 `chezmoi apply`; turn it off again with `stage = 0` or pause the captain.
 
-Each `[[repo]]` has `rollout` (default `none`):
+Each `[[repo]]` has `rollout` (default `none`), set in the shipped config from each
+repository's workflow triggers:
 
 | Kind | Window | Signal on the landed head |
 |---|---|---|

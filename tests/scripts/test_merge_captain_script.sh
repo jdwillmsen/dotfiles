@@ -4377,7 +4377,7 @@ green_base 1
 ROLLOUT=ci-only STAGE=0 cfg
 at 20:20
 want 0 run
-[ "$(rstate)" = pending ] && [ "$(wc -l <"$STATE/rollouts.jsonl")" = 1 ] || fail "stage 0 touched a stage-1 row" "$(cat "$STATE/rollouts.jsonl")"
+[ "$(rstate)" = pending ] && [ "$(wc -l <"$STATE/rollouts.jsonl")" = 2 ] || fail "stage 0 touched a stage-1 row" "$(cat "$STATE/rollouts.jsonl")"
 grep -q 'actions/' "$S/gh.log" && fail "stage 0 read rollout signals for an old row" "$(cat "$S/gh.log")"
 quiet_rollout "stage 0 with an old row"
 
@@ -4436,12 +4436,21 @@ expect 1 merged
 roll_case ci-only
 fx run id=11 sha="$LANDED"
 verify 20:20 live
+[ "$(grep -c '"pr": 1,' "$STATE/rollouts.jsonl")" -ge 3 ] && [ "$(head -1 "$STATE/rollouts.jsonl" | python3 -I -c 'import json, sys; print(json.load(sys.stdin)["head"])')" = None ] ||
+    fail "the pending row must be written before the landed range is read" "$(cat "$STATE/rollouts.jsonl")"
 grep -q '"action": "live"' "$STATE/log.jsonl" || fail "live not logged"
 grep -qE '^rollouts\[1\]\{repo,pr,state,reason\}:$' "$out" && grep -qE '^  acme/live,1,live,' "$out" || fail "run output lacks the rollout" "$(cat "$out")"
 quiet_rollout "a live rollout"
 at 20:40
 want 0 run
 [ "$(grep -c '"action": "live"' "$STATE/log.jsonl")" = 1 ] || fail "a closed row was checked again"
+# A green check is not live until things have been quiet for ten minutes: a late check can still fail the row.
+roll_case ci-only
+fx run id=11 sha="$LANDED"
+verify 20:10 pending
+fx run id=12 sha="$LANDED" wid=2 name=late conclusion=failure created=2026-10-23T20:11:00Z updated=2026-10-23T20:12:00Z
+green_base 2
+verify 20:20 suspect
 # A row merged in the last two minutes is left for the next run.
 roll_case ci-only
 fx run id=11 sha="$LANDED"
@@ -4601,6 +4610,14 @@ green_base 2
 verify 20:10 suspect
 verify 21:00 suspect
 [ "$(alerts)" = 1 ] || fail "one release run counted twice"
+# A failing rollout signal needs no baseline: the release never ran on the base.
+roll_case release-workflow 'rollout_workflow = "release.yaml"'
+fx run id=12 sha="$LANDED" name=release file=release.yaml wid=2 conclusion=failure
+verify 20:10 suspect
+roll_case release-workflow "$REL"
+fx run id=11 sha="$LANDED"
+fx run id=12 sha="$LANDED" event=workflow_run name=release file=semantic-release.yml wid=2 conclusion=failure
+verify 20:10 suspect
 
 # gitops: the landed head's CI run, then the E2E run its dispatch started in the target.
 GIT=$'rollout_target = "acme/deploy"\nhealth_check = "E2E"'
@@ -4659,6 +4676,29 @@ dispatch 11 skipped 20:05:00
 green_base 1
 verify 20:10 suspect
 verify 21:30 suspect
+roll_case gitops "$GIT"
+fx run id=11 sha="$LANDED" name=CI conclusion=failure
+dispatch 11 skipped 20:05:00
+verify 20:10 suspect
+
+# An alert GitHub keeps refusing is tried three times, then given up and logged; the row stops asking.
+roll_case ci-only
+fx run id=11 sha="$LANDED" conclusion=failure
+green_base 1
+echo x >"$S/comment_fail"
+for t in 20:10 20:12 20:14 20:16 20:18; do verify "$t" suspect; done
+[ "$(alerts)" = 3 ] || fail "a refused alert must be tried three times, no more" "$(cat "$S/gh.log")"
+grep -q 'alert not delivered after 3 tries' "$STATE/log.jsonl" || fail "the given-up alert was not logged" "$(cat "$STATE/log.jsonl")"
+rq alerted | grep -q suspect || fail "a given-up alert must stop being owed" "$(rq alerted)"
+# A refusal followed by a delivered alert starts the count again.
+roll_case ci-only
+fx run id=11 sha="$LANDED" conclusion=failure
+green_base 1
+echo x >"$S/comment_fail"
+verify 20:10 suspect
+rm "$S/comment_fail"
+verify 20:12 suspect
+[ "$(rq alert_errors)" = 0 ] && [ "$(alerts)" = 2 ] || fail "a delivered alert resets the tries" "$(rq alert_errors)"
 
 # Pause stops verification; a window that passes during a pause closes unknown.
 roll_case ci-only

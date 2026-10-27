@@ -22,6 +22,15 @@
 # everything else is met (R2 or below, an allowed author, no CODEOWNERS path). Needs
 # `merge-captain auth-app` first; without the App's key the PR waits as approver-missing.
 # Shipped false everywhere: the owner flips it per repository once the App is provisioned.
+# rollout: optional, default "none". What shows that a merge the captain made went out well,
+# watched only from [rollback] stage 1:
+#   none              nothing to watch; the row closes as no-signal
+#   ci-only           the push checks on the landed commit
+#   release-workflow  rollout_workflow (a workflow file name) run for the landed commit
+#   gitops            the landed commit's CI run, then the health_check workflow run its
+#                     dispatch-e2e job started in rollout_target (same owner)
+# rollout_window_m: optional; minutes to wait for the signal (ci-only 30, release-workflow 60,
+# gitops 90).
 
 [limits]
 # Caps count only pull requests that need a decision: a draft, a held one or one
@@ -38,6 +47,14 @@ max_merges_per_hour = 6
 max_approvals_per_hour = 4
 review_timeout_s = 300
 max_diff_bytes = 150000
+# Rollout rows checked in one run.
+max_verifies_per_run = 10
+
+[rollback]
+# 0 off: no rollout row, check or alert. 1 observe: after each merge, watch the rollout and,
+# on a failure, label the pull request needs-human with one comment; nothing is reverted.
+# 2 and 3 (reverts) are not built; set either and the captain runs as 1.
+stage = 0
 
 [reviewers]
 # Providers a review may run on. A lane on any other provider is excluded from
@@ -61,36 +78,47 @@ allow = ["jdwillmsen", "jdwlabs-agent-bot[bot]", "renovate[bot]", "dependabot[bo
 name = "jdwillmsen/dotfiles"
 mode = "live"
 max_tier = "R2"
+rollout = "ci-only"
 
 [[repo]]
 name = "jdwillmsen/gameops"
 mode = "live"
 max_tier = "R2"
+rollout = "release-workflow"
+rollout_workflow = "semantic-release.yml"
 
 [[repo]]
 name = "jdwillmsen/jdw-deployments"
 mode = "live"
 max_tier = "R2"
+rollout = "ci-only"
 
 [[repo]]
 name = "jdwillmsen/fwb-minecraft"
 mode = "live"
 max_tier = "R2"
+rollout = "none"
 
 [[repo]]
 name = "jdwillmsen/career"
 mode = "live"
 max_tier = "R2"
+rollout = "ci-only"
 
 [[repo]]
 name = "jdwillmsen/countdown-app"
 mode = "live"
 max_tier = "R2"
+rollout = "release-workflow"
+rollout_workflow = "release.yml"
 
 [[repo]]
 name = "jdwlabs/apps"
 mode = "live"
 max_tier = "R2"
+rollout = "gitops"
+rollout_target = "jdwlabs/deployments"
+health_check = "E2E"
 require_token = true
 approver = true
 
@@ -98,12 +126,14 @@ approver = true
 name = "jdwlabs/deployments"
 mode = "live"
 max_tier = "R2"
+rollout = "ci-only"
 require_token = true
 
 [[repo]]
 name = "jdwlabs/infrastructure"
 mode = "live"
 max_tier = "R2"
+rollout = "ci-only"
 require_token = true
 approver = true
 
@@ -111,6 +141,7 @@ approver = true
 name = "jdwlabs/platform"
 mode = "live"
 max_tier = "R2"
+rollout = "ci-only"
 require_token = true
 approver = true
 
@@ -118,10 +149,13 @@ approver = true
 name = "dotablaze-tech/apps"
 mode = "live"
 max_tier = "R2"
+rollout = "ci-only"
 require_token = true
 
 [[repo]]
 name = "dotablaze-tech/deployments"
 mode = "live"
 max_tier = "R2"
+rollout = "release-workflow"
+rollout_workflow = "release.yaml"
 require_token = true

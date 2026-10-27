@@ -14,6 +14,7 @@ import base64
 import datetime as dt
 import fcntl
 import getpass
+import hashlib
 import json
 import math
 import os
@@ -63,6 +64,7 @@ REVIEWS = STATE / "reviews.jsonl"
 ATTEMPTS = STATE / "attempts.jsonl"
 APPROVALS = STATE / "approvals.jsonl"
 HUMAN = STATE / "human.jsonl"
+ROLLOUTS = STATE / "rollouts.jsonl"
 LOCK = STATE / "lock"
 
 TIERS = ("R0", "R1", "R2", "R3")
@@ -86,7 +88,8 @@ NO_REVIEW_R0 = "no review required (R0)"
 # Providers this tool can run headless. Which of them a review may use is the [reviewers] config.
 PROVIDERS = ("claudeAgent", "opencode")
 LIMIT_DEFAULTS = {"max_prs_per_run": 20, "max_dry_prs_per_run": 8, "max_prs_per_repo": 4, "max_reviews_per_run": 2,
-                  "max_merges_per_hour": 6, "max_approvals_per_hour": 4, "review_timeout_s": 300, "max_diff_bytes": 150000}
+                  "max_merges_per_hour": 6, "max_approvals_per_hour": 4, "review_timeout_s": 300, "max_diff_bytes": 150000,
+                  "max_verifies_per_run": 10, "max_reverts_per_day": 2}
 # Below this many calls left in either the REST or the GraphQL budget a run does nothing, so the captain never
 # spends the budget other tools on the same login are waiting on.
 API_BUDGET_MIN = 500
@@ -142,6 +145,26 @@ LABEL_NOTE = "merge-captain"
 # Flags that would widen what a merge or edit may do. Nothing here builds one,
 # and the write guard refuses them anyway so a future edit cannot slip one in.
 FORBIDDEN_FLAGS = frozenset({"--admin", "--squash", "--merge", "--delete-branch", "--auto", "-d", "-s", "-m"})
+
+# Rollout verification. Stage 0 writes nothing; stage 1 observes and alerts. Stages 2 and 3 (reverts) are not built, so
+# a config asking for them runs as ROLLBACK_BUILT and `status` says so.
+ROLLOUT_KINDS = ("none", "ci-only", "release-workflow", "gitops")
+ROLLOUT_WINDOW_M = {"none": 30, "ci-only": 30, "release-workflow": 60, "gitops": 90}
+ROLLBACK_STAGES = (0, 1, 2, 3)
+ROLLBACK_BUILT = 1
+WORKFLOW_FILE = re.compile(r"[A-Za-z0-9_.-]{1,100}\.ya?ml")
+# Runs that are never blame, whatever they conclude: no merge triggered them, or they watch something else.
+NEVER_BLAME_EVENTS = frozenset({"schedule", "workflow_dispatch"})
+NEVER_BLAME_NAMES = frozenset({"codeql", "prd-drift", "promote-prd", "update-pages", "model-audit",
+                               "audit-admin-bypass"})
+BASELINE_S = 7 * 24 * HOUR_S
+# How long nothing must have started or finished before an absent run is read as one that will never come: a
+# path-filtered workflow, or a release that runs only after CI.
+QUIET_S = 600
+DISPATCH_JOB = "dispatch-e2e"
+ALERT_STATES = ("suspect", "failed")
+ROLLOUT_ACTIONS = {"live": "live", "no-signal": "no-signal", "suspect": "rollout-suspect", "failed": "rollout-failed",
+                   "unknown": "rollout-unknown"}
 
 CRED_PATTERNS = [re.compile(p) for p in (
     r"gh[pousr]_[A-Za-z0-9]{16,}",
@@ -366,8 +389,45 @@ def load_config():
         if not positive_int(per_repo):
             die(EXIT_FAIL, f"repo {name}: max_prs_per_repo must be a positive integer, got {per_repo!r}")
         repos.append({"name": name, "mode": mode, "max_tier": ceiling, "allow_no_checks": no_checks,
-                      "require_token": need_token, "approver": approver, "max_prs_per_repo": per_repo})
-    return {"limits": limits, "allow": allow, "ignore": ignore, "providers": providers, "repos": repos}
+                      "require_token": need_token, "approver": approver, "max_prs_per_repo": per_repo,
+                      **rollout_config(name, row)})
+    rollback = cfg.get("rollback") or {}
+    if not isinstance(rollback, dict) or set(rollback) - {"stage"}:
+        die(EXIT_FAIL, "[rollback] takes only stage")
+    stage = rollback.get("stage", 0)
+    if isinstance(stage, bool) or stage not in ROLLBACK_STAGES:
+        die(EXIT_FAIL, f"[rollback] stage must be one of {','.join(map(str, ROLLBACK_STAGES))}, got {stage!r}")
+    return {"limits": limits, "allow": allow, "ignore": ignore, "providers": providers, "repos": repos,
+            "rollback_stage": stage}
+
+
+def rollout_config(name, row):
+    """The rollout keys of one [[repo]] row. A key the kind needs is required, and one it cannot use is an error, so a
+    typo never quietly leaves a repository unwatched."""
+    kind = row.get("rollout", "none")
+    if kind not in ROLLOUT_KINDS:
+        die(EXIT_FAIL, f"repo {name}: rollout must be one of {','.join(ROLLOUT_KINDS)}, got {kind!r}")
+    window = row.get("rollout_window_m", ROLLOUT_WINDOW_M[kind])
+    if not positive_int(window):
+        die(EXIT_FAIL, f"repo {name}: rollout_window_m must be a positive integer, got {window!r}")
+    workflow, target, health = row.get("rollout_workflow"), row.get("rollout_target"), row.get("health_check")
+    if kind == "release-workflow":
+        if not isinstance(workflow, str) or not WORKFLOW_FILE.fullmatch(workflow):
+            die(EXIT_FAIL, f"repo {name}: rollout = release-workflow needs rollout_workflow, a workflow file name")
+    elif workflow is not None:
+        die(EXIT_FAIL, f"repo {name}: rollout_workflow goes only with rollout = release-workflow")
+    if kind == "gitops":
+        if not isinstance(target, str) or not REPO.fullmatch(target) or target.lower() == name.lower():
+            die(EXIT_FAIL, f"repo {name}: rollout = gitops needs rollout_target, another owner/repo")
+        # The target is read with this repository's owner token, which reaches no other owner.
+        if target.split("/")[0].lower() != name.split("/")[0].lower():
+            die(EXIT_FAIL, f"repo {name}: rollout_target must belong to the same owner")
+        if not isinstance(health, str) or not health.strip() or len(health) > 100 or re.search(r"[\x00-\x1f]", health):
+            die(EXIT_FAIL, f"repo {name}: rollout = gitops needs health_check, a workflow name")
+    elif target is not None or health is not None:
+        die(EXIT_FAIL, f"repo {name}: rollout_target and health_check go only with rollout = gitops")
+    return {"rollout": kind, "rollout_window_m": window, "rollout_workflow": workflow, "rollout_target": target,
+            "health_check": health}
 
 
 # ── External tools ───────────────────────────────────────────────────────────
@@ -1090,6 +1150,72 @@ def approvals_since(now):
                and (t := parse_time(row.get("at"))) is not None and now - HOUR_S < t <= now)
 
 
+# ── Rollout ledger ───────────────────────────────────────────────────────────
+
+def patch_fingerprint(text):
+    """A digest of a unified diff that ignores hunk positions and whitespace, like `git patch-id`, so the same change
+    rebased onto a moved branch digests the same. None for text that holds no file diff."""
+    files, cur = {}, None
+    for line in text.splitlines():
+        if line.startswith("diff --git "):
+            cur = line
+            files.setdefault(cur, [])
+        elif cur is None or line.startswith(("index ", "@@", "similarity index", "dissimilarity index")):
+            continue
+        elif line.startswith(("+", "-", "\\", "new file mode", "deleted file mode", "old mode", "new mode",
+                                                       "rename ", "copy ", "Binary files")):
+            files[cur].append(re.sub(r"\s+", "", line))
+    if not files:
+        return None
+    digest = hashlib.sha256()
+    for name in sorted(files):
+        digest.update((name + "\n" + "\n".join(files[name]) + "\n\0").encode("utf-8", "replace"))
+    return digest.hexdigest()
+
+
+def workflow_file(run):
+    """The workflow file name of a run, without its directory or a ref suffix."""
+    return str(run.get("path") or "").split("@", 1)[0].rsplit("/", 1)[-1]
+
+
+def valid_failure(f):
+    return (isinstance(f, dict) and positive_int(f.get("run")) and positive_int(f.get("attempt"))
+            and f.get("role") in ("check", "rollout") and isinstance(f.get("name"), str))
+
+
+def failed_twice(failures):
+    """Two failures that are two signals: the same run failing again in a later attempt, or the rollout signal failing
+    in a run other than another failure's. Two different checks failing on one push are one change failing once."""
+    for i, a in enumerate(failures):
+        for b in failures[i + 1:]:
+            if a["run"] == b["run"]:
+                if a["attempt"] != b["attempt"]:
+                    return True
+            elif "rollout" in (a["role"], b["role"]):
+                return True
+    return False
+
+
+def latest_rollouts():
+    """The current row per merged pull request: the ledger is appended to, and the last line for a key wins."""
+    rows = {}
+    for row in read_jsonl(ROLLOUTS):
+        if isinstance(row.get("repo"), str) and positive_int(row.get("pr")) and row.get("state") in (
+                "pending", *ROLLOUT_ACTIONS):
+            rows[(row["repo"], row["pr"])] = row
+    return rows
+
+
+def rollout_open(row):
+    """Still watched, or owed an alert it has not been given."""
+    return not row.get("closed") or (row["state"] in ALERT_STATES and row["state"] not in (row.get("alerted") or []))
+
+
+def paused_since(since):
+    """True when a run was stopped by the kill switch at or after `since`."""
+    return any(r.get("reason") == "paused" and r.get("action") == "skipped" for r in read_log(since))
+
+
 # ── Captain ──────────────────────────────────────────────────────────────────
 
 def deadline_from_env(name, default):
@@ -1134,6 +1260,8 @@ class Captain:
         self.label_cache = {}
         self.identities = {}
         self.token_required = {r["name"] for r in cfg.get("repos", []) if r.get("require_token")}
+        self.stage = min(cfg.get("rollback_stage", 0), ROLLBACK_BUILT)
+        self.run_cache = {}
         self.trace = []
         self.repo = None
         self.live = False
@@ -2261,6 +2389,336 @@ class Captain:
             raise Stop("blocked", f"merge refused: {msg}", lane)
         raise Stop("merged", reason, lane)
 
+    # -- rollout verification (stage 1: observe and alert) --------------------
+
+    def record_rollout(self, rc, d):
+        """Append a pending row for a merge this run made. Reads only, and never raises an Exception: the merge is
+        done and logged, and a row it could not complete is finished by the verification walk or closes unknown."""
+        repo, n = rc["name"], d["pr"]
+        self.repo = repo
+        row = {"repo": repo, "pr": n, "tier": d["tier"], "kind": rc["rollout"], "state": "pending",
+               "merged_at": iso(self.now), "deadline": None, "head": None, "base": None, "commits": None,
+               "fingerprint": "unknown", "failures": [], "alerted": [], "closed": False, "checked": None,
+               "reason": "merged"}
+        try:
+            row.update(self.landed_range(repo, n))
+        except (Stop, Refused) as e:
+            log(f"landed range of {repo}#{n} unread: {clean(getattr(e, 'reason', e), 80)}")
+        except Exception as e:  # noqa: BLE001 - the merge stands whatever happens here
+            log(f"landed range of {repo}#{n} unread: {type(e).__name__}")
+        row["deadline"] = iso(parse_time(row["merged_at"]) + rc["rollout_window_m"] * 60)
+        try:
+            append_jsonl(ROLLOUTS, row, durable=True)
+        except OSError as e:
+            log(f"rollout row for {repo}#{n} not written: {e.strerror}")
+
+    def landed_range(self, repo, n):
+        """What the merge put on the default branch, read from the branch: rebase merge rewrites every commit, so the
+        pull request's own SHAs are not on it. The landed head is the merge commit; the base is N first-parent steps
+        below it, N the pull request's commit count; and the range's diff must match the pull request's."""
+        j = self.gh_json(["pr", "view", str(n), "--repo", repo, "--json", "mergeCommit,commits,mergedAt"],
+                         "merged pull request")
+        out = {}
+        head = (j.get("mergeCommit") or {}).get("oid") if isinstance(j, dict) else None
+        if not isinstance(head, str) or not SHA.fullmatch(head):
+            return out
+        out["head"] = head
+        merged = parse_time(j.get("mergedAt"))
+        if merged is not None and math.isfinite(merged):
+            out["merged_at"] = iso(merged)
+        commits = j.get("commits")
+        count = len(commits) if isinstance(commits, list) else 0
+        if not 1 <= count < LIST_LIMIT:
+            return out
+        r = self.gh(["api", f"repos/{repo}/commits?sha={head}&per_page={count + 1}"])
+        try:
+            chain = json.loads(r.out) if r.ok else None
+            shas = [c["sha"] for c in chain]
+            linked = all(chain[i]["parents"][0]["sha"] == shas[i + 1] for i in range(count))
+        except (ValueError, KeyError, TypeError, IndexError):
+            return out
+        if len(shas) != count + 1 or shas[0] != head or not linked or not all(SHA.fullmatch(str(s)) for s in shas):
+            return out
+        out.update(base=shas[count], commits=count, fingerprint=self.range_matches(repo, n, shas[count], head))
+        return out
+
+    def range_matches(self, repo, n, base, head):
+        """match, mismatch or unknown. Only the verdict is kept; neither diff leaves this function."""
+        mine = self.gh(["pr", "diff", str(n), "--repo", repo])
+        landed = self.gh(["api", "-H", "Accept: application/vnd.github.diff", f"repos/{repo}/compare/{base}...{head}"])
+        if not (mine.ok and landed.ok):
+            return "unknown"
+        a, b = patch_fingerprint(mine.out), patch_fingerprint(landed.out)
+        if a is None or b is None:
+            return "unknown"
+        return "match" if a == b else "mismatch"
+
+    def workflow_runs(self, repo, query):
+        """Workflow runs from one listing, cached for the run. Raises Stop when the listing cannot be read."""
+        key = (repo, query)
+        if key not in self.run_cache:
+            j = self.gh_json(["api", f"repos/{repo}/actions/{query}"], "workflow runs")
+            runs = j.get("workflow_runs") if isinstance(j, dict) else None
+            if not isinstance(runs, list):
+                raise Stop("error", "workflow runs unreadable")
+            self.run_cache[key] = [x for x in runs if isinstance(x, dict) and positive_int(x.get("id"))]
+        return self.run_cache[key]
+
+    def run_jobs(self, repo, run_id):
+        j = self.gh_json(["api", f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100"], "workflow jobs")
+        jobs = j.get("jobs") if isinstance(j, dict) else None
+        return [x for x in jobs if isinstance(x, dict)] if isinstance(jobs, list) else []
+
+    def earlier_attempt(self, repo, run):
+        """The conclusion of the attempt before this run's latest, or None. The runs listing shows only the latest
+        attempt, so a re-run that failed again would otherwise look like one failure."""
+        attempt = run.get("run_attempt")
+        if not positive_int(attempt) or attempt < 2:
+            return None
+        r = self.gh(["api", f"repos/{repo}/actions/runs/{run['id']}/attempts/{attempt - 1}"])
+        try:
+            j = json.loads(r.out) if r.ok else {}
+        except ValueError:
+            return None
+        return j.get("conclusion") if isinstance(j, dict) and j.get("status") == "completed" else None
+
+    def baseline(self, repo, run, row, default):
+        """success, failure or None: the same workflow on the base commit, or else its latest run on the default
+        branch before the merge, within seven days. None is no baseline, which never blames."""
+        wid = run.get("workflow_id")
+        if not positive_int(wid):
+            return None
+
+        def settled(r):
+            return (r.get("workflow_id") == wid and r.get("event") == "push" and r.get("status") == "completed"
+                    and r.get("conclusion") in ("success", "failure") and parse_time(r.get("created_at")) is not None)
+
+        base = row.get("base")
+        if base:
+            on_base = [r for r in self.workflow_runs(repo, f"runs?head_sha={base}&event=push&per_page=100")
+                       if settled(r) and r.get("head_sha") == base]
+            if on_base:
+                return max(on_base, key=lambda r: parse_time(r["created_at"]))["conclusion"]
+        merged = parse_time(row.get("merged_at"))
+        earlier = [r for r in self.workflow_runs(repo, f"workflows/{wid}/runs?branch={urllib.parse.quote(default)}"
+                                                       f"&event=push&per_page=30")
+                   if settled(r) and r.get("head_branch") == default and r.get("head_sha") != row.get("head")
+                   and merged - BASELINE_S <= parse_time(r["created_at"]) < merged]
+        return max(earlier, key=lambda r: parse_time(r["created_at"]))["conclusion"] if earlier else None
+
+    def e2e_run(self, rc, ci, dispatch, default):
+        """("found", run), ("none", None) or ("ambiguous", None): the health-check run in the target that this
+        release's dispatch started. It is the first `repository_dispatch` run of that workflow created after the
+        dispatch job finished, and only if no other release's dispatch could have started it as well."""
+        repo, target, name = rc["name"], rc["rollout_target"], rc["health_check"]
+        done = parse_time(dispatch.get("completed_at"))
+        if done is None:
+            return "none", None
+        e2e = sorted((r for r in self.workflow_runs(target, "runs?event=repository_dispatch&per_page=100")
+                      if r.get("event") == "repository_dispatch" and r.get("name") == name
+                      and parse_time(r.get("created_at")) is not None), key=lambda r: parse_time(r["created_at"]))
+        after = [r for r in e2e if parse_time(r["created_at"]) > done]
+        if not after:
+            return "none", None
+        first = after[0]
+        created = parse_time(first["created_at"])
+        before = [parse_time(r["created_at"]) for r in e2e if parse_time(r["created_at"]) <= done]
+        floor = before[-1] if before else None
+        listing = f"runs?branch={urllib.parse.quote(default)}&event=push&per_page=20"
+        others = [r for r in self.workflow_runs(repo, listing)
+                  if r.get("id") != ci.get("id") and r.get("head_branch") == default
+                  and (t := parse_time(r.get("created_at"))) is not None and t < created
+                  and (floor is None or (parse_time(r.get("updated_at")) or created) > floor)]
+        for other in others[:10]:
+            job = next((x for x in self.run_jobs(repo, other["id"]) if x.get("name") == DISPATCH_JOB), None)
+            t = parse_time((job or {}).get("completed_at"))
+            if job and job.get("conclusion") == "success" and t is not None and (floor is None or t > floor) \
+                    and t < created:
+                return "ambiguous", None
+        return "found", first
+
+    def signals(self, rc, row, kind):
+        """What the landed head's runs say: failures to add, and whether the kind's signal is pending, succeeded or
+        absent altogether. Pull-request runs and other dispatch or workflow_run runs are never looked at."""
+        repo, head = rc["name"], row["head"]
+        default = self.default_of(repo)
+        out = {"failures": [], "pending": False, "ok": False, "none": False, "notes": []}
+        checks, rollouts = [], []
+        for r in self.workflow_runs(repo, f"runs?head_sha={head}&per_page=100"):
+            if r.get("head_sha") != head or r.get("event") in NEVER_BLAME_EVENTS:
+                continue
+            stem = workflow_file(r)
+            if {str(r.get("name") or "").lower(), stem.rsplit(".", 1)[0].lower()} & NEVER_BLAME_NAMES:
+                continue
+            is_check = r.get("event") == "push" and r.get("head_branch") == default
+            if is_check:
+                checks.append(r)
+            if kind == "release-workflow" and stem == rc["rollout_workflow"]:
+                rollouts.append(r)
+        ci, dispatch = None, None
+        if kind == "gitops":
+            for r in checks[:5]:
+                if r.get("status") != "completed":
+                    continue
+                job = next((x for x in self.run_jobs(repo, r["id"]) if x.get("name") == DISPATCH_JOB), None)
+                if job:
+                    ci, dispatch = r, job
+                    break
+        signal_ids = {r["id"] for r in rollouts} | ({ci["id"]} if ci else set())
+
+        def failure(r, role, where=repo):
+            out["failures"].append({"run": r["id"], "attempt": r.get("run_attempt") if positive_int(
+                r.get("run_attempt")) else 1, "role": role, "name": clean(r.get("name") or "run", 60), "where": where})
+            if self.earlier_attempt(where, r) == "failure":
+                out["failures"].append({**out["failures"][-1], "attempt": out["failures"][-1]["attempt"] - 1})
+
+        check_ok, latest = False, parse_time(row.get("merged_at")) or self.now
+        for r in checks:
+            latest = max(latest, parse_time(r.get("updated_at")) or latest)
+            if r.get("status") != "completed":
+                out["pending"] = True
+            elif r.get("conclusion") == "success":
+                check_ok = True
+            elif r.get("conclusion") == "failure":
+                base = self.baseline(repo, r, row, default)
+                if base == "success":
+                    failure(r, "rollout" if r["id"] in signal_ids else "check")
+                else:
+                    out["notes"].append(f"{'preexisting-red' if base else 'no-baseline'} {clean(r.get('name'), 40)}")
+            # cancelled, timed_out, startup_failure, stale, skipped, neutral: runner trouble or nothing run, never blame
+        quiet = self.now - latest >= QUIET_S
+
+        rollout_ok = False
+        for r in rollouts:
+            if r in checks:
+                rollout_ok = rollout_ok or (r.get("status") == "completed" and r.get("conclusion") == "success")
+            elif r.get("status") != "completed":
+                out["pending"] = True
+            elif r.get("conclusion") == "success":
+                rollout_ok = True
+            elif r.get("conclusion") == "failure":
+                failure(r, "rollout")
+
+        if kind == "release-workflow" and rollout_ok:
+            out["ok"] = True
+        elif kind == "gitops" and ci is not None:
+            if ci.get("conclusion") != "success" or dispatch.get("conclusion") not in ("success", "skipped"):
+                pass
+            elif dispatch.get("conclusion") == "skipped":
+                out["ok"] = check_ok
+                out["notes"].append("released nothing")
+            else:
+                found, e2e = self.e2e_run(rc, ci, dispatch, default)
+                if found == "ambiguous":
+                    out["notes"].append("overlapping release, no health-check signal")
+                    out["pending"] = True
+                elif found == "none" or e2e.get("status") != "completed":
+                    out["pending"] = True
+                elif e2e.get("conclusion") == "success":
+                    out["ok"] = True
+                elif e2e.get("conclusion") == "failure":
+                    failure(e2e, "rollout", rc["rollout_target"])
+        elif quiet or kind == "ci-only":
+            # ci-only, or a release or delivery that never started (path-filtered, nothing to release): the checks
+            # on the landed head are all there is.
+            out["ok"] = check_ok
+            out["none"] = not checks and quiet
+        if out["pending"]:
+            out["ok"] = out["none"] = False
+        return out
+
+    def judge_rollout(self, rc, row):
+        """Move one open row on. `failed` and every state past the deadline close it; `suspect` stays open until
+        the deadline, so a second failure can still be seen."""
+        deadline = parse_time(row.get("deadline"))
+        past = deadline is None or self.now >= deadline
+
+        def close(state, reason):
+            row.update(state=state, closed=True, reason=reason)
+
+        if row.get("kind") == "none" or rc["rollout"] == "none":
+            return close("no-signal", "no rollout signal configured")
+        if row.get("kind") != rc["rollout"]:
+            return close("unknown" if row["state"] == "pending" else row["state"], "rollout kind changed in config")
+        if past and deadline is not None and paused_since(deadline):
+            return close("unknown" if row["state"] == "pending" else row["state"], "window passed during a pause")
+        if not row.get("head"):
+            row.update({k: v for k, v in self.landed_range(rc["name"], row["pr"]).items() if k != "merged_at"})
+            if not row.get("head"):
+                if past:
+                    close("unknown", "landed head unreadable")
+                return None
+        sig = self.signals(rc, row, row["kind"])
+        seen = {(f["run"], f["attempt"]): f for f in row["failures"]}
+        for f in sig["failures"]:
+            key = (f["run"], f["attempt"])
+            if key not in seen or f["role"] == "rollout":
+                seen[key] = f
+        row["failures"] = sorted(seen.values(), key=lambda f: (f["run"], f["attempt"]))
+        notes = "; ".join(sig["notes"])
+        names = ", ".join(dict.fromkeys(f["name"] for f in row["failures"]))
+        if failed_twice(row["failures"]):
+            close("failed", f"failed twice: {names}")
+        elif row["failures"]:
+            row.update(state="suspect", closed=past, reason=f"failed: {names}")
+        elif sig["ok"]:
+            close("live", "signal succeeded" + (f"; {notes}" if notes else ""))
+        elif sig["none"]:
+            close("no-signal", "no blame-eligible run" + (f"; {notes}" if notes else ""))
+        elif past:
+            close("unknown", "window passed without a signal" + (f"; {notes}" if notes else ""))
+        else:
+            row["reason"] = "waiting for a signal" + (f"; {notes}" if notes else "")
+        return None
+
+    def rollout_alert(self, rc, row):
+        """The needs-human label and one comment on the original pull request, for each alerting state. Nothing is
+        re-run or reverted."""
+        repo, n, state = rc["name"], row["pr"], row["state"]
+        self.ensure_labels(repo, ["needs-human"])
+        self.edit_labels(repo, n, ["needs-human"], [])
+        what = ("failed twice, in different runs" if state == "failed"
+                else "failed once where it had passed before")
+        lines = [f"<!-- merge-captain:rollout sha={row['head']} state={state} -->",
+                 f"merge-captain: after this pull request merged, a check on the landed commit {what} "
+                 f"(rollout {state}). The captain only observes at this stage: nothing was re-run or reverted. "
+                 "Look at the runs and decide.", ""]
+        for f in row["failures"][:6]:
+            where = f.get("where") if isinstance(f.get("where"), str) and REPO.fullmatch(f["where"]) else repo
+            lines.append(f"- {md_safe(f['name'], 60)}, attempt {int(f['attempt'])}: "
+                         f"https://github.com/{where}/actions/runs/{int(f['run'])}")
+        self.comment(repo, n, "\n".join(lines))
+
+    def verify_rollout(self, rc, row, run_id):
+        """One verification step for one row, saved whatever happens. Returns the row as it now stands."""
+        repo = rc["name"]
+        self.repo, self.live = repo, True
+        before = row.get("state")
+        new = {**row, "failures": [f for f in row.get("failures") or [] if valid_failure(f)],
+               "alerted": [a for a in row.get("alerted") or [] if a in ALERT_STATES]}
+        try:
+            if not new.get("closed"):
+                self.judge_rollout(rc, new)
+            if new["state"] in ALERT_STATES and new["state"] not in new["alerted"]:
+                self.rollout_alert(rc, new)
+                new["alerted"].append(new["state"])
+        except Stop as s:
+            new["reason"] = clean(f"{new.get('reason') or ''}; not finished: {s.reason}".lstrip("; "), 160)
+            # Signals that stay unreadable past the deadline must not keep a row open for ever.
+            if not new.get("closed") and (parse_time(new.get("deadline")) or 0) <= self.now:
+                new.update(state="unknown" if new["state"] == "pending" else new["state"], closed=True)
+        except Refused as e:
+            new["reason"] = clean(f"refused: {e}", 160)
+        except Exception as e:  # noqa: BLE001 - one bad row must not end the walk
+            new["reason"] = f"internal: {type(e).__name__}"
+        new["checked"] = iso(self.now)
+        append_jsonl(ROLLOUTS, new, durable=True)
+        if new["state"] != before and new["state"] in ROLLOUT_ACTIONS:
+            self.write_log(run_id, {"repo": repo, "pr": new["pr"], "head": new.get("head"), "tier": new.get("tier"),
+                                    "action": ROLLOUT_ACTIONS[new["state"]], "reason": new.get("reason") or "",
+                                    "mode": "live", "lane": None})
+        return new
+
 
 # ── Commands ─────────────────────────────────────────────────────────────────
 
@@ -2447,7 +2905,11 @@ def walk_group(run, key, group, start, budget):
                 defer(run, cap.deferral(rc, pr, "run-cap" if key == "live" else "dry-cap"))
                 behind = run_limited = True
             else:
-                note(run, cap.process(rc, pr))
+                d = cap.process(rc, pr)
+                note(run, d)
+                # After the merge is logged, so nothing the rollout record does can hide or undo it.
+                if d["action"] == "merged" and d["mode"] == "live" and cap.stage >= 1:
+                    cap.record_rollout(rc, d)
                 if cap.consumed:
                     spent += 1
                     used += 1
@@ -2462,6 +2924,27 @@ def walk_group(run, key, group, start, budget):
             # and the kill switch, which stop the run rather than ration it.
             resume = walk[(index + 1) % len(walk)]["name"] if run_limited and used else repo
     run["cursor"][key] = resume or (walk[0]["name"] if walk else None)
+
+
+def verify_rollouts(run, repos):
+    """Move up to max_verifies_per_run open rollout rows on, least recently checked first. Live repositories only,
+    never under --dry-run, and only from stage 1. A row merged in the last two minutes waits: its runs have hardly
+    started."""
+    cap = run["cap"]
+    if cap.stage < 1 or run["args"].dry_run:
+        return
+    live = {r["name"]: r for r in repos if r["mode"] == "live"}
+    rows = [r for r in latest_rollouts().values() if r["repo"] in live and rollout_open(r)
+            and (parse_time(r.get("merged_at")) or 0) <= cap.now - SETTLE_S]
+    rows.sort(key=lambda r: (str(r.get("checked") or ""), str(r.get("merged_at") or "")))
+    for row in rows[:cap.limits["max_verifies_per_run"]]:
+        if PAUSED.exists() or cap.past_deadline():
+            break
+        if row["repo"].split("/")[0] in run["low_owners"] or cap.owner_block(row["repo"]):
+            continue
+        new = cap.verify_rollout(live[row["repo"]], row, run["id"])
+        run["rollouts"].append({"repo": new["repo"], "pr": new["pr"], "state": new["state"],
+                                "reason": clean(new.get("reason") or "", 120)})
 
 
 def cmd_run(args):
@@ -2492,7 +2975,7 @@ def cmd_run(args):
     persist = not (args.dry_run or args.repo or args.pr is not None)
     run = {"cap": cap, "id": run_id, "args": args, "nothing": nothing, "decisions": [], "deferred": [], "deferred_n": 0,
            "failed_lists": 0, "examined": load_examined(cap.now), "open": {}, "cursor": {}, "walked": False,
-           "low_owners": set(), "budget_logged": set()}
+           "low_owners": set(), "budget_logged": set(), "rollouts": []}
     state = load_rotation()
     groups = [("live", [r for r in repos if r["mode"] == "live" and not args.dry_run]),
               ("dry", [r for r in repos if r["mode"] != "live" or args.dry_run])]
@@ -2510,6 +2993,7 @@ def cmd_run(args):
                 for key, group in groups:
                     run["cursor"][key] = state.get(key)
                     walk_group(run, key, group, state.get(key), budgets[key])
+                verify_rollouts(run, repos)
     except HardDeadline:
         hard = True
         log("hard deadline")
@@ -2541,6 +3025,8 @@ def cmd_run(args):
     rows = [{"repo": d["repo"], "pr": d["pr"] if d["pr"] is not None else "-", "tier": d["tier"] or "-",
              "action": d["action"], "reason": clean(d["reason"])} for d in decisions]
     print(toon(head) + "\n" + decisions_block(rows))
+    if run["rollouts"]:
+        print(toon({"rollouts": run["rollouts"]}))
     return EXIT_FAIL if repos and failed_lists == len(repos) else 0
 
 
@@ -2626,9 +3112,28 @@ def cmd_status(args):
     kinds = {o["owner"]: o["identity"] for o in out["owners"]}
     out["token_required"] = [{"repo": r["name"], "require_token": "yes", "identity": kinds[r["name"].split("/")[0]]}
                              for r in cfg["repos"] if r.get("require_token")]
+    out["rollouts"] = rollout_report(cfg, now_epoch())
+    if cfg["rollback_stage"] > ROLLBACK_BUILT:
+        out["warnings"].append(f"[rollback] stage {cfg['rollback_stage']} is not built yet; running as stage "
+                               f"{ROLLBACK_BUILT} (observe and alert only)")
     runs = [r for r in read_log() if r.get("action") == "run"][-5:]
     out["last_runs"] = [{"at": r.get("at"), "result": r.get("reason")} for r in reversed(runs)]
     emit(out)
+
+
+def rollout_report(cfg, now):
+    """The `rollouts` section of status: the stage, each repository's kind, and the rows still watched or alerting
+    in the last seven days."""
+    rows = list(latest_rollouts().values())
+    recent = [r for r in rows if (parse_time(r.get("merged_at")) or 0) >= now - BASELINE_S]
+    counts = {s: sum(1 for r in recent if r["state"] == s) for s in ("pending", *ROLLOUT_ACTIONS)}
+    shown = [r for r in recent if r["state"] in ("pending", *ALERT_STATES)][-20:]
+    return {"stage": cfg["rollback_stage"], "stage_running": min(cfg["rollback_stage"], ROLLBACK_BUILT),
+            "last_7_days": counts,
+            "repos": [{"name": r["name"], "rollout": r["rollout"], "window_m": r["rollout_window_m"]}
+                      for r in cfg["repos"]],
+            "watch": [{"repo": r["repo"], "pr": r["pr"], "state": r["state"], "deadline": r.get("deadline") or "-",
+                       "reason": clean(r.get("reason") or "", 100)} for r in shown]}
     return 0
 
 

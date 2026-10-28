@@ -309,7 +309,7 @@ put("captain-approvals", "2026-10", [
     {"at": "2026-10-07T09:50:00Z", "repo": "o/r", "pr": 1, "head": "a" * 12, "status": "confirmed", "tier": "R1"},
     {"at": "2026-10-08T09:50:00Z", "repo": "o/r", "pr": 7, "head": "a" * 12, "status": "withdrawn", "tier": "R1"},
 ])
-put("captain-rollouts", "2026-10", [{"at": "2026-10-08T12:00:00Z", "repo": "o/r", "pr": 1, "state": "verified", "env": "prd", "ticket": None}])
+put("captain-rollouts", "2026-10", [{"at": "2026-10-08T12:00:00Z", "repo": "o/r", "pr": 1, "state": "live", "kind": "checks", "checked": "2026-10-08T12:30:00Z", "closed": True, "failures": 1}])
 put("captain-reviews", "2026-10", [{"at": "2026-10-07T09:00:00Z", "repo": "o/r", "pr": 1, "head": "a" * 12, "tier": "R1", "verdict": "approve", "lane": "claude-opus", "assignment": "a-1"}])
 def out(i, lane, status, ci, findings, merged, dur):
     return {"id": i, "at": "2026-10-07T09:00:00Z", "lane": lane, "model": "m-" + lane, "status": status, "ci_first_pass": ci,
@@ -329,7 +329,7 @@ assert page.count("<svg") >= 5 and "No data" not in page, (page.count("<svg"), p
 assert "2026-10-08: R0 1 · R1 0 · R2 0 · R3 0 · Unknown 1" in page, "tier mix tooltip"
 assert "2026-10-07: R0 0 · R1 1" in page
 assert "<td>tier-above-max (data-and-migrations)</td>" in page and "<td>review-changes (3)</td>" in page
-assert "<td>verified</td>" in page and "prd" in page
+assert "<td>live</td><td>1</td><td>0</td><td>1</td><td>2026-10-08T12:30:00Z</td>" in page, "rollout row"
 # 3 live merges (a dry-run merge is not one); PR 1 took 2 h, PR 2 1 h, PR 5 unknown tier merged on first sight (0 h)
 assert re.search(r'class="label">Merges, 7 days</div><div class="value">3<', page), re.findall(r"Merges, 7 days.{0,80}", page)
 assert "<td>claude-sonnet</td><td>m-claude-sonnet</td><td>2</td><td>50.0%</td><td>50.0%</td><td>1</td><td>2.0</td><td>6.0 min</td>" in page, "scoreboard row"

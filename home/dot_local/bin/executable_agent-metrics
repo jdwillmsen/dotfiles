@@ -978,6 +978,7 @@ REASON_CODES = (
     (re.compile(r"pull request unavailable"), "pr-unavailable"),
 )
 TIERS = ("R0", "R1", "R2", "R3")
+ROLLOUT_STATES = ("pending", "live", "suspect", "failed", "unknown", "no-signal", "awaiting-human")
 PR_URL = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/(\d+)")
 
 
@@ -1055,14 +1056,19 @@ def clean_approval(r):
 
 
 def clean_rollout(r):
-    at = stamp(r.get("at"))
-    if not at:
-        return None
+    """A rollout row as merge-captain records it. `at` is the merge time, which never changes, so a row
+    stays in one month file as its state moves on. Failure text, head and base are not copied."""
     ref = pr_ref(r)
-    out = {"at": at, "repo": ident(r.get("repo")), "pr": ref[1] if ref else None,
-           "state": ident(r.get("state") or r.get("status")),
-           "env": ident(r.get("env") or r.get("environment") or r.get("stage")), "ticket": ident(r.get("ticket"))}
-    return out if out["state"] else None
+    at = stamp(r.get("merged_at")) or stamp(r.get("checked"))
+    if not ref or not at:
+        return None
+    state = r.get("state") if r.get("state") in ROLLOUT_STATES else "unknown"
+    count = lambda v: len(v) if isinstance(v, list) else None
+    return {"at": at, "repo": ref[0], "pr": ref[1], "tier": tier(r.get("tier")), "kind": ident(r.get("kind")), "state": state,
+            "checked": stamp(r.get("checked")), "deadline": stamp(r.get("deadline")),
+            "closed": r.get("closed") if isinstance(r.get("closed"), bool) else None,
+            "failures": count(r.get("failures")), "alerted": count(r.get("alerted")),
+            "commits": r.get("commits") if is_int(r.get("commits")) and r["commits"] >= 0 else None}
 
 
 def stable_id(v):
@@ -1110,6 +1116,10 @@ def full_key(row):
     return json.dumps(row, sort_keys=True)
 
 
+def pr_key(row):
+    return f"{row['repo']}#{row['pr']}"
+
+
 def id_key(row):
     return row["id"]
 
@@ -1119,7 +1129,7 @@ DELIVERY_KINDS = {
     "captain-log": ((CAPTAIN_STATE / "log.jsonl.1", CAPTAIN_STATE / "log.jsonl"), clean_log, first_seen_key, False),
     "captain-reviews": ((CAPTAIN_STATE / "reviews.jsonl",), clean_review, full_key, False),
     "captain-approvals": ((CAPTAIN_STATE / "approvals.jsonl",), clean_approval, full_key, False),
-    "captain-rollouts": ((CAPTAIN_STATE / "rollouts.jsonl",), clean_rollout, full_key, False),
+    "captain-rollouts": ((CAPTAIN_STATE / "rollouts.jsonl",), clean_rollout, pr_key, True),
     "eval-outcomes": ((EVAL_STATE / "outcomes.jsonl",), clean_outcome, id_key, True),
     "eval-assignments": ((EVAL_STATE / "assignments.jsonl",), clean_assignment, id_key, True),
 }

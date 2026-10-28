@@ -118,7 +118,7 @@ does only this step, with no session scan and no GitHub call, and commits just
 | Kind | Source | Key |
 |---|---|---|
 | `captain-log` | `log.jsonl.1` and `log.jsonl` | the decision without its time: a poll repeating a verdict is one row, at its first sighting |
-| `captain-reviews`, `captain-approvals`, `captain-rollouts` | `reviews.jsonl`, `approvals.jsonl`, `rollouts.jsonl` if present | the whole row |
+| `captain-reviews`, `captain-approvals`, `captain-rollouts` | `reviews.jsonl`, `approvals.jsonl`, `rollouts.jsonl` if present | the whole row; a rollout is keyed by repo and PR, the last line wins |
 | `eval-outcomes`, `eval-assignments` | agent-eval `outcomes.jsonl`, `assignments.jsonl` | `id`; the last line wins, so an enriched outcome replaces the earlier one |
 
 Re-running changes nothing, and stored rows outlive a ledger's rotation. Only
@@ -129,8 +129,13 @@ so check names and GitHub's refusal text never arrive. A pull request is its
 repo and number, a head is 12 characters, and an outcome id that is not
 identifier-shaped (T3 thread ids embed escaped command text) is stored as a
 hash. Notes, titles, bodies and review ids are never read. The captain's `run`
-summary lines are dropped. Rollout rows are read as `at`, `state` (or
-`status`), `env` (or `environment`, `stage`), `repo`, `pr` and `ticket`.
+summary lines are dropped. A rollout row (merge-captain's
+`rollouts.jsonl`, appended on every state change) is kept as repo, pr, tier,
+kind, state (a fixed set; anything else is `unknown`), `merged_at` (stored as
+`at`, so the row stays in one month), `checked`, `deadline`, `closed`, and
+counts of failures and alerts and the commit count. The latest row per repo
+and PR wins. Failure text, reason, fingerprint and head and base are not
+copied.
 
 State directories follow the tools' own overrides
 (`AGENT_EVAL_STATE`, the merge-captain state variable, else

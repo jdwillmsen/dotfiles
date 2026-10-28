@@ -129,8 +129,9 @@ Pacing rules (the contract for the tests):
   hour-of-week curve (`F = f` when the curve is flat). The curve is
   hour-of-day × weekday rates of the weekly-percent rise over the last
   `curve_history_days` (only rises above the window's running high count,
-  spread back to when that high was last seen, so lagging or falling readings
-  add nothing), each shrunk toward the average rate, the hour-of-day
+  spread back to the last reading that set or freshly confirmed it; a reading
+  without a five-hour value is stale and counts only as a new high; a window
+  whose opening is out of range starts from its first fresh reading), each shrunk toward the average rate, the hour-of-day
   profile smoothed over ±2 hours, blended toward flat so no hour is below
   `curve_floor` of an average hour. Fewer than `curve_min_history_h` hours of
   history (which must be above 0), `curve = "flat"`, or any error while

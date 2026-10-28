@@ -27,7 +27,7 @@ if __name__ == "__main__" and len(sys.argv) == 2 and sys.argv[1] in ("-v", "-V",
 _here = Path(__file__).resolve().parent
 am = SourceFileLoader("agent_metrics", str(next(p for p in (_here / "agent-metrics", _here / "executable_agent-metrics") if p.exists()))).load_module()
 
-USAGE_SHORT = "agent-trends [build [--days N] [--dry-run] [--out DIR]] [--help]"
+USAGE_SHORT = "agent-trends [build [--days N] [--delivery-only] [--dry-run] [--out DIR]] [--help]"
 DAY = 86400
 DEFAULT_DAYS = 90
 FAMILIES = ("opus", "sonnet", "haiku", "other")
@@ -816,10 +816,265 @@ def render(sessions, quota, providers, reports, report_pages, days, now):
             "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
             "<title>Agent metrics trends</title><style>" + css() + "</style></head><body><main>"
             "<h1>Agent metrics trends</h1>"
-            f'<p class="lede">Last 7 days against the 7 before, then trends over the last {days} days.</p>'
+            f'<p class="lede">Last 7 days against the 7 before, then trends over the last {days} days. <a href="delivery.html">Delivery page</a>.</p>'
             + "".join(sec)
             + f"<footer>Dollar figures are list-price estimates, not a bill; on a subscription they are an index of relative use. Generated {esc(generated)}.</footer>"
             "</main><div id=\"tip\" hidden></div><script>" + SCRIPT + "</script></body></html>\n"), len(in_days)
+
+
+# ── Delivery page ────────────────────────────────────────────────────────────
+
+DELIVERY_KINDS = ("captain-log", "captain-reviews", "captain-approvals", "captain-rollouts", "eval-outcomes", "eval-assignments")
+MAX_REASON_ROWS = 12
+REASON_ACTIONS = ("blocked", "waiting", "needs-human")
+TIER_SERIES = (("R0", 1), ("R1", 2), ("R2", 3), ("R3", 4), ("Unknown", 5))
+APPROVAL_SERIES = (("Attempted", 1), ("Confirmed", 3), ("Withdrawn", 2), ("Other", 5))
+
+
+def load_delivery(lo_month):
+    """The mirrored ledgers by kind, each row with a `ts`. A malformed row fails the build."""
+    out = {}
+    for kind in DELIVERY_KINDS:
+        rows = []
+        for path in month_files(f"delivery/{kind}", lo_month):
+            for r in load_json_lines(path):
+                ts = am.parse_ts(r.get("at"))
+                if ts is None:
+                    unreadable(path, f"a row has at {r.get('at')!r}")
+                rows.append({**r, "ts": ts, "date": dt.datetime.fromtimestamp(ts, dt.timezone.utc).date()})
+        out[kind] = rows
+    return out
+
+
+def median(values):
+    v = sorted(values)
+    if not v:
+        return None
+    mid = len(v) // 2
+    return v[mid] if len(v) % 2 else (v[mid - 1] + v[mid]) / 2
+
+
+def hours(v):
+    return "n/a" if v is None else f"{v:.1f} h"
+
+
+def merges_of(log):
+    """One merge per pull request: the first live `merged` decision."""
+    seen = {}
+    for r in sorted((r for r in log if r.get("action") == "merged" and r.get("mode") == "live"), key=lambda r: r["ts"]):
+        seen.setdefault((r.get("repo"), r.get("pr")), r)
+    return list(seen.values())
+
+
+def time_to_merge(log, merged):
+    """Hours from the captain first seeing a pull request to its merge. This is not the PR's age:
+    the ledger starts when the captain did."""
+    first = {}
+    for r in log:
+        k = (r.get("repo"), r.get("pr"))
+        first[k] = min(first.get(k, r["ts"]), r["ts"])
+    out = []
+    for m in merged:
+        h = (m["ts"] - first[(m.get("repo"), m.get("pr"))]) / 3600
+        out.append((m, h))
+    return out
+
+
+def reason_label(r):
+    extra = f" ({r['detail']})" if r.get("detail") else f" ({r['n']})" if r.get("n") is not None else ""
+    return f"{r.get('reason', 'other')}{extra}"
+
+
+def share(n, d):
+    return "n/a" if not d else pct(n / d)
+
+
+def scoreboard(outcomes):
+    groups = {}
+    for o in outcomes:
+        groups.setdefault((o.get("lane") or "(none)", o.get("model") or "(none)"), []).append(o)
+    rows = []
+    for (lane, model), g in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        done = [o for o in g if o.get("status") == "completed"]
+        ci = [o["ci_first_pass"] for o in g if isinstance(o.get("ci_first_pass"), bool)]
+        merged = [o for o in g if o.get("merged") is True]
+        found = [o["review_findings"] for o in g if am.is_amount(o.get("review_findings"))]
+        dur = [o["duration_s"] for o in g if am.is_amount(o.get("duration_s"))]
+        rows.append([lane, model, len(g), share(len(done), len(g)), share(sum(ci), len(ci)), len(merged),
+                     f"{sum(found) / len(found):.1f}" if found else "n/a",
+                     f"{median(dur) / 60:.1f} min" if dur else "n/a"])
+    return rows
+
+
+def table(header, rows):
+    return ('<div class="scroll"><table><thead><tr>' + "".join(f"<th>{esc(h)}</th>" for h in header) + "</tr></thead><tbody>"
+            + "".join("<tr>" + "".join(f"<td>{esc(c)}</td>" for c in r) + "</tr>" for r in rows) + "</tbody></table></div>")
+
+
+def render_delivery(data, quota, days, now):
+    now_ts = now.timestamp()
+    today = now.date()
+    day_list = [today - dt.timedelta(days=i) for i in range(days - 1, -1, -1)]
+    monday = today - dt.timedelta(days=today.weekday())
+    weeks = [monday - dt.timedelta(weeks=i) for i in range(math.ceil(days / 7) - 1, -1, -1)]
+    labels = [d.strftime("%b %d") for d in day_list]
+    in_range = lambda r: day_list[0] <= r["date"] <= today
+    log = [r for r in data["captain-log"] if r["ts"] <= now_ts]
+    merged = [m for m in merges_of(log) if in_range(m)]
+    sec = []
+
+    cur = [m for m in merged if now_ts - 7 * DAY < m["ts"]]
+    prev = [m for m in merged if now_ts - 14 * DAY < m["ts"] <= now_ts - 7 * DAY]
+    ttm_all = time_to_merge(log, merges_of(log))
+    ttm = lambda lo, hi: median([h for m, h in ttm_all if lo < m["ts"] <= hi])
+    approvals = [a for a in data["captain-approvals"] if a.get("status") == "confirmed"]
+    appr = lambda lo, hi: sum(1 for a in approvals if lo < a["ts"] <= hi)
+    sec.append('<div class="tiles">'
+               + tile("Merges, 7 days", str(len(cur)), tile_change(len(cur), len(prev)))
+               + tile("Median time to merge, 7 days", hours(ttm(now_ts - 7 * DAY, now_ts)),
+                      f"before: {hours(ttm(now_ts - 14 * DAY, now_ts - 7 * DAY))}")
+               + tile("Approvals, 7 days", str(appr(now_ts - 7 * DAY, now_ts)), f"before: {appr(now_ts - 14 * DAY, now_ts - 7 * DAY)}")
+               + "</div>")
+
+    sec.append("<h2>Merges</h2>")
+    if not merged:
+        sec.append(empty("Merges per day, by tier", f"The merge captain merged nothing in the last {days} days."))
+    else:
+        tiers = [name for name, _ in TIER_SERIES[:4]]
+        by = {(d, t): 0 for d in day_list for t in tiers + ["Unknown"]}
+        for m in merged:
+            by[(m["date"], m["tier"] if m.get("tier") in tiers else "Unknown")] += 1
+        names = [s for s in TIER_SERIES if s[0] != "Unknown" or any(by[(d, "Unknown")] for d in day_list)]
+        matrix = [[by[(d, n)] for d in day_list] for n, _ in names]
+        tips = [f"{d.isoformat()}: " + " · ".join(f"{n} {by[(d, n)]}" for n, _ in names) for d in day_list]
+        sec.append(figure("Merges per day, by tier", f"Last {days} days, UTC, pull requests the merge captain merged, by risk tier",
+                          list(names), stacked_bars(labels, list(names), matrix, tips, lambda v: f"{v:g}"),
+                          ["Date"] + [n for n, _ in names], [[d.isoformat()] + [by[(d, n)] for n, _ in names] for d in day_list]))
+
+        week_h = {w: [] for w in weeks}
+        for m, h in ttm_all:
+            w = m["date"] - dt.timedelta(days=m["date"].weekday())
+            if w in week_h and in_range(m):
+                week_h[w].append(h)
+        vals = [median(week_h[w]) for w in weeks]
+        if any(v is not None for v in vals):
+            top = max(v for v in vals if v is not None)
+            ymax, step = nice_ceiling(max(top, 1))
+            tips = [f"Week of {w.isoformat()}: median {hours(v)} over {len(week_h[w])} merges" for w, v in zip(weeks, vals)]
+            sec.append(figure("Median time to merge per week", "Hours from the captain first seeing a pull request to its merge",
+                              [("Median hours", 1)], line_chart([w.strftime("%b %d") for w in weeks], [("Median hours", 1, vals)], ymax, step,
+                                                                lambda v: f"{v:g}", tips, end_label=hours),
+                              ["Week of", "Median", "Merges"], [[w.isoformat(), hours(v), len(week_h[w])] for w, v in zip(weeks, vals)]))
+
+    sec.append("<h2>Review</h2>")
+    outcomes = [o for o in data["eval-outcomes"] if in_range(o)]
+    rated = [o for o in outcomes if am.is_amount(o.get("review_findings"))]
+    if not rated:
+        sec.append(empty("Review findings per outcome", "No outcome in range records a finding count."))
+    else:
+        wk = {w: [] for w in weeks}
+        for o in rated:
+            w = o["date"] - dt.timedelta(days=o["date"].weekday())
+            if w in wk:
+                wk[w].append(o["review_findings"])
+        vals = [sum(wk[w]) / len(wk[w]) if wk[w] else None for w in weeks]
+        top = max(v for v in vals if v is not None)
+        ymax, step = nice_ceiling(max(top, 1))
+        tips = [f"Week of {w.isoformat()}: " + (f"{v:.1f} findings over {len(wk[w])} outcomes" if v is not None else "no outcomes") for w, v in zip(weeks, vals)]
+        sec.append(figure("Review findings per outcome", "Mean findings recorded on delegated outcomes, by week of the outcome",
+                          [("Mean findings", 1)], line_chart([w.strftime("%b %d") for w in weeks], [("Mean findings", 1, vals)], ymax, step,
+                                                             lambda v: f"{v:g}", tips),
+                          ["Week of", "Mean findings", "Outcomes"],
+                          [[w.isoformat(), "n/a" if v is None else f"{v:.1f}", len(wk[w])] for w, v in zip(weeks, vals)]))
+
+    ap = [a for a in data["captain-approvals"] if in_range(a)]
+    if not ap:
+        sec.append(empty("Approvals per day", "The merge captain recorded no approvals in range."))
+    else:
+        known = {"attempted": "Attempted", "confirmed": "Confirmed", "withdrawn": "Withdrawn"}
+        by = {(d, n): 0 for d in day_list for n, _ in APPROVAL_SERIES}
+        for a in ap:
+            by[(a["date"], known.get(a.get("status"), "Other"))] += 1
+        names = [s for s in APPROVAL_SERIES if s[0] != "Other" or any(by[(d, "Other")] for d in day_list)]
+        matrix = [[by[(d, n)] for d in day_list] for n, _ in names]
+        tips = [f"{d.isoformat()}: " + " · ".join(f"{n} {by[(d, n)]}" for n, _ in names) for d in day_list]
+        sec.append(figure("Approvals per day", "Approvals by state; a confirmed approval is the one that counts", list(names),
+                          stacked_bars(labels, list(names), matrix, tips, lambda v: f"{v:g}"),
+                          ["Date"] + [n for n, _ in names], [[d.isoformat()] + [by[(d, n)] for n, _ in names] for d in day_list]))
+
+    sec.append("<h2>Blocked reasons</h2>")
+    recent = [r for r in log if r.get("mode") == "live" and r.get("action") in REASON_ACTIONS and now_ts - 30 * DAY < r["ts"]]
+    if not recent:
+        sec.append(empty("Why pull requests wait", "No blocked, waiting or needs-human decisions in the last 30 days."))
+    else:
+        agg = {}
+        for r in recent:
+            a = agg.setdefault((r["action"], reason_label(r)), {"prs": set(), "last": 0})
+            a["prs"].add((r.get("repo"), r.get("pr")))
+            a["last"] = max(a["last"], r["ts"])
+        ranked = sorted(agg.items(), key=lambda kv: (-len(kv[1]["prs"]), kv[0]))[:MAX_REASON_ROWS]
+        sec.append('<div class="chart"><h3>Why pull requests wait</h3><p class="sub">Distinct pull requests per decision, last 30 days, live runs</p>'
+                   + table(["Decision", "Reason", "Pull requests", "Last seen"],
+                           [[a, label, len(v["prs"]), am.iso(v["last"])] for (a, label), v in ranked]) + "</div>")
+
+    rollouts = [r for r in data["captain-rollouts"] if in_range(r)]
+    if rollouts:
+        sec.append("<h2>Rollouts</h2>")
+        agg = {}
+        for r in rollouts:
+            a = agg.setdefault((r.get("env") or "(none)", r.get("state") or "(none)"), [0, 0])
+            a[0] += 1
+            a[1] = max(a[1], r["ts"])
+        sec.append('<div class="chart"><h3>Rollout states</h3>'
+                   + table(["Environment", "State", "Rows", "Last"], [[e, s, n, am.iso(t)] for (e, s), (n, t) in sorted(agg.items())]) + "</div>")
+
+    sec.append("<h2>Lanes and models</h2>")
+    if not outcomes:
+        sec.append(empty("Lane scoreboard", f"No delegated outcomes in the last {days} days."))
+    else:
+        sec.append('<div class="chart"><h3>Lane scoreboard</h3><p class="sub">Delegated outcomes in range; shares use only outcomes that report the field</p>'
+                   + table(["Lane", "Model", "Outcomes", "Completed", "CI first pass", "Merged", "Mean findings", "Median duration"],
+                           scoreboard(outcomes)) + "</div>")
+        verdicts = {}
+        for v in (r for r in data["captain-reviews"] if in_range(r)):
+            verdicts[(v.get("lane") or "(none)", v.get("verdict") or "(none)")] = verdicts.get((v.get("lane") or "(none)", v.get("verdict") or "(none)"), 0) + 1
+        if verdicts:
+            sec.append('<div class="chart"><h3>Captain reviews by lane</h3>'
+                       + table(["Lane", "Verdict", "Reviews"], [[l, v, n] for (l, v), n in sorted(verdicts.items())]) + "</div>")
+
+    sec.append("<h2>Quota burn</h2>")
+    qdays = {}
+    for q in quota:
+        d = dt.datetime.fromtimestamp(q["ts"], dt.timezone.utc).date()
+        if day_list[0] <= d <= today and q["seven"] is not None:
+            qdays[d] = max(q["seven"], qdays.get(d, 0))
+    given = {}
+    for a in data["eval-assignments"]:
+        if in_range(a):
+            given[a["date"]] = given.get(a["date"], 0) + 1
+    if not qdays:
+        sec.append(empty("Weekly plan quota and assignments", "No weekly quota readings in range."))
+    else:
+        seven = [qdays.get(d) for d in day_list]
+        top = max(v for v in seven if v is not None)
+        ymax, step = nice_ceiling(max(top, 10))
+        ymax = min(ymax, 100.0) if top <= 100 else ymax
+        step = min(step, ymax / 2) if ymax < 100 else step
+        f = lambda v: "no reading" if v is None else f"{v:g}%"
+        tips = [f"{d.isoformat()}: 7-day peak {f(v)} · {given.get(d, 0)} assignments" for d, v in zip(day_list, seven)]
+        sec.append(figure("Weekly plan quota and assignments", "Highest 7-day reading each day (UTC); the tooltip adds agent-pace assignments that day",
+                          [("7-day window", 2)], line_chart(labels, [("7-day window", 2, seven)], ymax, step, lambda v: f"{v:g}%", tips),
+                          ["Date", "7-day peak", "Assignments"], [[d.isoformat(), f(v), given.get(d, 0)] for d, v in zip(day_list, seven)]))
+
+    return ("<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+            "<title>Agent delivery</title><style>" + css() + "</style></head><body><main>"
+            '<p><a href="./">Back to trends</a></p><h1>Agent delivery</h1>'
+            f'<p class="lede">What the merge captain and the delegated lanes delivered over the last {days} days. '
+            "Only the captain's merges are counted; a pull request merged by hand is not here.</p>"
+            + "".join(sec)
+            + f"<footer>Mirrored from the merge-captain and agent-eval ledgers. Generated {esc(am.iso(now_ts))}.</footer>"
+            "</main><div id=\"tip\" hidden></div><script>" + SCRIPT + "</script></body></html>\n")
 
 
 # ── Commands ─────────────────────────────────────────────────────────────────
@@ -846,11 +1101,13 @@ def write_atomic(target, text):
         raise
 
 
-def write_site(directory, page, report_pages):
-    """index.html plus one page per stored report. Pages whose report is gone
+def write_site(directory, page, report_pages, delivery_page=None):
+    """index.html, delivery.html and one page per stored report. Pages whose report is gone
     are removed so the site never links or serves a stale report."""
     directory.mkdir(parents=True, exist_ok=True)
     write_atomic(directory / "index.html", page)
+    if delivery_page is not None:
+        write_atomic(directory / "delivery.html", delivery_page)
     reports = directory / "reports"
     wanted = {f"{d}-{w}.html": t for d, w, t in report_pages}
     if wanted:
@@ -869,13 +1126,21 @@ def write_site(directory, page, report_pages):
     return directory / "index.html"
 
 
+def month_floor(days):
+    return (am.now().date() - dt.timedelta(days=max(days, 30) + 7)).strftime("%Y-%m")
+
+
+def build_delivery(days):
+    lo_month = month_floor(days)
+    return render_delivery(load_delivery(lo_month), load_quota(lo_month), days, am.now())
+
+
 def build_page(days):
     now = am.now()
-    start = now.date() - dt.timedelta(days=max(days, 30) + 7)
-    lo_month = start.strftime("%Y-%m")
+    lo_month = month_floor(days)
     report_pages = load_report_markdown()
     page, count = render(load_sessions(lo_month), load_quota(lo_month), load_providers(lo_month), load_reports(), report_pages, days, now)
-    return page, count, report_pages
+    return page, count, report_pages, build_delivery(days)
 
 
 def cmd_build(args):
@@ -884,10 +1149,16 @@ def cmd_build(args):
     if args.out and args.dry_run:
         usage_error("--out and --dry-run both pick the destination; use one")
     am.require_store()
+    only = args.delivery_only
     if args.out or args.dry_run:
-        page, count, report_pages = build_page(args.days)
         directory = Path(args.out) if args.out else Path(tempfile.mkdtemp(prefix="agent-trends-"))
-        am.emit({"path": str(write_site(directory, page, report_pages)), "sessions_charted": count, "published": False})
+        if only:
+            directory.mkdir(parents=True, exist_ok=True)
+            write_atomic(directory / "delivery.html", build_delivery(args.days))
+            am.emit({"path": str(directory / "delivery.html"), "published": False})
+            return 0
+        page, count, report_pages, delivery = build_page(args.days)
+        am.emit({"path": str(write_site(directory, page, report_pages, delivery)), "sessions_charted": count, "published": False})
         return 0
     with am.Lock():
         if am.has_upstream():
@@ -896,10 +1167,16 @@ def cmd_build(args):
                 detail = (pulled.stderr or pulled.stdout).strip().splitlines()
                 am.die(am.EXIT_FAIL, f"git pull failed: {detail[-1] if detail else pulled.returncode}",
                        f"Resolve it in {am.tilde(am.STORE)} and re-run")
-        page, count, report_pages = build_page(args.days)
-        target = write_site(am.STORE / "site", page, report_pages)
+        site = am.STORE / "site"
+        if only:
+            site.mkdir(exist_ok=True)
+            write_atomic(site / "delivery.html", build_delivery(args.days))
+            target, count = site / "delivery.html", None
+        else:
+            page, count, report_pages, delivery = build_page(args.days)
+            target = write_site(site, page, report_pages, delivery)
         result = am.publish(f"site: {am.now().strftime('%Y-%m-%d')}", dirs=("site",))
-    am.emit({"path": am.tilde(target), "sessions_charted": count, **result})
+    am.emit({"path": am.tilde(target), **({} if count is None else {"sessions_charted": count}), **result})
     return 1 if "error" in result else 0
 
 
@@ -916,6 +1193,8 @@ def build_parser():
     b = sub.add_parser("build", help="render the trends page; publish it unless --out or --dry-run")
     b.set_defaults(func=cmd_build)
     b.add_argument("--days", type=int, default=DEFAULT_DAYS, metavar="N", help=f"chart range in days, 1 to {MAX_DAYS} (default 90)")
+    b.add_argument("--delivery-only", action="store_true",
+                   help="render only delivery.html (reads the delivery mirror and quota, not sessions or reports): cheap enough for a short timer")
     b.add_argument("--dry-run", action="store_true", help="write to a temp dir, print the path, publish nothing")
     b.add_argument("--out", metavar="DIR", help="write DIR/index.html and DIR/reports/ instead of the store; publish nothing")
     return p

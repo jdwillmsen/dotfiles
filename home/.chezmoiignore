@@ -7,6 +7,7 @@ run_once_46-install-cloud-clis.sh
 .config/claude-jira.json
 {{ end }}
 {{ if env "CI" }}
+29-install-claude-code.sh
 run_once_46-install-cloud-clis.sh
 run_once_47-install-go.sh
 run_once_49-install-dev-tools.sh.tmpl

@@ -217,6 +217,7 @@ These run as part of `chezmoi apply` and need no root:
 
 | Script | Installs |
 |---|---|
+| `run_once_before_29-install-claude-code.sh` | Claude Code's native build, the only install that updates itself (migrates a winget/brew/npm install with `claude install`); on Windows also puts `~/.local/bin` on the user PATH |
 | `run_once_42-install-cli-tools.sh` | ripgrep, delta, fd, eza, zoxide, starship, fzf, direnv, nvim, btop, sox (Claude Code voice mode's recorder, useful only on a host that has a microphone of its own), cmake, bubblewrap (Codex sandbox) |
 | `run_onchange_43-install-agent-clis.sh.tmpl` | the CLIs the agent skills drive — version-pinned, see below |
 | `run_once_45-install-python-tools.sh` | uv, pipx |

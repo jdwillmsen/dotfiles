@@ -476,6 +476,19 @@ want delivery_rows_added 1 "delivery sync"
 run 0 delivery sync
 want delivery_rows_added 0 "delivery sync again"
 
+# --no-push is accepted after `sync` and before it; a commit the store refuses is a structured error.
+echo '{"repo":"o/r","pr":7,"head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tier":"R1","status":"withdrawn","at":"2026-10-08T14:00:00Z"}' >>"$cap/approvals.jsonl"
+before="$(commits)"
+run 0 delivery sync --no-push
+[ "$(commits)" = "$((before + 1))" ] && [ "$(sg rev-parse HEAD)" != "$(git -C "$remote" rev-parse main)" ] || fail "delivery sync --no-push pushed or did not commit"
+run 0 delivery --no-push sync
+printf '#!/bin/sh\nexit 1\n' >"$store/.git/hooks/pre-commit"; chmod +x "$store/.git/hooks/pre-commit"
+echo '{"repo":"o/r","pr":7,"head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tier":"R1","status":"withdrawn","at":"2026-10-08T15:00:00Z"}' >>"$cap/approvals.jsonl"
+run 1 delivery sync
+grep -q "^error:" "$out" && ! grep -q Traceback "$err" || fail "a refused commit must be a structured error" "$(cat "$out" "$err")"
+rm "$store/.git/hooks/pre-commit"
+run 0 delivery sync
+
 # ── Quota roll-up ──
 qlog="$AGENT_METRICS_STATE/quota.jsonl"
 reading() { printf '{"at":%s,"five_hour_pct":%s,"five_hour_resets_at":1,"seven_day_pct":%s,"seven_day_resets_at":%s}\n' "$(date -u -d "$1" +%s)" "$2" "$3" "$(date -u -d "2026-10-12T00:00:00Z" +%s)"; }

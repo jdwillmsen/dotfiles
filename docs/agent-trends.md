@@ -52,8 +52,8 @@ says so when it has no data.
 
 Limits worth knowing: only merges the merge captain made are counted;
 time to merge runs from the captain first seeing the PR, not from opening it;
-findings and CI first pass appear only once `agent-eval enrich` has joined the
-outcome to its PR; a malformed mirrored row exits 2 naming the file.
+findings and CI first pass appear only when the recorded outcome carries them
+(`agent-eval record`); `enrich` only joins the PR and its merged and reverted state; a malformed mirrored row exits 2 naming the file.
 
 ## Running it
 

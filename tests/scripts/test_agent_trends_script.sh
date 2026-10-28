@@ -338,6 +338,28 @@ PY
 run 0 build --delivery-only --out "$tmp/delonly"
 [ -f "$tmp/delonly/delivery.html" ] && [ ! -e "$tmp/delonly/index.html" ] || fail "--delivery-only must write only delivery.html"
 cmp -s "$tmp/delonly/delivery.html" "$tmp/del/delivery.html" || fail "--delivery-only renders a different page"
+# A short range still gets the partial first week, full-size tiles, and first sightings from older months.
+mkdir -p "$store/delivery/captain-log"
+python3 - "$store/delivery" <<'PY'
+import json
+d = __import__("sys").argv[1]
+def dec(at, pr, action, reason, **kw):
+    return {"at": at, "repo": "o/r", "pr": pr, "head": "a" * 12, "tier": "R1", "action": action, "reason": reason, "mode": "live", "lane": None, **kw}
+open(f"{d}/captain-log/2026-08.jsonl", "w").write(json.dumps(dec("2026-08-20T08:00:00Z", 9, "blocked", "checks-failed")) + "\n")
+with open(f"{d}/captain-log/2026-10.jsonl", "a") as f:
+    f.write(json.dumps(dec("2026-10-08T10:00:00Z", 9, "merged", "review-approved")) + "\n")
+    f.write(json.dumps(dec("2026-10-01T10:00:00Z", 10, "merged", "review-approved")) + "\n")
+with open(f"{d}/eval-outcomes/2026-10.jsonl", "a") as f:
+    f.write(json.dumps({"id": "d", "at": "2026-10-03T09:00:00Z", "lane": "x", "model": "y", "status": "completed", "review_findings": 5}) + "\n")
+PY
+run 0 build --days 7 --delivery-only --out "$tmp/del7"
+python3 - "$tmp/del7/delivery.html" <<'PY' || fail "a 7-day delivery page is wrong"
+import sys
+page = open(sys.argv[1]).read()
+assert "Week of 2026-09-28: 5.0 findings over 1 outcomes" in page, "partial first week is dropped"
+assert "+300%" in page, "the tile must compare against merges before the chart range"
+assert "median 1.5 h over 4 merges" in page, "time to merge must use a first sighting from an older month"
+PY
 echo '{bad' >"$store/delivery/captain-approvals/2026-10.jsonl"
 run 2 build --delivery-only --out "$tmp/delbad"
 grep -q "captain-approvals/2026-10.jsonl" "$out" && [ ! -e "$tmp/delbad/delivery.html" ] || fail "a bad mirrored row must exit 2 naming the file" "$(cat "$out")"
@@ -358,6 +380,13 @@ run 0 build
 rm "$store/reports/2026-10-05-weekly.md"
 run 0 build
 git -C "$store" show --name-status --format= HEAD | grep -qx $'D\tsite/reports/2026-10-05-weekly.html' || fail "a stale report page was not removed from the commit" "$(git -C "$store" show --name-status --format= HEAD)"
+# --delivery-only commits delivery.html alone, even with another site file unfinished.
+echo '<!-- unfinished -->' >>"$store/site/index.html"
+run 0 build --delivery-only --days 30
+[ "$(git -C "$store" show --name-only --format= HEAD)" = "site/delivery.html" ] || fail "--delivery-only committed more than delivery.html" "$(git -C "$store" show --name-only --format= HEAD)"
+git -C "$store" status --porcelain | grep -q "site/index.html" || fail "--delivery-only swept up the unfinished index"
+git -C "$store" checkout -q -- site/index.html
+run 0 build
 run 0 build --days 30 --out "$tmp/page30"
 grep -q "2026-09-09" "$tmp/page30/index.html" && fail "--days 30 still charts September 9"
 

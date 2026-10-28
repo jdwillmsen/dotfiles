@@ -157,6 +157,11 @@ chez_render() { chezmoi execute-template --source "$CHEZ_SRC" --config "$1" < "$
 # land under the sandbox HOME, so they cost time and noise rather than machine
 # state.
 #
+# Claude Code's Windows installer targets USERPROFILE rather than HOME, so the
+# guard also carries a no-op claude: script 29 then takes its migrate branch
+# instead of downloading a real build into the sandbox, or on Windows into the
+# real profile.
+#
 # The guard nests under CHEZ_TMP_ROOT so teardown reaps it even on a signal.
 chez_apply() {
     local guard rc=0
@@ -164,7 +169,10 @@ chez_apply() {
     printf '#!/usr/bin/env bash
 exit 1
 ' >"$guard/sudo"
-    chmod 755 "$guard/sudo"
+    printf '#!/usr/bin/env bash
+exit 0
+' >"$guard/claude"
+    chmod 755 "$guard/sudo" "$guard/claude"
     HOME="$2" PATH="$guard:$PATH" \
         NO_MISTAKES_LINK_DIR="$2/.local/bin" \
         npm_config_prefix="$2/.npm-global" \

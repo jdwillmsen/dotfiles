@@ -21,7 +21,7 @@ out="$(
     export CI=1
     render
 )"
-for s in run_once_46-install-cloud-clis.sh run_once_47-install-go.sh; do
+for s in run_once_46-install-cloud-clis.sh run_once_47-install-go.sh 29-install-claude-code.sh; do
     grep -qx -- "$s" <<<"$out" || fail "$s is not ignored under CI"
 done
 
@@ -29,7 +29,7 @@ out="$(
     unset CI
     render
 )"
-for s in run_once_46-install-cloud-clis.sh run_once_47-install-go.sh; do
+for s in run_once_46-install-cloud-clis.sh run_once_47-install-go.sh 29-install-claude-code.sh; do
     grep -qx -- "$s" <<<"$out" && fail "$s must still run on a real machine"
 done
 

@@ -273,10 +273,80 @@ run 0 build --dry-run
 path="$(sed -n 's/^path: //p' "$out")"
 [ -f "$(dirname "$path")/reports/2026-10-08-daily.html" ] || fail "--dry-run did not write report pages" "$(cat "$out")"
 
+# ── Delivery page ──
+run 0 build --out "$tmp/nodel"
+python3 - "$tmp/nodel" <<'PY' || fail "the empty delivery page is wrong"
+import sys
+page = open(sys.argv[1] + "/delivery.html").read()
+assert page.count("No data") >= 4, page.count("No data")
+assert "Rollout states" not in page, "rollouts show only when rows exist"
+assert 'href="delivery.html"' in open(sys.argv[1] + "/index.html").read()
+assert 'href="./"' in page
+for bad in ("http://", "https://", "<script src", "<img", "@import"):
+    assert bad not in page, bad
+PY
+python3 - "$store/delivery" <<'PY'
+import json, os, sys
+root = sys.argv[1]
+def put(kind, month, rows):
+    os.makedirs(f"{root}/{kind}", exist_ok=True)
+    with open(f"{root}/{kind}/{month}.jsonl", "w") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+def dec(at, pr, action, reason, tier="R1", **kw):
+    return {"at": at, "repo": "o/r", "pr": pr, "head": "a" * 12, "tier": tier, "action": action, "reason": reason, "mode": "live", "lane": None, **kw}
+put("captain-log", "2026-10", [
+    dec("2026-10-07T08:00:00Z", 1, "blocked", "checks-failed"),
+    dec("2026-10-07T10:00:00Z", 1, "merged", "review-approved", lane="claude-opus"),
+    dec("2026-10-08T08:00:00Z", 2, "waiting", "checks-pending"),
+    dec("2026-10-08T09:00:00Z", 2, "merged", "no-review-needed", tier="R0"),
+    dec("2026-10-08T09:00:00Z", 3, "needs-human", "tier-above-max", tier="R3", detail="data-and-migrations"),
+    dec("2026-10-08T09:30:00Z", 4, "blocked", "review-changes", n=3),
+    dec("2026-10-08T09:40:00Z", 5, "merged", "review-approved", tier=None),
+    dec("2026-10-08T09:50:00Z", 6, "merged", "review-approved", mode="dry-run"),
+])
+put("captain-approvals", "2026-10", [
+    {"at": "2026-10-07T09:50:00Z", "repo": "o/r", "pr": 1, "head": "a" * 12, "status": "confirmed", "tier": "R1"},
+    {"at": "2026-10-08T09:50:00Z", "repo": "o/r", "pr": 7, "head": "a" * 12, "status": "withdrawn", "tier": "R1"},
+])
+put("captain-rollouts", "2026-10", [{"at": "2026-10-08T12:00:00Z", "repo": "o/r", "pr": 1, "state": "verified", "env": "prd", "ticket": None}])
+put("captain-reviews", "2026-10", [{"at": "2026-10-07T09:00:00Z", "repo": "o/r", "pr": 1, "head": "a" * 12, "tier": "R1", "verdict": "approve", "lane": "claude-opus", "assignment": "a-1"}])
+def out(i, lane, status, ci, findings, merged, dur):
+    return {"id": i, "at": "2026-10-07T09:00:00Z", "lane": lane, "model": "m-" + lane, "status": status, "ci_first_pass": ci,
+            "review_findings": findings, "merged": merged, "duration_s": dur, "pr_repo": None, "pr_number": None}
+put("eval-outcomes", "2026-10", [out("a", "claude-sonnet", "completed", True, 2, True, 600), out("b", "claude-sonnet", "failed", False, None, None, 120),
+                                  out("c", "opencode", "completed", None, 4, False, 1800)])
+put("eval-assignments", "2026-10", [{"id": "a", "at": "2026-10-08T09:00:00Z", "lane": "claude-sonnet", "pace_used": 20}])
+PY
+run 0 build --out "$tmp/del"
+python3 - "$tmp/del/delivery.html" <<'PY' || fail "delivery page content is wrong"
+import re, sys
+page = open(sys.argv[1]).read()
+for want in ("Merges per day, by tier", "Median time to merge per week", "Review findings per outcome", "Approvals per day",
+             "Why pull requests wait", "Rollout states", "Lane scoreboard", "Captain reviews by lane", "Weekly plan quota and assignments"):
+    assert want in page, want
+assert page.count("<svg") >= 5 and "No data" not in page, (page.count("<svg"), page.count("No data"))
+assert "2026-10-08: R0 1 · R1 0 · R2 0 · R3 0 · Unknown 1" in page, "tier mix tooltip"
+assert "2026-10-07: R0 0 · R1 1" in page
+assert "<td>tier-above-max (data-and-migrations)</td>" in page and "<td>review-changes (3)</td>" in page
+assert "<td>verified</td>" in page and "prd" in page
+# 3 live merges (a dry-run merge is not one); PR 1 took 2 h, PR 2 1 h, PR 5 unknown tier merged on first sight (0 h)
+assert re.search(r'class="label">Merges, 7 days</div><div class="value">3<', page), re.findall(r"Merges, 7 days.{0,80}", page)
+assert "<td>claude-sonnet</td><td>m-claude-sonnet</td><td>2</td><td>50.0%</td><td>50.0%</td><td>1</td><td>2.0</td><td>6.0 min</td>" in page, "scoreboard row"
+assert re.search(r"2026-10-08: 7-day peak [0-9.]+% · 1 assignments", page), re.findall(r"2026-10-08: 7-day.{0,50}", page)
+PY
+run 0 build --delivery-only --out "$tmp/delonly"
+[ -f "$tmp/delonly/delivery.html" ] && [ ! -e "$tmp/delonly/index.html" ] || fail "--delivery-only must write only delivery.html"
+cmp -s "$tmp/delonly/delivery.html" "$tmp/del/delivery.html" || fail "--delivery-only renders a different page"
+echo '{bad' >"$store/delivery/captain-approvals/2026-10.jsonl"
+run 2 build --delivery-only --out "$tmp/delbad"
+grep -q "captain-approvals/2026-10.jsonl" "$out" && [ ! -e "$tmp/delbad/delivery.html" ] || fail "a bad mirrored row must exit 2 naming the file" "$(cat "$out")"
+rm -rf "$store/delivery"
+
 # ── Default build publishes under the store, and only the site ──
 echo '{}' >"$store/reports/inflight.json"
 run 0 build
-[ "$(git -C "$store" show --name-only --format= HEAD | sort)" = "$(printf '%s\n' site/index.html site/reports/2026-10-05-weekly.html site/reports/2026-10-08-daily.html)" ] || fail "build committed more than the site" "$(git -C "$store" show --name-only --format= HEAD)"
+[ "$(git -C "$store" show --name-only --format= HEAD | sort)" = "$(printf '%s\n' site/delivery.html site/index.html site/reports/2026-10-05-weekly.html site/reports/2026-10-08-daily.html)" ] || fail "build committed more than the site" "$(git -C "$store" show --name-only --format= HEAD)"
 git -C "$store" status --porcelain | grep -q "reports/inflight.json" || fail "build swept up another tool's in-progress file"
 rm "$store/reports/inflight.json"
 [ -f "$store/site/index.html" ] || fail "build did not write site/index.html"

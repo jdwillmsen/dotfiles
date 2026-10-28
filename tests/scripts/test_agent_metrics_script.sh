@@ -370,6 +370,107 @@ AGENT_METRICS_LOCK_WAIT=1 run 1 collect --since 30
 grep -q "another" "$out" || fail "a held lock is not reported" "$(cat "$out")"
 wait
 
+# ── Delivery ledgers ──
+cap="$fx/.local/state/merge-captain"
+ev="$fx/.local/state/agent-eval"
+mkdir -p "$cap" "$ev"
+cat >"$cap/log.jsonl" <<'L'
+{"at":"2026-10-08T10:00:00Z","run":"r1","repo":"o/r","pr":7,"head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tier":"R1","action":"blocked","reason":"checks failed: SECRETCHECK-NAME, other","mode":"live","lane":null}
+{"at":"2026-10-08T10:15:00Z","run":"r2","repo":"o/r","pr":7,"head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tier":"R1","action":"blocked","reason":"checks failed: SECRETCHECK-NAME, other","mode":"live","lane":null}
+{"at":"2026-10-08T11:00:00Z","run":"r3","repo":"o/r","pr":7,"head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tier":"R1","action":"merged","reason":"review approve by claude-opus","mode":"live","lane":"claude-opus"}
+{"at":"2026-10-08T11:00:00Z","run":"r3","repo":null,"pr":null,"head":null,"tier":null,"action":"run","reason":"3 decisions, 1 merged","mode":null,"lane":null}
+{"at":"2026-10-08T12:00:00Z","run":"r4","repo":"o/r","pr":8,"head":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","tier":"R3","action":"needs-human","reason":"R3 above max R2: data-and-migrations","mode":"live","lane":null}
+{"at":"2026-10-08T12:30:00Z","run":"r4","repo":"o/r","pr":9,"head":"cccccccccccccccccccccccccccccccccccccccc","tier":"R1","action":"blocked","reason":"review changes: 3 findings","mode":"live","lane":null}
+not json
+L
+echo '{"at":"2026-09-30T10:00:00Z","run":"r0","repo":"o/r","pr":6,"head":"dddddddddddddddddddddddddddddddddddddddd","tier":"R0","action":"merged","reason":"R0 gates met, no review needed","mode":"live","lane":null}' >"$cap/log.jsonl.1"
+echo '{"repo":"o/r","pr":7,"head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tier":"R1","verdict":"approve","lane":"claude-opus","assignment":"a-1","at":"2026-10-08T10:50:00Z"}' >"$cap/reviews.jsonl"
+cat >"$cap/approvals.jsonl" <<'L'
+{"repo":"o/r","pr":7,"head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tier":"R1","status":"attempted","at":"2026-10-08T10:55:00Z","body":"private text"}
+{"repo":"o/r","pr":7,"head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tier":"R1","status":"confirmed","review_id":99,"at":"2026-10-08T10:56:00Z"}
+L
+echo '{"repo":"o/r","pr":7,"state":"verified","env":"prd","ticket":"JDW-1","at":"2026-10-08T11:30:00Z","title":"private title"}' >"$cap/rollouts.jsonl"
+cat >"$ev/outcomes.jsonl" <<'L'
+{"id":"t3:thread:cmd%3Amcp%3Aprivate-uuid","at":"2026-10-08T09:00:00Z","lane":"claude-sonnet","provider":"claudeAgent","model":"claude-sonnet-5-5","class":"impl","risk":"R1","ticket":"JDW-1","status":"completed","failure_kind":"none","duration_s":120,"items":3,"attempt":1,"escalated_from":null,"pr":null,"ci_first_pass":null,"review_findings":null,"merged":null,"reverted":null,"human_touch":null,"cost_usd":null,"source":"t3","note":"purple prompt text"}
+{"id":"a-1","at":"2026-10-08T09:30:00Z","lane":"claude-opus","provider":"claudeAgent","model":"claude-opus-5-5","class":"review","risk":"R1","ticket":"JDW-1","status":"completed","failure_kind":"none","duration_s":60,"items":1,"attempt":1,"escalated_from":null,"pr":null,"ci_first_pass":null,"review_findings":2,"merged":null,"reverted":null,"human_touch":null,"cost_usd":null,"source":"record"}
+L
+echo '{"id":"a-1","at":"2026-10-08T09:00:00Z","lane":"claude-sonnet","provider":"claudeAgent","model":"claude-sonnet-5-5","class":"impl","risk":"R1","ticket":"JDW-1","pace":{"used":20.0,"line":13.1,"multiplier":0.5},"implementer":null}' >"$ev/assignments.jsonl"
+# A stand-in for agent-eval: enrich appends the pull request outcome the real one would find.
+cat >"$tmp/fake-eval" <<EOF2
+#!/bin/sh
+[ "\$1" = enrich ] || exit 2
+echo x >>"$tmp/enrich-calls"
+echo '{"id":"a-1","at":"2026-10-08T09:30:00Z","lane":"claude-opus","provider":"claudeAgent","model":"claude-opus-5-5","class":"review","risk":"R1","ticket":"JDW-1","status":"completed","failure_kind":"none","duration_s":60,"items":1,"attempt":1,"escalated_from":null,"pr":"https://github.com/o/r/pull/7","ci_first_pass":true,"review_findings":2,"merged":true,"reverted":false,"human_touch":null,"cost_usd":null,"source":"record"}' >>"$ev/outcomes.jsonl"
+EOF2
+chmod +x "$tmp/fake-eval"
+dl="$store/delivery"
+rows() { cat "$dl/$1"/*.jsonl 2>/dev/null | wc -l | tr -d ' '; }
+
+run 0 collect --since 30 --dry-run
+[ ! -e "$dl" ] && [ ! -e "$tmp/enrich-calls" ] || fail "a dry run wrote delivery rows or ran enrich"
+want delivery_rows_added 12 "dry run counts the rows it would mirror"
+
+AGENT_METRICS_EVAL="$tmp/fake-eval" run 0 collect --since 30
+want eval_enrich ok "enrich runs before the mirror"
+want delivery_rows_added 12 "first mirror"
+[ "$(wc -l <"$tmp/enrich-calls")" = 1 ] || fail "collect did not run enrich exactly once"
+[ "$(rows captain-log)" = 5 ] || fail "captain-log should hold 4 distinct decisions plus the rotated one: got $(rows captain-log)"
+[ -f "$dl/captain-log/2026-09.jsonl" ] && [ -f "$dl/captain-log/2026-10.jsonl" ] || fail "rows are not split by month"
+[ "$(rows captain-reviews)" = 1 ] && [ "$(rows captain-approvals)" = 2 ] && [ "$(rows captain-rollouts)" = 1 ] || fail "review, approval or rollout rows missing"
+[ "$(rows eval-outcomes)" = 2 ] && [ "$(rows eval-assignments)" = 1 ] || fail "eval rows missing"
+python3 - "$dl" <<'PY' || fail "mirrored rows are wrong"
+import glob, json, sys
+d = sys.argv[1]
+load = lambda k: [json.loads(l) for f in sorted(glob.glob(f"{d}/{k}/*.jsonl")) for l in open(f)]
+log = load("captain-log")
+blocked = [r for r in log if r["action"] == "blocked" and r["pr"] == 7]
+assert len(blocked) == 1 and blocked[0]["at"] == "2026-10-08T10:00:00Z" and blocked[0]["reason"] == "checks-failed", blocked
+assert any(r["reason"] == "tier-above-max" and r["detail"] == "data-and-migrations" for r in log), log
+assert any(r["reason"] == "review-changes" and r["n"] == 3 for r in log), log
+assert not any(r["action"] == "run" for r in log)
+assert all(len(r["head"]) == 12 for r in log)
+out = {r["id"]: r for r in load("eval-outcomes")}
+assert out["a-1"]["merged"] is True and out["a-1"]["pr_repo"] == "o/r" and out["a-1"]["pr_number"] == 7, out["a-1"]
+assert [k for k in out if k != "a-1"][0].startswith("h-"), list(out)
+roll = load("captain-rollouts")[0]
+assert roll["state"] == "verified" and roll["env"] == "prd" and "title" not in roll, roll
+assert load("eval-assignments")[0]["pace_multiplier"] == 0.5
+PY
+if grep -rE "SECRETCHECK|purple|private|private-uuid|review_id" "$dl"; then fail "free text leaked into the delivery mirror"; fi
+
+before="$(commits)"
+AGENT_METRICS_EVAL="$tmp/fake-eval" run 0 collect --since 30
+want delivery_rows_added 0 "second mirror is a no-op"
+[ "$(commits)" = "$before" ] || fail "an unchanged delivery mirror made a commit"
+
+# The ledger rotates and an outcome is enriched later: stored rows stay, changed ones update.
+: >"$cap/log.jsonl"
+python3 - "$ev/outcomes.jsonl" <<'PY'
+import json, sys
+rows = [json.loads(l) for l in open(sys.argv[1])]
+last = dict(rows[-1], review_findings=4)
+open(sys.argv[1], "a").write(json.dumps(last) + "\n")
+PY
+run 0 collect --since 30 --no-enrich
+want eval_enrich skipped "--no-enrich"
+want delivery_rows_added 1 "one changed outcome"
+[ "$(rows captain-log)" = 5 ] || fail "a rotated-away ledger lost stored decisions"
+grep -q '"review_findings":4' "$dl"/eval-outcomes/*.jsonl || fail "an updated outcome was not rewritten"
+
+# A failing enrich is reported but never fails the collect.
+printf '#!/bin/sh\nexit 1\n' >"$tmp/bad-eval"; chmod +x "$tmp/bad-eval"
+AGENT_METRICS_EVAL="$tmp/bad-eval" run 0 collect --since 30
+want eval_enrich failed "enrich exit 1"
+
+# delivery sync: mirror only, no session scan or GitHub call.
+echo '{"repo":"o/r","pr":7,"head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tier":"R1","status":"withdrawn","at":"2026-10-08T13:00:00Z"}' >>"$cap/approvals.jsonl"
+before="$(commits)"
+run 0 delivery sync
+want delivery_rows_added 1 "delivery sync"
+[ "$(commits)" = "$((before + 1))" ] && [ "$(sg rev-parse HEAD)" = "$(git -C "$remote" rev-parse main)" ] || fail "delivery sync did not commit and push"
+run 0 delivery sync
+want delivery_rows_added 0 "delivery sync again"
+
 # ── Quota roll-up ──
 qlog="$AGENT_METRICS_STATE/quota.jsonl"
 reading() { printf '{"at":%s,"five_hour_pct":%s,"five_hour_resets_at":1,"seven_day_pct":%s,"seven_day_resets_at":%s}\n' "$(date -u -d "$1" +%s)" "$2" "$3" "$(date -u -d "2026-10-12T00:00:00Z" +%s)"; }

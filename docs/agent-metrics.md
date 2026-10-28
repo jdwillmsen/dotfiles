@@ -23,7 +23,10 @@ session labelling all read from this store. The design is in
    is not rescanned keeps its row, which is how history outlives Claude
    Code's 90-day transcript cleanup.
 5. Folds finished hours of the quota log into `quota/YYYY-MM.jsonl`.
-6. Commits when anything changed and pushes.
+6. Runs `agent-eval enrich` (joins outcomes to pull requests by ticket key; a
+   failure is reported as `eval_enrich: failed` and never fails the run, and
+   `--no-enrich` skips it), then mirrors the delivery ledgers (below).
+7. Commits when anything changed and pushes.
 
 A failed push exits 1 with the commit kept; the next run delivers it. The
 collector commits straight to the store's `main`. That is a deliberate
@@ -104,6 +107,35 @@ Providers give a percent, never tokens or dollars, so cost stays Claude-only.
 `agent-metrics providers` prints the newest local reading of each; the trends
 page charts them.
 
+## Delivery ledgers
+
+The agent-eval and merge-captain ledgers are local files that rotate or get
+edited, so `collect` mirrors them into `delivery/<kind>/YYYY-MM.jsonl` (month
+of the row's `at`) for the trends Delivery page. `agent-metrics delivery sync`
+does only this step, with no session scan and no GitHub call, and commits just
+`delivery/`.
+
+| Kind | Source | Key |
+|---|---|---|
+| `captain-log` | `log.jsonl.1` and `log.jsonl` | the decision without its time: a poll repeating a verdict is one row, at its first sighting |
+| `captain-reviews`, `captain-approvals`, `captain-rollouts` | `reviews.jsonl`, `approvals.jsonl`, `rollouts.jsonl` if present | the whole row |
+| `eval-outcomes`, `eval-assignments` | agent-eval `outcomes.jsonl`, `assignments.jsonl` | `id`; the last line wins, so an enriched outcome replaces the earlier one |
+
+Re-running changes nothing, and stored rows outlive a ledger's rotation. Only
+numbers and identifiers are copied. A merge-captain reason becomes a fixed code
+(`checks-failed`, `unresolved-threads`, `tier-above-max` with the risk classes
+as `detail`, `review-changes` with `n`, and so on; anything else is `other`),
+so check names and GitHub's refusal text never arrive. A pull request is its
+repo and number, a head is 12 characters, and an outcome id that is not
+identifier-shaped (T3 thread ids embed escaped command text) is stored as a
+hash. Notes, titles, bodies and review ids are never read. The captain's `run`
+summary lines are dropped. Rollout rows are read as `at`, `state` (or
+`status`), `env` (or `environment`, `stage`), `repo`, `pr` and `ticket`.
+
+State directories follow the tools' own overrides
+(`AGENT_EVAL_STATE`, the merge-captain state variable, else
+`$XDG_STATE_HOME`). Nothing here changes how either tool behaves.
+
 ## Budget
 
 The audit's own model spend is capped by `~/.config/agent-metrics/budget.json`:
@@ -141,6 +173,8 @@ Anything that spends on a model runs `budget check` first and
 agent-metrics                               # store, last commit, latest quota
 agent-metrics collect --dry-run             # counts only; writes nothing
 agent-metrics collect --since 90            # one-time backfill
+agent-metrics collect --no-enrich           # skip the GitHub search per ticket
+agent-metrics delivery sync                 # mirror the delivery ledgers only
 agent-metrics providers                     # newest local reading per provider
 agent-metrics providers snapshot            # log a reading now
 agent-metrics budget                        # state and the numbers behind it

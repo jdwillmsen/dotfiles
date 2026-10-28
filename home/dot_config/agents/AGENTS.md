@@ -168,6 +168,10 @@ unsure, classify up. Put the result on the PR and ticket as labels
   any; *Verified* — what was actually run, one line each. No file-by-file
   lists, restated diff, pasted prompts, logs or unticked checkboxes. Every
   claim must match the final diff — rewrite the body after the last push.
+- **In a T3 thread, link every PR you open** with the `link_pull_request` tool
+  right after creating it, each layer of a stack included, so the owner can
+  review it from the chat. Before finishing, check `list_thread_pull_requests`
+  and link any PR from your work that is missing.
 
 ## Devbox
 

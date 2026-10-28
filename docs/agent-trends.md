@@ -44,7 +44,7 @@ same inline CSS, palette and chart helpers from the delivery mirror
 per day stacked by risk tier; median time to merge per week; mean review
 findings per delegated outcome per week; approvals per day by state; why pull
 requests wait (distinct PRs per blocked, waiting or needs-human reason, 30
-days, live runs); rollout states, only when rollout rows exist; a lane and
+days, live runs); rollout states (pull requests merged in range by their latest state, open ones, failure records, last check), only when rollout rows exist; a lane and
 model scoreboard (outcomes, completed share, CI first pass, merged, mean
 findings, median duration) with captain reviews by lane; and the weekly quota
 peak per day with agent-pace assignment counts in the tooltip. Each section

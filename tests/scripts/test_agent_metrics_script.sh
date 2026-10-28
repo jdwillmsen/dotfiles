@@ -389,7 +389,10 @@ cat >"$cap/approvals.jsonl" <<'L'
 {"repo":"o/r","pr":7,"head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tier":"R1","status":"attempted","at":"2026-10-08T10:55:00Z","body":"private text"}
 {"repo":"o/r","pr":7,"head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tier":"R1","status":"confirmed","review_id":99,"at":"2026-10-08T10:56:00Z"}
 L
-echo '{"repo":"o/r","pr":7,"state":"verified","env":"prd","ticket":"JDW-1","at":"2026-10-08T11:30:00Z","title":"private title"}' >"$cap/rollouts.jsonl"
+cat >"$cap/rollouts.jsonl" <<'L'
+{"repo":"o/r","pr":7,"tier":"R2","kind":"checks","state":"pending","merged_at":"2026-10-08T11:00:00Z","deadline":"2026-10-08T12:00:00Z","head":null,"base":null,"commits":null,"fingerprint":"unknown","failures":[],"alerted":[],"closed":false,"checked":null,"reason":"merged"}
+{"repo":"o/r","pr":7,"tier":"R2","kind":"checks","state":"live","merged_at":"2026-10-08T11:00:00Z","deadline":"2026-10-08T12:00:00Z","head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","commits":3,"fingerprint":"f","failures":[{"run":5,"attempt":1,"name":"private job"}],"alerted":["failed"],"closed":true,"checked":"2026-10-08T11:30:00Z","reason":"private reason"}
+L
 cat >"$ev/outcomes.jsonl" <<'L'
 {"id":"t3:thread:cmd%3Amcp%3Aprivate-uuid","at":"2026-10-08T09:00:00Z","lane":"claude-sonnet","provider":"claudeAgent","model":"claude-sonnet-5-5","class":"impl","risk":"R1","ticket":"JDW-1","status":"completed","failure_kind":"none","duration_s":120,"items":3,"attempt":1,"escalated_from":null,"pr":null,"ci_first_pass":null,"review_findings":null,"merged":null,"reverted":null,"human_touch":null,"cost_usd":null,"source":"t3","note":"purple prompt text"}
 {"id":"a-1","at":"2026-10-08T09:30:00Z","lane":"claude-opus","provider":"claudeAgent","model":"claude-opus-5-5","class":"review","risk":"R1","ticket":"JDW-1","status":"completed","failure_kind":"none","duration_s":60,"items":1,"attempt":1,"escalated_from":null,"pr":null,"ci_first_pass":null,"review_findings":2,"merged":null,"reverted":null,"human_touch":null,"cost_usd":null,"source":"record"}
@@ -433,7 +436,9 @@ out = {r["id"]: r for r in load("eval-outcomes")}
 assert out["a-1"]["merged"] is True and out["a-1"]["pr_repo"] == "o/r" and out["a-1"]["pr_number"] == 7, out["a-1"]
 assert [k for k in out if k != "a-1"][0].startswith("h-"), list(out)
 roll = load("captain-rollouts")[0]
-assert roll["state"] == "verified" and roll["env"] == "prd" and "title" not in roll, roll
+assert roll["state"] == "live" and roll["kind"] == "checks" and roll["failures"] == 1 and roll["commits"] == 3, roll
+assert roll["at"] == "2026-10-08T11:00:00Z" and roll["checked"] == "2026-10-08T11:30:00Z" and roll["closed"] is True, roll
+assert not {"head", "base", "reason", "fingerprint"} & set(roll), roll
 assert load("eval-assignments")[0]["pace_multiplier"] == 0.5
 PY
 if grep -rE "SECRETCHECK|purple|private|private-uuid|review_id" "$dl"; then fail "free text leaked into the delivery mirror"; fi

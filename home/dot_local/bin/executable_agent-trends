@@ -1022,11 +1022,14 @@ def render_delivery(data, quota, days, now):
         sec.append("<h2>Rollouts</h2>")
         agg = {}
         for r in rollouts:
-            a = agg.setdefault((r.get("env") or "(none)", r.get("state") or "(none)"), [0, 0])
+            a = agg.setdefault(r.get("state") or "unknown", [0, 0, 0, 0])
             a[0] += 1
-            a[1] = max(a[1], r["ts"])
-        sec.append('<div class="chart"><h3>Rollout states</h3>'
-                   + table(["Environment", "State", "Rows", "Last"], [[e, s, n, am.iso(t)] for (e, s), (n, t) in sorted(agg.items())]) + "</div>")
+            a[1] += 0 if r.get("closed") else 1
+            a[2] += r.get("failures") or 0
+            a[3] = max(a[3], am.parse_ts(r.get("checked")) or r["ts"])
+        sec.append('<div class="chart"><h3>Rollout states</h3><p class="sub">Latest state of each pull request merged in range</p>'
+                   + table(["State", "Pull requests", "Open", "Failure records", "Last checked"],
+                           [[st, n, o, f, am.iso(t)] for st, (n, o, f, t) in sorted(agg.items())]) + "</div>")
 
     sec.append("<h2>Lanes and models</h2>")
     if not outcomes:

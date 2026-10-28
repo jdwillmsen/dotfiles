@@ -16,6 +16,15 @@ claude_weight_max = 2.0
 five_hour_pause_pct = 85
 # Opus never takes more than this fraction of all dispatches, whatever the pace.
 opus_share_cap = 0.20
+# The pace line follows when work actually happens: "weighted" learns an
+# hour-of-day x weekday curve from the quota history, "flat" is linear in time.
+curve = "weighted"
+# No hour weighs less than this share of an average hour, so idle hours still count.
+curve_floor = 0.25
+# Below this many hours of quota history the line stays linear.
+curve_min_history_h = 168
+# How far back the curve looks.
+curve_history_days = 28
 
 [classes]
 # plan: design and decomposition       impl: bounded code change

@@ -162,6 +162,11 @@ unsure, classify up. Put the result on the PR and ticket as labels
   say so first). Method: dotfiles `docs/bot-authored-prs.md`.
   The merge captain approves R0–R2 org PRs as `merge-captain-approver` once the
   tier's review is done.
+- **Link every PR to the T3 Code thread that owns it** (where the
+  `link_pull_request` tool exists): call it right after any PR is created,
+  including PRs a subagent opened — briefs tell subagents to return the PR URL
+  so the parent can link it — and before finishing, compare
+  `list_thread_pull_requests` with the PRs you touched and link what is missing.
 - Title `type(scope): short description`, under 70 chars. **Body is for the
   reviewer, ~150 words max**, only sections with content: *Why* (1–3 sentences); *Needs attention* —
   risky spots as `file:line` and the feedback wanted; *Risk/rollout* only if

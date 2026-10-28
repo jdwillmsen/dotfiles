@@ -19,7 +19,7 @@ import sys
 import tomllib
 from pathlib import Path
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 # Fast path before any real work: harnesses probe --version constantly.
 if __name__ == "__main__" and len(sys.argv) == 2 and sys.argv[1] in ("-v", "-V", "--version"):
@@ -35,6 +35,9 @@ QUOTA_FILE = Path(os.environ.get("AGENT_PACE_QUOTA")
                   or Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "agent-metrics/quota.jsonl")
 EVAL_STATE = Path(os.environ.get("AGENT_EVAL_STATE")
                   or Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "agent-eval")
+# The metrics store's hourly quota rollup: history older than the local log keeps.
+QUOTA_STORE = Path(os.environ.get("AGENT_PACE_QUOTA_STORE")
+                   or Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / "agent-metrics/store/quota")
 
 RISKS = ("R0", "R1", "R2", "R3")
 WINDOW_S = 7 * 86400
@@ -53,9 +56,18 @@ EVAL_TIMEOUT_S = 30
 R2_REVIEWERS = ("claude-sonnet", "claude-opus")
 R3_REVIEWER = "claude-opus"
 TICKET = re.compile(r"[A-Z][A-Z0-9]*-[0-9]+")
+# Pace curve defaults, for a lanes.toml written before the curve existed.
+CURVE_DEFAULTS = {"curve": "weighted", "curve_floor": 0.25, "curve_min_history_h": 168, "curve_history_days": 28}
+# Pseudo-hours of average use each hour-of-day and weekday bucket starts with,
+# so a bucket seen only a few times cannot swing the curve on its own.
+CURVE_PRIOR_H = 12
+# Circular smoothing over hour of day: a habit of starting at 14:00 is not a
+# promise that 13:00 stays idle.
+CURVE_KERNEL = (1, 2, 3, 2, 1)
+WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 LANE_KEYS = ("id", "group", "provider", "model", "family", "status", "share", "max_risk", "concurrency", "classes")
 
-USAGE_SHORT = "agent-pace [status | shares | assign | ladder] [--help]"
+USAGE_SHORT = "agent-pace [status | curve | shares | assign | ladder] [--help]"
 
 
 def log(msg):
@@ -174,6 +186,14 @@ def load_policy():
         for k in ("target_end_pct", "band_pct", "gain", "claude_weight_min", "claude_weight_max",
                   "five_hour_pause_pct", "opus_share_cap"):
             float(p[k])
+        for k, v in CURVE_DEFAULTS.items():
+            p.setdefault(k, v)
+        if p["curve"] not in ("weighted", "flat"):
+            raise ValueError(f"pacing.curve {p['curve']!r}: weighted or flat")
+        if not 0 <= float(p["curve_floor"]) <= 1:
+            raise ValueError("pacing.curve_floor outside 0..1")
+        if float(p["curve_min_history_h"]) < 0 or float(p["curve_history_days"]) <= 0:
+            raise ValueError("pacing.curve_min_history_h or curve_history_days out of range")
         cfg["evaluation"]["min_samples"]
         cfg["evaluation"]["prior_weight"]
         cfg["evaluation"]["explore_fraction"]
@@ -272,11 +292,128 @@ def r1(x):
     return None if x is None else round(x, 1)
 
 
+# ── Pace curve ───────────────────────────────────────────────────────────────
+
+def store_history(local_rows):
+    """Readings from the metrics store's hourly rollup, for hours the local log
+    no longer (or never) covered. A rollup row carries the hour's highest
+    percent, so it is placed at the end of its hour."""
+    local_hours = {int(to_epoch(r["at"]) // 3600) for r in local_rows}
+    try:
+        files = sorted(QUOTA_STORE.glob("*.jsonl"))
+    except OSError:
+        return []
+    out = []
+    for path in files[-3:]:
+        for r in read_jsonl(path):
+            hour = to_epoch(r.get("hour"))
+            if hour is None or not math.isfinite(hour) or int(hour // 3600) in local_hours:
+                continue
+            reading = {"at": hour + 3600 - 1, "seven_day_pct": r.get("seven_day_pct"),
+                       "seven_day_resets_at": r.get("seven_day_resets_at")}
+            if sane_reading(reading):
+                out.append(reading)
+    return out
+
+
+def hour_of_week(epoch):
+    d = dt.datetime.fromtimestamp(epoch, dt.timezone.utc)
+    return d.weekday() * 24 + d.hour
+
+
+def spread(arr, a, b, amount):
+    """Add `amount` to the hour-of-week buckets of [a, b), pro rata by time."""
+    t = a
+    while t < b:
+        end = min(b, (t // 3600 + 1) * 3600)
+        arr[hour_of_week(t)] += amount * (end - t) / (b - a)
+        t = end
+
+
+def flat_curve(reason, history_h, floor):
+    return {"mode": "flat", "reason": reason, "history_h": r1(history_h), "floor": floor, "weights": [1.0] * 168}
+
+
+def build_curve(p, now, rows):
+    """Hour-of-week weights (Monday 00 UTC first, mean 1) for the pace line,
+    from how fast the weekly quota rose in each hour of the recent past.
+
+    The weekly percent is cumulative within a window, so the rise between two
+    readings is the use in between; a gap with no readings (agents work while
+    no status line runs) has its rise spread evenly across it. The model is
+    hour-of-day times weekday, each shrunk toward the average rate, and the
+    hour-of-day profile is smoothed. Too little history gives a flat curve."""
+    floor = float(p["curve_floor"])
+    if p["curve"] == "flat":
+        return flat_curve("pacing.curve is flat", 0.0, floor)
+    since = now - float(p["curve_history_days"]) * 86400
+    rows = rows + store_history(rows)
+    windows = {}
+    for r in rows:
+        at, pct, resets = to_epoch(r.get("at")), number(r.get("seven_day_pct")), to_epoch(r.get("seven_day_resets_at"))
+        if pct is None or resets is None or not since <= at <= now:
+            continue
+        # Readings of one window can disagree on its reset by a few seconds.
+        windows.setdefault(round(resets / 600), (resets, []))[1].append((at, pct))
+    use, cover = [0.0] * 168, [0.0] * 168
+    for resets, pts in windows.values():
+        start = resets - WINDOW_S
+        # Every window opens at 0%, which places the use before its first reading.
+        if since <= start:
+            pts.append((start, 0.0))
+        pts.sort()
+        for (t1, p1), (t2, p2) in zip(pts, pts[1:]):
+            if t2 <= t1:
+                continue
+            spread(use, t1, t2, max(0.0, p2 - p1))
+            spread(cover, t1, t2, (t2 - t1) / 3600)
+    history_h = sum(cover)
+    if history_h < float(p["curve_min_history_h"]):
+        return flat_curve(f"thin history: {history_h:.0f} h of {float(p['curve_min_history_h']):g} h needed",
+                          history_h, floor)
+    rate = sum(use) / history_h
+    if rate <= 0:
+        return flat_curve("no use in the history", history_h, floor)
+
+    def shrunk(u, c):
+        return (u + CURVE_PRIOR_H * rate) / (c + CURVE_PRIOR_H)
+
+    hours = [shrunk(sum(use[d * 24 + h] for d in range(7)), sum(cover[d * 24 + h] for d in range(7)))
+             for h in range(24)]
+    half, total = len(CURVE_KERNEL) // 2, sum(CURVE_KERNEL)
+    hours = [sum(k * hours[(h + i - half) % 24] for i, k in enumerate(CURVE_KERNEL)) / total for h in range(24)]
+    days = [shrunk(sum(use[d * 24:(d + 1) * 24]), sum(cover[d * 24:(d + 1) * 24])) for d in range(7)]
+    raw = [days[d] * hours[h] for d in range(7) for h in range(24)]
+    mean = sum(raw) / 168
+    # Blending toward flat, rather than clipping, keeps the mean at exactly 1
+    # while no hour falls below `floor` of an average one: agents may work in
+    # hours the history never saw.
+    weights = [floor + (1 - floor) * w / mean for w in raw]
+    return {"mode": "weighted", "reason": f"{history_h:.0f} h of history", "history_h": r1(history_h),
+            "floor": floor, "weights": weights}
+
+
+def curve_integral(curve, a, b):
+    w, total, t = curve["weights"], 0.0, a
+    while t < b:
+        end = min(b, (t // 3600 + 1) * 3600)
+        total += w[hour_of_week(t)] * (end - t)
+        t = end
+    return total
+
+
+def curve_fraction(curve, start, now):
+    """Share of the window's weighted time gone by `now`, in [0, 1]."""
+    now = clamp(now, start, start + WINDOW_S)
+    return curve_integral(curve, start, now) / curve_integral(curve, start, start + WINDOW_S)
+
+
 def pace_state(cfg, now):
     """Where the quota stands against the pace line, and the claude weight
     multiplier that follows. A window with no fresh reading paces at baseline."""
     p = cfg["pacing"]
     rows, skipped = read_quota(QUOTA_FILE)
+    curve = build_curve(p, now, rows)
     newest = max((to_epoch(r.get("at")) for r in rows if to_epoch(r.get("at")) is not None), default=None)
     s = {"now": iso(now), "quota_at": iso(newest),
          "quota_age_min": None if newest is None else round(max(0, now - newest) / 60, 1),
@@ -285,7 +422,10 @@ def pace_state(cfg, now):
          "elapsed_pct": None, "used_pct": None, "pace_line_pct": None, "gap_pct": None,
          "hours_left": None, "claude_multiplier": 1.0,
          "five_hour_pct": None, "five_hour_resets_at": None, "five_hour_stale": False,
-         "five_hour_paused": False}
+         "five_hour_paused": False,
+         "curve": {"mode": curve["mode"], "reason": curve["reason"], "history_h": curve["history_h"],
+                   "elapsed_weighted_pct": None, "linear_line_pct": None},
+         "_curve": curve}
 
     five = newest_with(rows, "five_hour_pct")
     if five:
@@ -314,9 +454,12 @@ def pace_state(cfg, now):
         elif resets is not None:
             start = resets - WINDOW_S
             f = clamp((now - start) / WINDOW_S, 0.0, 1.0)
-            line = float(p["target_end_pct"]) * f
+            fw = curve_fraction(curve, start, now)
+            line = float(p["target_end_pct"]) * fw
             s.update(window_start=iso(start), window_resets_at=iso(resets), elapsed_pct=r1(f * 100),
                      pace_line_pct=r1(line), gap_pct=r1(line - used), hours_left=r1(max(0, resets - now) / 3600))
+            s["curve"].update(elapsed_weighted_pct=r1(fw * 100),
+                              linear_line_pct=r1(float(p["target_end_pct"]) * f))
             if now - at > STALE_S:
                 s["state"], s["stale"] = "stale", True
             else:
@@ -516,6 +659,18 @@ def cmd_status(args):
     ctx = Ctx(load_policy(), now_epoch())
     out = {k: v for k, v in ctx.pace.items() if not k.startswith("_")}
     emit(out, args.json)
+    return 0
+
+
+def cmd_curve(args):
+    """The hour-of-week weights behind the pace line: one row per weekday."""
+    cfg, now = load_policy(), now_epoch()
+    rows, _ = read_quota(QUOTA_FILE)
+    c = build_curve(cfg["pacing"], now, rows)
+    w = c["weights"]
+    table = [{"day": WEEKDAYS[d], **{f"h{h:02d}": round(w[d * 24 + h], 2) for h in range(24)}} for d in range(7)]
+    emit({"mode": c["mode"], "reason": c["reason"], "history_h": c["history_h"], "floor": c["floor"],
+          "hours": "UTC; 1 is an average hour", "weights": table}, args.json)
     return 0
 
 
@@ -758,7 +913,7 @@ def cmd_home(args):
 def build_parser():
     p = Parser(prog="agent-pace", description=__doc__.split("\n\n")[0],
                formatter_class=argparse.RawDescriptionHelpFormatter,
-               epilog="examples:\n  agent-pace status\n  agent-pace assign --class impl --risk R1 --ticket JDW-12\n"
+               epilog="examples:\n  agent-pace status\n  agent-pace curve\n  agent-pace assign --class impl --risk R1 --ticket JDW-12\n"
                       "  agent-pace ladder --class review --risk R2\n\n"
                       "assign exits 0 when it picked a lane, 3 when the work must wait (result: defer) or no\n"
                       "lane can take it (result: none).")
@@ -768,6 +923,10 @@ def build_parser():
     s = sub.add_parser("status", help="window, elapsed, used, pace line, gap, hours left, recommendation")
     s.set_defaults(func=cmd_status)
     s.add_argument("--json", action="store_true")
+
+    c = sub.add_parser("curve", help="hour-of-week weights the pace line follows, from quota history")
+    c.set_defaults(func=cmd_curve)
+    c.add_argument("--json", action="store_true")
 
     sh = sub.add_parser("shares", help="effective share per lane after pacing")
     sh.set_defaults(func=cmd_shares)

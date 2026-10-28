@@ -283,6 +283,133 @@ quota 1 10 3 0 3.5
 run 0 status --json
 check "j['quota_skipped'] == 0" "a clean quota file reported skipped lines"
 
+# ── Pace curve: weighted by when work happens ──
+# One reading is far too little history, so the line stays linear and says so.
+quota 1 10 3 47 3.5
+run 0 status --json
+check "j['curve']['mode'] == 'flat' and 'history' in j['curve']['reason']" "thin history did not fall back to a flat curve"
+check "j['curve']['elapsed_weighted_pct'] == j['elapsed_pct'] == 50.0 and j['curve']['linear_line_pct'] == 47.5"
+run 0 status
+grep -q "^curve:" "$out" || fail "status TOON has no curve block" "$(cat "$out")"
+grep -q "^  mode: flat" "$out" || fail "status TOON has no curve mode" "$(cat "$out")"
+run 0 curve --json
+check "j['mode'] == 'flat' and len(j['weights']) == 7 and all(r[f'h{h:02d}'] == 1.0 for r in j['weights'] for h in range(24))" \
+    "a flat curve is not all ones"
+
+# history NOW_ISO DAYS: half-hourly readings for DAYS before NOW in Monday-aligned
+# 7-day windows, with one point used per hour 14..22 UTC on weekdays only.
+history() {
+    python3 - "$AGENT_PACE_QUOTA" "$@" <<'PY'
+import datetime as dt, json, sys
+path, now_iso, days = sys.argv[1], sys.argv[2], float(sys.argv[3])
+now = dt.datetime.fromisoformat(now_iso.replace("Z", "+00:00")).timestamp()
+monday = dt.datetime(2026, 10, 5, tzinfo=dt.timezone.utc).timestamp()
+week = 7 * 86400
+def worked(t):
+    d = dt.datetime.fromtimestamp(t, dt.timezone.utc)
+    return d.weekday() < 5 and 14 <= d.hour <= 22
+rows, t = [], now - days * 86400
+t -= t % 1800
+while t < now - 60:
+    start = monday + (t - monday) // week * week
+    used = sum(1 for h in range(int(start), int(t), 3600) if worked(h))
+    rows.append({"at": t, "five_hour_pct": 5, "five_hour_resets_at": t + 3600,
+                 "seven_day_pct": used, "seven_day_resets_at": start + week})
+    t += 1800
+t = now - 60
+start = monday + (t - monday) // week * week
+rows.append({"at": t, "five_hour_pct": 5, "five_hour_resets_at": t + 3600,
+             "seven_day_pct": sum(1 for h in range(int(start), int(t), 3600) if worked(h)),
+             "seven_day_resets_at": start + week})
+open(path, "w").write("".join(json.dumps(r) + "\n" for r in rows))
+PY
+}
+# Saturday 00:00 UTC: five of seven days gone by the clock, nearly all the work hours by the curve.
+sat="2026-10-31T00:00:00Z"
+history "$sat" 21
+AGENT_PACE_NOW="$sat" run 0 status --json
+check "j['curve']['mode'] == 'weighted' and j['curve']['history_h'] >= 168" "three weeks of history did not weight the curve"
+check "j['elapsed_pct'] == 71.4 and j['curve']['linear_line_pct'] == 67.9" "the clock-time numbers moved"
+check "j['curve']['elapsed_weighted_pct'] > j['elapsed_pct'] + 10" "the weekend was not discounted"
+check "abs(j['pace_line_pct'] - 95 * j['curve']['elapsed_weighted_pct'] / 100) < 0.1" "the pace line is not the weighted one"
+check "abs(j['gap_pct'] - (j['pace_line_pct'] - j['used_pct'])) < 0.11 and j['state'] == 'under'"
+AGENT_PACE_NOW="$sat" run 0 curve --json
+check "j['mode'] == 'weighted' and [r['day'] for r in j['weights']] == ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']"
+python3 -I - "$out" <<'PY' || fail "curve weights are malformed" "$(cat "$out")"
+import json, sys
+j = json.load(open(sys.argv[1]))
+w = {(r["day"], h): r[f"h{h:02d}"] for r in j["weights"] for h in range(24)}
+vals = list(w.values())
+assert len(vals) == 168
+assert abs(sum(vals) / 168 - 1) < 0.01, sum(vals) / 168
+# The floor: no hour is zero, none below the configured share of an average hour.
+assert min(vals) >= j["floor"] - 0.01 and min(vals) > 0, (min(vals), j["floor"])
+# Work hours outweigh the night, and weekdays outweigh the weekend.
+assert w[("Wed", 18)] > 2 * w[("Wed", 4)], (w[("Wed", 18)], w[("Wed", 4)])
+assert w[("Wed", 18)] > 2 * w[("Sun", 18)], (w[("Wed", 18)], w[("Sun", 18)])
+# Smoothing spreads a work block into its neighbours: hour 13 sits above hour 4.
+assert w[("Wed", 13)] > w[("Wed", 4)], (w[("Wed", 13)], w[("Wed", 4)])
+PY
+run 0 curve
+grep -q "^weights\[7\]{day,h00," "$out" || fail "curve TOON is not a weekday table" "$(cat "$out")"
+# The line still runs from 0 at the start of the window to the target at its end,
+# never falling on the way, and the end-game floor still keys off clock time.
+python3 -I - "$pace" <<'PY' || fail "the weighted line is not monotone from 0 to the target"
+import importlib.machinery, importlib.util, os, sys
+pace = sys.argv[1]
+loader = importlib.machinery.SourceFileLoader("agent_pace", pace)
+mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("agent_pace", loader))
+loader.exec_module(mod)
+cfg = mod.load_policy()
+now = mod.to_epoch("2026-10-31T00:00:00Z")
+curve = mod.build_curve(cfg["pacing"], now, mod.read_quota(mod.QUOTA_FILE)[0])
+assert curve["mode"] == "weighted", curve
+start = mod.to_epoch("2026-10-26T00:00:00Z")
+assert mod.curve_fraction(curve, start, start) == 0
+assert abs(mod.curve_fraction(curve, start, start + mod.WINDOW_S) - 1) < 1e-9
+# A window that does not start on the hour still integrates to 1.
+assert abs(mod.curve_fraction(curve, start + 1234, start + 1234 + mod.WINDOW_S) - 1) < 1e-9
+prev = 0
+for k in range(0, 7 * 24 * 4 + 1):
+    f = mod.curve_fraction(curve, start, start + k * 900)
+    assert f >= prev - 1e-12, (k, f, prev)
+    prev = f
+PY
+# A policy that asks for a flat line gets one, whatever the history.
+sed 's/^curve = "weighted"/curve = "flat"/' "$policy" >"$tmp/flat.toml"
+grep -q '^curve = "flat"' "$tmp/flat.toml" || fail "lanes.toml has no curve setting to switch off"
+AGENT_PACE_NOW="$sat" AGENT_PACE_LANES="$tmp/flat.toml" run 0 status --json
+check "j['curve']['mode'] == 'flat' and j['pace_line_pct'] == 67.9" "curve = flat still weighted the line"
+# A policy written before the curve existed still loads, and weights the line.
+grep -v '^curve' "$policy" >"$tmp/old.toml"
+AGENT_PACE_NOW="$sat" AGENT_PACE_LANES="$tmp/old.toml" run 0 status --json
+check "j['curve']['mode'] == 'weighted'" "a policy without curve keys did not use the default"
+# History older than the local log comes from the metrics store's hourly rollup.
+store="$tmp/store-quota"
+mkdir -p "$store"
+python3 - "$AGENT_PACE_QUOTA" "$store/2026-10.jsonl" <<'PY'
+import datetime as dt, json, sys
+rows = [json.loads(l) for l in open(sys.argv[1])]
+hours = {}
+for r in rows:
+    h = int(r["at"]) // 3600 * 3600
+    if r["seven_day_pct"] >= hours.get(h, {}).get("seven_day_pct", -1):
+        hours[h] = {"hour": dt.datetime.fromtimestamp(h, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "readings": 2, "seven_day_pct": r["seven_day_pct"], "seven_day_resets_at": r["seven_day_resets_at"]}
+open(sys.argv[2], "w").write("".join(json.dumps(hours[h]) + "\n" for h in sorted(hours)) + "not json\n")
+open(sys.argv[1], "w").write(json.dumps(rows[-1]) + "\n")
+PY
+AGENT_PACE_NOW="$sat" run 0 status --json
+check "j['curve']['mode'] == 'flat'" "one local reading weighted the curve without the store"
+AGENT_PACE_NOW="$sat" AGENT_PACE_QUOTA_STORE="$store" run 0 status --json
+check "j['curve']['mode'] == 'weighted' and j['curve']['elapsed_weighted_pct'] > j['elapsed_pct'] + 10" \
+    "the store's hourly history was not used"
+check "j['quota_skipped'] == 0" "store rows were counted as skipped local readings"
+# Assignment output keeps its fields whatever the curve does.
+AGENT_PACE_NOW="$sat" AGENT_PACE_QUOTA_STORE="$store" run 0 assign --class impl --risk R1 --seed c --no-log --json
+check "set(j) == {'assignment', 'lane', 'provider', 'model', 'class', 'risk', 'reason', 'review_lane', 'fallback', 'result', 'logged'}" \
+    "assign output fields changed"
+
 # ── Lanes drop out ──
 quota 1 10 3 47 3.5
 weights '{"lanes": {}}'

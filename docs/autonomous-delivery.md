@@ -45,9 +45,14 @@ the window; over it, work shifts to free lanes.
 The line is not straight in time. It follows when work actually happens:
 `agent-pace curve` prints an hour-of-week weight table (UTC, 1 is an average
 hour) learned from the last 28 days of quota readings, the local log plus the
-metrics store's hourly rollup. The rise in the weekly percent between two
-readings is the use in between, spread evenly over gaps when no status line
-was running. Each hour of day and each weekday is shrunk toward the average,
+metrics store's hourly rollup. The rise in the weekly percent is the use in
+between, spread evenly over gaps when no status line was running. Only a rise
+above the highest reading so far in the window counts, spread back to when
+that high was last seen: a session whose payload has no five-hour block logs a
+weekly value that lags the real one, so a falling reading is ignored rather
+than credited again when the log climbs back. The window's credited use is
+therefore its peak. Reset times a few seconds apart are one window, and any
+error while learning the curve gives a straight line instead. Each hour of day and each weekday is shrunk toward the average,
 the hour-of-day profile is smoothed over neighbouring hours, and no hour weighs
 less than a quarter of an average one. Under a week of history the line stays
 linear and `status` says why. `status` shows both the weighted share of the

@@ -77,7 +77,9 @@ The dollar figures cannot say how close the plan is to its limit. The status
 line can: Claude Code hands `claude-status` the five-hour and seven-day used
 percentages on every refresh, and it appends them to
 `~/.local/state/agent-metrics/quota.jsonl` at most once every five minutes.
-Readings exist only while an interactive session is open.
+Readings exist only while an interactive session is open. `agent-pace` reads
+this log and the store's hourly `quota/` rollup to learn when in the week the
+quota is used, and bends its pace line to match.
 
 ## Provider limits
 

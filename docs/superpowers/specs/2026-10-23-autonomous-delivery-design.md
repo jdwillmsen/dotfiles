@@ -115,6 +115,7 @@ Opus 10, free lanes about 50 (including exploration lanes), Haiku 3.
 
 ```
 agent-pace status [--json]            # window, elapsed, used, pace line, gap, hours left, recommendation
+agent-pace curve [--json]             # hour-of-week weights the pace line follows
 agent-pace shares [--json]            # effective share per lane after pacing
 agent-pace assign --class C --risk R [--exclude lane,...] [--ticket KEY] [--seed S] [--no-log]
 agent-pace ladder --class C --risk R  # the escalation order for this class and risk
@@ -123,7 +124,14 @@ agent-pace ladder --class C --risk R  # the escalation order for this class and 
 Pacing rules (the contract for the tests):
 
 - Window start = `seven_day_resets_at` minus 7 days. Elapsed fraction `f` =
-  (now − start) / 7 days, clamped to [0, 1]. Pace line = `target_end_pct × f`.
+  (now − start) / 7 days, clamped to [0, 1]. Pace line = `target_end_pct × F`,
+  where `F` is the share of the window's weighted time gone by now under the
+  hour-of-week curve (`F = f` when the curve is flat). The curve is
+  hour-of-day × weekday rates of the weekly-percent rise over the last
+  `curve_history_days`, each shrunk toward the average rate, the hour-of-day
+  profile smoothed over ±2 hours, blended toward flat so no hour is below
+  `curve_floor` of an average hour. Fewer than `curve_min_history_h` hours of
+  history, or `curve = "flat"`, gives a flat curve.
   Gap = pace line − used. A stale reading (older than 30 minutes) is reported
   as stale, and pacing falls back to baseline shares.
   A window whose `seven_day_resets_at` has passed is `rolled` and also paces at
@@ -312,8 +320,9 @@ makes assignment reproducible; ledgers survive a re-run of `collect`.
 
 ## Calls made for the owner
 
-- Quota-log pacing is linear in time. The owner may sleep but agents do not, so
-  a weekday-weighted curve is a later refinement.
+- Quota-log pacing started linear in time. The owner may sleep but agents do
+  not, so the line now follows an hour-of-week curve learned from the quota
+  history (JDW-195), falling back to linear when the history is thin.
 - Free lanes top out at R1 until the scoreboard earns them R2.
 - Ledgers are local state first; mirroring them into the metrics store is a
   follow-up so the existing store checks are not changed in this step.

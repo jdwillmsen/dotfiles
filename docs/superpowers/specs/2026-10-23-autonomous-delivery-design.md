@@ -128,10 +128,13 @@ Pacing rules (the contract for the tests):
   where `F` is the share of the window's weighted time gone by now under the
   hour-of-week curve (`F = f` when the curve is flat). The curve is
   hour-of-day × weekday rates of the weekly-percent rise over the last
-  `curve_history_days`, each shrunk toward the average rate, the hour-of-day
+  `curve_history_days` (only rises above the window's running high count,
+  spread back to when that high was last seen, so lagging or falling readings
+  add nothing), each shrunk toward the average rate, the hour-of-day
   profile smoothed over ±2 hours, blended toward flat so no hour is below
   `curve_floor` of an average hour. Fewer than `curve_min_history_h` hours of
-  history, or `curve = "flat"`, gives a flat curve.
+  history (which must be above 0), `curve = "flat"`, or any error while
+  learning the curve gives a flat curve.
   Gap = pace line − used. A stale reading (older than 30 minutes) is reported
   as stale, and pacing falls back to baseline shares.
   A window whose `seven_day_resets_at` has passed is `rolled` and also paces at

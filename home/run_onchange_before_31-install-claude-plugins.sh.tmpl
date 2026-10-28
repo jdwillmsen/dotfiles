@@ -3,6 +3,9 @@ set -euo pipefail
 # before_ because `claude plugin install` enables what it installs: run during
 # the file phase, this sorts after ~/.claude (ASCII "." < "3"), so it would
 # re-enable plugins modify_settings.json forces off until the next apply.
+# On a fresh box script 29 has just installed claude here, and chezmoi's own
+# PATH predates it; without this the plugins would be recorded as installed.
+export PATH="$HOME/.local/bin:$PATH"
 command -v claude &>/dev/null || { echo "claude CLI not found — skipping plugins"; exit 0; }
 # mattpocock-skills moved from a manual claudeSkillsDir clone to this plugin
 # marketplace; remove the old clone so it doesn't load twice.

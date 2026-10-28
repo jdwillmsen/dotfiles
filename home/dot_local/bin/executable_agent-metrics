@@ -66,7 +66,7 @@ BASELINE_DAYS = 30
 WEEKLY_WINDOW_S = 7 * 86400
 # The only paths in the store this tool and its siblings write (reports,
 # labels, the trends page, findings); anything else is someone else's.
-OWN_DIRS = ("sessions", "quota", "providers", "ledger", "reports", "labels", "site", "findings")
+OWN_DIRS = ("sessions", "quota", "providers", "ledger", "reports", "labels", "site", "findings", "delivery")
 QUOTA_LOCAL_KEEP_S = 35 * 86400
 QUOTA_WINDOWS = ("five_hour", "seven_day")
 # T3 Code keeps each provider's plan and quota windows fresh in these files;
@@ -93,7 +93,7 @@ across months stays in the month it started. Field reference: the dotfiles
 repo, `docs/agent-metrics.md`.
 """
 
-USAGE_SHORT = "agent-metrics [init | collect | providers [snapshot] | budget [check|record]] [--help]"
+USAGE_SHORT = "agent-metrics [init | collect | delivery [sync] | providers [snapshot] | budget [check|record]] [--help]"
 
 
 def log(msg):
@@ -912,7 +912,7 @@ def collect(args):
                 f"Reconcile by hand in {tilde(STORE)}")
     if not args.dry_run:
         for d in OWN_DIRS:
-            for stale in (STORE / d).glob("*.tmp"):
+            for stale in (STORE / d).rglob("*.tmp"):
                 stale.unlink()
 
     sessions = find_sessions(args.since)
@@ -929,15 +929,277 @@ def collect(args):
         else:
             rows.append(row)
     written, unchanged = upsert(rows, write=not args.dry_run)
+    enrich = "skipped" if args.dry_run or args.no_enrich else enrich_outcomes()
     out = {"files_scanned": len(sessions), "sessions_written": written, "sessions_unchanged": unchanged,
            "files_skipped": skipped, "quota_hours_added": rollup_quota(write=not args.dry_run),
            "provider_hours_added": rollup_providers(write=not args.dry_run),
+           "delivery_rows_added": mirror_delivery(write=not args.dry_run), "eval_enrich": enrich,
            "dry_run": bool(args.dry_run)}
     if args.dry_run:
         emit(out)
         return 0
 
     out.update(publish(f"collect: {now():%Y-%m-%d}, {written} sessions", push=not args.no_push))
+    emit(out)
+    return EXIT_FAIL if out["pushed"] is False else 0
+
+
+# ── Delivery ledgers ─────────────────────────────────────────────────────────
+#
+# The agent-eval and merge-captain ledgers are local and rotate or get edited;
+# the store keeps a sanitised copy. Only numbers and identifiers are copied: a
+# merge-captain reason is reduced to a fixed code, a pull request to its repo
+# and number, and nothing free-form (notes, titles, check names) is read.
+
+STATE_HOME = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state"))
+CAPTAIN_STATE = Path(os.environ.get("MERGE_CAPTAIN_STATE") or STATE_HOME / "merge-captain")
+EVAL_STATE = Path(os.environ.get("AGENT_EVAL_STATE") or STATE_HOME / "agent-eval")
+ENRICH_TIMEOUT_S = 900
+REASON_CODES = (
+    (re.compile(r"R\d above max R\d: ([a-z0-9,-]+)"), "tier-above-max"),
+    (re.compile(r"(\d+) unresolved review threads?"), "unresolved-threads"),
+    (re.compile(r"review changes: (\d+) findings?"), "review-changes"),
+    (re.compile(r"checks pending"), "checks-pending"),
+    (re.compile(r"checks failed"), "checks-failed"),
+    (re.compile(r"merge conflicts"), "merge-conflicts"),
+    (re.compile(r"merge state"), "merge-state"),
+    (re.compile(r"merge refused"), "merge-refused"),
+    (re.compile(r"token-required"), "token-required"),
+    (re.compile(r"codeowners"), "codeowners-required"),
+    (re.compile(r"run-cap"), "run-cap"),
+    (re.compile(r"draft"), "draft"),
+    (re.compile(r"quota"), "quota"),
+    (re.compile(r"no-review-lane"), "no-review-lane"),
+    (re.compile(r"mergeability"), "mergeability-pending"),
+    (re.compile(r"updated in the last"), "recently-updated"),
+    (re.compile(r"gates met.*review pending"), "review-pending"),
+    (re.compile(r"review approve"), "review-approved"),
+    (re.compile(r"gates met, no review needed"), "no-review-needed"),
+    (re.compile(r"pull request unavailable"), "pr-unavailable"),
+)
+TIERS = ("R0", "R1", "R2", "R3")
+PR_URL = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/(\d+)")
+
+
+def is_int(v):
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def ident(v):
+    """An identifier-shaped string, or None for anything else (absent too)."""
+    if not isinstance(v, str) or not v:
+        return None
+    c = clean_id(v)
+    return None if c.startswith("_") else c
+
+
+def num(v):
+    return v if is_amount(v) else None
+
+
+def stamp(v):
+    """The timestamp normalised to UTC seconds, or None when it is not one."""
+    t = parse_ts(v) if isinstance(v, str) else None
+    return iso(t) if t is not None else None
+
+
+def short_head(v):
+    return v[:12] if isinstance(v, str) and re.fullmatch(r"[0-9a-f]{7,64}", v) else None
+
+
+def tier(v):
+    return v if v in TIERS else None
+
+
+def reason_code(reason):
+    text = reason if isinstance(reason, str) else ""
+    for rx, code in REASON_CODES:
+        m = rx.search(text)
+        if m:
+            if not m.groups():
+                return code, {}
+            g = m.group(1)
+            return code, ({"n": int(g)} if g.isdigit() else {"detail": g[:ID_MAX]})
+    return "other", {}
+
+
+def pr_ref(row):
+    repo, n = ident(row.get("repo")), row.get("pr")
+    return (repo, n) if repo and is_int(n) and n > 0 else None
+
+
+def clean_log(r):
+    ref, at = pr_ref(r), stamp(r.get("at"))
+    if not ref or not at or r.get("action") == "run":
+        return None
+    code, extra = reason_code(r.get("reason"))
+    out = {"at": at, "repo": ref[0], "pr": ref[1], "head": short_head(r.get("head")), "tier": tier(r.get("tier")),
+           "action": ident(r.get("action")), "reason": code, "mode": ident(r.get("mode")), "lane": ident(r.get("lane")), **extra}
+    return out if out["action"] else None
+
+
+def clean_review(r):
+    ref, at = pr_ref(r), stamp(r.get("at"))
+    if not ref or not at:
+        return None
+    return {"at": at, "repo": ref[0], "pr": ref[1], "head": short_head(r.get("head")), "tier": tier(r.get("tier")),
+            "verdict": ident(r.get("verdict")), "lane": ident(r.get("lane")), "assignment": ident(r.get("assignment"))}
+
+
+def clean_approval(r):
+    ref, at = pr_ref(r), stamp(r.get("at"))
+    if not ref or not at:
+        return None
+    return {"at": at, "repo": ref[0], "pr": ref[1], "head": short_head(r.get("head")),
+            "status": ident(r.get("status")) or "attempted", "tier": tier(r.get("tier"))}
+
+
+def clean_rollout(r):
+    at = stamp(r.get("at"))
+    if not at:
+        return None
+    ref = pr_ref(r)
+    out = {"at": at, "repo": ident(r.get("repo")), "pr": ref[1] if ref else None,
+           "state": ident(r.get("state") or r.get("status")),
+           "env": ident(r.get("env") or r.get("environment") or r.get("stage")), "ticket": ident(r.get("ticket"))}
+    return out if out["state"] else None
+
+
+def stable_id(v):
+    """An id as stored: itself when identifier-shaped, else a hash. Thread ids carry
+    percent-escaped command text, which must not be copied."""
+    if not isinstance(v, str) or not v:
+        return None
+    return ident(v) or "h-" + hashlib.sha256(v.encode()).hexdigest()[:16]
+
+
+def clean_outcome(r):
+    i, at = stable_id(r.get("id")), stamp(r.get("at"))
+    if not i or not at:
+        return None
+    url = PR_URL.search(r["pr"]) if isinstance(r.get("pr"), str) else None
+    flag = lambda k: r.get(k) if isinstance(r.get(k), bool) else None
+    return {"id": i, "at": at, "lane": ident(r.get("lane")), "provider": ident(r.get("provider")), "model": ident(r.get("model")),
+            "class": ident(r.get("class")), "risk": tier(r.get("risk")),
+            "ticket": ident(r.get("ticket")), "status": ident(r.get("status")), "failure_kind": ident(r.get("failure_kind")),
+            "duration_s": num(r.get("duration_s")), "items": num(r.get("items")), "attempt": num(r.get("attempt")),
+            "escalated_from": stable_id(r.get("escalated_from")),
+            "pr_repo": url.group(1) if url else None, "pr_number": int(url.group(2)) if url else None,
+            "ci_first_pass": flag("ci_first_pass"), "review_findings": num(r.get("review_findings")),
+            "merged": flag("merged"), "reverted": flag("reverted"), "human_touch": flag("human_touch"),
+            "cost_usd": num(r.get("cost_usd")), "source": ident(r.get("source"))}
+
+
+def clean_assignment(r):
+    i, at = stable_id(r.get("id")), stamp(r.get("at"))
+    if not i or not at:
+        return None
+    pace = r.get("pace") if isinstance(r.get("pace"), dict) else {}
+    return {"id": i, "at": at, "lane": ident(r.get("lane")), "provider": ident(r.get("provider")), "model": ident(r.get("model")),
+            "class": ident(r.get("class")), "risk": tier(r.get("risk")),
+            "ticket": ident(r.get("ticket")), "pace_used": num(pace.get("used")), "pace_line": num(pace.get("line")),
+            "pace_multiplier": num(pace.get("multiplier"))}
+
+
+def first_seen_key(row):
+    """A decision is keyed without its time: a poll repeating the same verdict is one fact, kept at its first sighting."""
+    return json.dumps({k: v for k, v in row.items() if k != "at"}, sort_keys=True)
+
+
+def full_key(row):
+    return json.dumps(row, sort_keys=True)
+
+
+def id_key(row):
+    return row["id"]
+
+
+# kind -> (source files, row cleaner, key, whether a re-seen key replaces the stored row)
+DELIVERY_KINDS = {
+    "captain-log": ((CAPTAIN_STATE / "log.jsonl.1", CAPTAIN_STATE / "log.jsonl"), clean_log, first_seen_key, False),
+    "captain-reviews": ((CAPTAIN_STATE / "reviews.jsonl",), clean_review, full_key, False),
+    "captain-approvals": ((CAPTAIN_STATE / "approvals.jsonl",), clean_approval, full_key, False),
+    "captain-rollouts": ((CAPTAIN_STATE / "rollouts.jsonl",), clean_rollout, full_key, False),
+    "eval-outcomes": ((EVAL_STATE / "outcomes.jsonl",), clean_outcome, id_key, True),
+    "eval-assignments": ((EVAL_STATE / "assignments.jsonl",), clean_assignment, id_key, True),
+}
+
+
+def delivery_path(kind, month):
+    return STORE / "delivery" / kind / f"{month}.jsonl"
+
+
+def mirror_kind(kind, write=True):
+    """Merge one ledger into its month files; returns rows added or changed. Re-running on
+    the same ledger changes nothing, and stored rows outlive the ledger's own rotation."""
+    sources, clean, key, replace = DELIVERY_KINDS[kind]
+    fresh = {}
+    for src in sources:
+        for raw in read_jsonl(src):
+            row = clean(raw)
+            if row is None:
+                continue
+            k = key(row)
+            # The last line of an id wins; a keyed decision keeps its earliest time.
+            if k not in fresh or replace or row["at"] < fresh[k]["at"]:
+                fresh[k] = row
+    by_month = {}
+    for row in fresh.values():
+        by_month.setdefault(row["at"][:7], []).append(row)
+    changed = 0
+    for month, rows in by_month.items():
+        path = delivery_path(kind, month)
+        have = {key(r): r for r in read_jsonl(path)}
+        edits = 0
+        for row in rows:
+            old = have.get(key(row))
+            if old is None or (replace and old != row) or (not replace and row["at"] < old["at"]):
+                have[key(row)] = row
+                edits += 1
+        if edits and write:
+            write_lines(path, sorted(have.values(), key=lambda r: (r["at"], key(r))))
+        changed += edits
+    return changed
+
+
+def mirror_delivery(write=True):
+    return sum(mirror_kind(kind, write) for kind in DELIVERY_KINDS)
+
+
+def eval_command():
+    here = Path(__file__).resolve().parent
+    override = os.environ.get("AGENT_METRICS_EVAL")
+    return override or next((str(p) for p in (here / "agent-eval", here / "executable_agent-eval") if p.exists()), None)
+
+
+def enrich_outcomes():
+    """Join eval outcomes to their pull requests before they are mirrored. A failure
+    never stops the collect: the mirror then carries the outcomes as they were."""
+    exe = eval_command()
+    if not exe or not (EVAL_STATE / "outcomes.jsonl").is_file():
+        return "skipped"
+    try:
+        res = subprocess.run([exe, "enrich"], capture_output=True, text=True, timeout=ENRICH_TIMEOUT_S, check=False)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"agent-eval enrich: {type(e).__name__}")
+        return "failed"
+    if res.returncode != 0:
+        log(f"agent-eval enrich exited {res.returncode}")
+        return "failed"
+    return "ok"
+
+
+def cmd_delivery(args):
+    require_store()
+    with Lock():
+        if has_upstream():
+            pull = git("pull", "--quiet", "--ff-only", check=False)
+            if pull.returncode != 0:
+                die(EXIT_FAIL, f"git pull --ff-only failed: {(pull.stderr or pull.stdout).strip()}",
+                    f"Reconcile by hand in {tilde(STORE)}")
+        added = mirror_delivery()
+        out = {"delivery_rows_added": added}
+        out.update(publish(f"delivery: {now():%Y-%m-%d}, {added} rows", push=not args.no_push, dirs=("delivery",)))
     emit(out)
     return EXIT_FAIL if out["pushed"] is False else 0
 
@@ -1121,6 +1383,12 @@ def build_parser():
     c.add_argument("--since", type=int, default=3, metavar="DAYS")
     c.add_argument("--dry-run", action="store_true")
     c.add_argument("--no-push", action="store_true")
+    c.add_argument("--no-enrich", action="store_true", help="skip `agent-eval enrich` (a GitHub search per ticket)")
+    dv = sub.add_parser("delivery", help="mirror the agent-eval and merge-captain ledgers into the store")
+    dv.set_defaults(func=cmd_delivery)
+    dvsub = dv.add_subparsers(metavar="action", dest="action", parser_class=Parser)
+    dvsub.add_parser("sync", help="mirror now, commit and push; no GitHub calls")
+    dv.add_argument("--no-push", action="store_true")
     pv = sub.add_parser("providers", help="show, or snapshot, each T3 Code provider's plan and quota windows")
     pv.set_defaults(func=cmd_providers)
     pvsub = pv.add_subparsers(metavar="action", dest="action", parser_class=Parser)

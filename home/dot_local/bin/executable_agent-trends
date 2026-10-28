@@ -832,11 +832,12 @@ APPROVAL_SERIES = (("Attempted", 1), ("Confirmed", 3), ("Withdrawn", 2), ("Other
 
 
 def load_delivery(lo_month):
-    """The mirrored ledgers by kind, each row with a `ts`. A malformed row fails the build."""
+    """The mirrored ledgers by kind, each row with a `ts`. A malformed row fails the build.
+    The captain log is read whole: a pull request's first sighting may predate the chart range."""
     out = {}
     for kind in DELIVERY_KINDS:
         rows = []
-        for path in month_files(f"delivery/{kind}", lo_month):
+        for path in month_files(f"delivery/{kind}", "" if kind == "captain-log" else lo_month):
             for r in load_json_lines(path):
                 ts = am.parse_ts(r.get("at"))
                 if ts is None:
@@ -916,16 +917,19 @@ def render_delivery(data, quota, days, now):
     today = now.date()
     day_list = [today - dt.timedelta(days=i) for i in range(days - 1, -1, -1)]
     monday = today - dt.timedelta(days=today.weekday())
-    weeks = [monday - dt.timedelta(weeks=i) for i in range(math.ceil(days / 7) - 1, -1, -1)]
+    first_week = day_list[0] - dt.timedelta(days=day_list[0].weekday())
+    weeks = [first_week + dt.timedelta(weeks=i) for i in range((monday - first_week).days // 7 + 1)]
     labels = [d.strftime("%b %d") for d in day_list]
     in_range = lambda r: day_list[0] <= r["date"] <= today
     log = [r for r in data["captain-log"] if r["ts"] <= now_ts]
-    merged = [m for m in merges_of(log) if in_range(m)]
+    every_merge = merges_of(log)
+    merged = [m for m in every_merge if in_range(m)]
     sec = []
 
-    cur = [m for m in merged if now_ts - 7 * DAY < m["ts"]]
-    prev = [m for m in merged if now_ts - 14 * DAY < m["ts"] <= now_ts - 7 * DAY]
-    ttm_all = time_to_merge(log, merges_of(log))
+    # Tiles compare two fixed 7-day windows, whatever the chart range.
+    cur = [m for m in every_merge if now_ts - 7 * DAY < m["ts"]]
+    prev = [m for m in every_merge if now_ts - 14 * DAY < m["ts"] <= now_ts - 7 * DAY]
+    ttm_all = time_to_merge(log, every_merge)
     ttm = lambda lo, hi: median([h for m, h in ttm_all if lo < m["ts"] <= hi])
     approvals = [a for a in data["captain-approvals"] if a.get("status") == "confirmed"]
     appr = lambda lo, hi: sum(1 for a in approvals if lo < a["ts"] <= hi)
@@ -1175,10 +1179,13 @@ def cmd_build(args):
             site.mkdir(exist_ok=True)
             write_atomic(site / "delivery.html", build_delivery(args.days))
             target, count = site / "delivery.html", None
+            # File scope: another tool's unfinished index or report page under site/ is not ours to commit.
+            scope = ("site/delivery.html",)
         else:
             page, count, report_pages, delivery = build_page(args.days)
             target = write_site(site, page, report_pages, delivery)
-        result = am.publish(f"site: {am.now().strftime('%Y-%m-%d')}", dirs=("site",))
+            scope = ("site",)
+        result = am.publish(f"site: {am.now().strftime('%Y-%m-%d')}", dirs=scope)
     am.emit({"path": am.tilde(target), **({} if count is None else {"sessions_charted": count}), **result})
     return 1 if "error" in result else 0
 

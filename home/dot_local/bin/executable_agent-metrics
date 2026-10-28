@@ -569,7 +569,7 @@ def publish(message, push=True, dirs=None):
     # A directory that was removed outright is still a change to publish, so
     # tracked paths count even when nothing is left on disk.
     own = [d for d in (OWN_DIRS if dirs is None else dirs)
-           if (STORE / d).is_dir() or git("ls-files", "--", d).stdout.strip()]
+           if (STORE / d).exists() or git("ls-files", "--", d).stdout.strip()]
     out = {"committed": False}
     if own and git("status", "--porcelain", "--", *own).stdout.strip():
         git("add", "-A", "--", *own)
@@ -1207,9 +1207,12 @@ def cmd_delivery(args):
             if pull.returncode != 0:
                 die(EXIT_FAIL, f"git pull --ff-only failed: {(pull.stderr or pull.stdout).strip()}",
                     f"Reconcile by hand in {tilde(STORE)}")
-        added = mirror_delivery()
-        out = {"delivery_rows_added": added}
-        out.update(publish(f"delivery: {now():%Y-%m-%d}, {added} rows", push=not args.no_push, dirs=("delivery",)))
+        try:
+            added = mirror_delivery()
+            out = {"delivery_rows_added": added}
+            out.update(publish(f"delivery: {now():%Y-%m-%d}, {added} rows", push=not args.no_push, dirs=("delivery",)))
+        except RuntimeError as e:
+            die(EXIT_FAIL, str(e), f"Inspect with `git -C {tilde(STORE)} status`")
     emit(out)
     return EXIT_FAIL if out["pushed"] is False else 0
 
@@ -1397,7 +1400,9 @@ def build_parser():
     dv = sub.add_parser("delivery", help="mirror the agent-eval and merge-captain ledgers into the store")
     dv.set_defaults(func=cmd_delivery)
     dvsub = dv.add_subparsers(metavar="action", dest="action", parser_class=Parser)
-    dvsub.add_parser("sync", help="mirror now, commit and push; no GitHub calls")
+    dvsync = dvsub.add_parser("sync", help="mirror now, commit and push; no GitHub calls")
+    # SUPPRESS keeps a --no-push given before `sync` from being overwritten by the subparser's default.
+    dvsync.add_argument("--no-push", action="store_true", default=argparse.SUPPRESS)
     dv.add_argument("--no-push", action="store_true")
     pv = sub.add_parser("providers", help="show, or snapshot, each T3 Code provider's plan and quota windows")
     pv.set_defaults(func=cmd_providers)

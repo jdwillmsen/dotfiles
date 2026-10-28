@@ -434,7 +434,7 @@ history "$sat" 21 "" clean "$tmp/clean.jsonl"
 history "$sat" 21 "" mixed "$tmp/mixed.jsonl"
 history "$sat" 21 "" gap "$tmp/gap.jsonl"
 python3 -I - "$pace" "$tmp" <<'PY' || fail "the curve is not robust to lagging, falling or missing readings"
-import importlib.machinery, importlib.util, sys
+import importlib.machinery, importlib.util, json, sys
 pace, tmp = sys.argv[1:]
 loader = importlib.machinery.SourceFileLoader("agent_pace", pace)
 mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("agent_pace", loader))
@@ -476,12 +476,47 @@ assert c["mode"] == "weighted" and w[wed4 - 4 + 15] > w[wed4 - 4 + 17], [round(x
 jitter = [{**r, "seven_day_resets_at": resets + (i % 3) * 7} for i, r in enumerate(fall + quiet)]
 cj = mod.build_curve({**p, "curve_min_history_h": 100}, start + mod.WINDOW_S - 1, jitter)
 assert max(abs(a - b) for a, b in zip(w, cj["weights"])) < 1e-9
-# Any failure inside the curve falls back to a flat line instead of stopping dispatch.
+# A stale source repeating the current high for hours before a fresh jump: the
+# rise is spread back to the last fresh reading, not squeezed into the last five
+# minutes. A fresh reading at the same value does pin the high, so then it lands late.
+def plateau(stale_fresh):
+    rows = [{"at": start + 2 * 86400 + 10 * 3600, "seven_day_pct": 40, "five_hour_pct": 5,
+             "seven_day_resets_at": resets}]
+    t = rows[0]["at"] + 300
+    while t < start + 3 * 86400 + 2 * 3600:
+        rows.append({"at": t, "seven_day_pct": 40, "seven_day_resets_at": resets,
+                     **({"five_hour_pct": 5} if stale_fresh else {})})
+        t += 300
+    rows.append({"at": t + 300, "seven_day_pct": 80, "five_hour_pct": 5, "seven_day_resets_at": resets})
+    rows += [{"at": start + d * 86400, "seven_day_pct": 80, "five_hour_pct": 5, "seven_day_resets_at": resets}
+             for d in (4, 5, 6)]
+    return mod.build_curve({**p, "curve_min_history_h": 100}, start + mod.WINDOW_S - 1, rows)["weights"]
+stale, fresh = plateau(False), plateau(True)
+assert stale[48 + 2] < 1.2 * stale[48 + 15], (stale[48 + 2], stale[48 + 15])
+assert fresh[48 + 2] > 1.6 * fresh[48 + 15], (fresh[48 + 2], fresh[48 + 15])
+# With the window's opening out of range, its baseline is the first fresh
+# reading: a stale low before it does not turn the fresh value into a jump.
+late = start + 3 * 86400
+rows = [{"at": late, "seven_day_pct": 10, "seven_day_resets_at": resets},
+        {"at": late + 3600, "seven_day_pct": 50, "five_hour_pct": 5, "seven_day_resets_at": resets}]
+rows += [{"at": late + 3600 + k * 3600, "seven_day_pct": 50, "five_hour_pct": 5, "seven_day_resets_at": resets}
+         for k in range(1, 10)]
+c = mod.build_curve({**p, "curve_min_history_h": 5, "curve_history_days": 2}, late + 11 * 3600, rows)
+assert c["reason"] == "no use in the history", c["reason"]
+# Any failure inside the curve falls back to a flat line instead of stopping
+# dispatch, and says so: a warning on status, exit 1 from `curve`.
+import contextlib, io
+from argparse import Namespace
 def boom(*a):
     raise ZeroDivisionError("x")
 mod.learn_curve = boom
 c = mod.build_curve(p, now, [])
-assert c["mode"] == "flat" and "failed" in c["reason"] and set(c["weights"]) == {1.0}, c
+assert c["mode"] == "flat" and "failed" in c["reason"] and set(c["weights"]) == {1.0} and c["warning"], c
+assert "warning" in mod.pace_state(mod.load_policy(), now)["curve"]
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    code = mod.cmd_curve(Namespace(json=True))
+assert code == mod.EXIT_FAIL and "warning" in json.loads(buf.getvalue()), (code, buf.getvalue())
 PY
 # A real-style window: resets on Thursday 23:00 UTC, so Friday's work comes early.
 history "$sat" 21 "2026-10-08T23:00:00Z"
@@ -494,6 +529,13 @@ sed 's/^curve_min_history_h = .*/curve_min_history_h = 0/' "$policy" >"$tmp/zero
 grep -q '^curve_min_history_h = 0$' "$tmp/zero.toml" || fail "lanes.toml has no curve_min_history_h"
 AGENT_PACE_LANES="$tmp/zero.toml" run 1 status --json
 grep -q "curve_min_history_h" "$out" || fail "min history 0 was not rejected by name" "$(cat "$out")"
+# NaN is valid TOML but no number to pace by.
+for key in curve_floor curve_min_history_h gain; do
+    sed "s/^$key = .*/$key = nan/" "$policy" >"$tmp/nan.toml"
+    grep -q "^$key = nan$" "$tmp/nan.toml" || fail "lanes.toml has no $key"
+    AGENT_PACE_LANES="$tmp/nan.toml" run 1 status --json
+    grep -q "$key" "$out" || fail "$key = nan was not rejected by name" "$(cat "$out")"
+done
 history "$sat" 21
 # Assignment output keeps its fields whatever the curve does.
 AGENT_PACE_NOW="$sat" AGENT_PACE_QUOTA_STORE="$store" run 0 assign --class impl --risk R1 --seed c --no-log --json

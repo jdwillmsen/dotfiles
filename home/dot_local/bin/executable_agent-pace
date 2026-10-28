@@ -183,11 +183,13 @@ def load_policy():
         die(EXIT_FAIL, f"{LANES_FILE} is not valid TOML: {e}")
     try:
         p = cfg["pacing"]
-        for k in ("target_end_pct", "band_pct", "gain", "claude_weight_min", "claude_weight_max",
-                  "five_hour_pause_pct", "opus_share_cap"):
-            float(p[k])
         for k, v in CURVE_DEFAULTS.items():
             p.setdefault(k, v)
+        for k in ("target_end_pct", "band_pct", "gain", "claude_weight_min", "claude_weight_max",
+                  "five_hour_pause_pct", "opus_share_cap", "curve_floor", "curve_min_history_h",
+                  "curve_history_days"):
+            if not math.isfinite(float(p[k])):
+                raise ValueError(f"pacing.{k} is not a finite number")
         if p["curve"] not in ("weighted", "flat"):
             raise ValueError(f"pacing.curve {p['curve']!r}: weighted or flat")
         if not 0 <= float(p["curve_floor"]) <= 1:
@@ -309,8 +311,9 @@ def store_history(local_rows):
             hour = to_epoch(r.get("hour"))
             if hour is None or not math.isfinite(hour) or int(hour // 3600) in local_hours:
                 continue
+            # The hour's five-hour value marks it as having had a fresh reading.
             reading = {"at": hour + 3600 - 1, "seven_day_pct": r.get("seven_day_pct"),
-                       "seven_day_resets_at": r.get("seven_day_resets_at")}
+                       "seven_day_resets_at": r.get("seven_day_resets_at"), "five_hour_pct": r.get("five_hour_pct")}
             if sane_reading(reading):
                 out.append(reading)
     return out
@@ -339,12 +342,12 @@ def group_windows(points):
     disagree on its reset by a few seconds, so resets closer than ten minutes
     apart are one window."""
     out = []
-    for resets, at, pct in sorted(points):
+    for resets, at, pct, fresh in sorted(points):
         if out and resets - out[-1][2] < 600:
-            out[-1][1].append((at, pct))
+            out[-1][1].append((at, pct, fresh))
             out[-1][2] = resets
         else:
-            out.append([resets, [(at, pct)], resets])
+            out.append([resets, [(at, pct, fresh)], resets])
     return [(first, pts) for first, pts, _ in out]
 
 
@@ -354,22 +357,30 @@ def build_curve(p, now, rows):
     failure gives a flat curve: a bad history must not stop dispatch."""
     try:
         return learn_curve(p, now, rows)
-    except (ArithmeticError, ValueError, TypeError, OverflowError) as e:
+    except (ArithmeticError, ValueError, TypeError, OverflowError, IndexError, KeyError) as e:
         log(f"pace curve failed, using a flat line: {e!r}")
-        return flat_curve(f"curve failed: {type(e).__name__}", 0.0, float(p["curve_floor"]))
+        c = flat_curve(f"curve failed: {type(e).__name__}", 0.0, float(p["curve_floor"]))
+        c["warning"] = f"pace curve failed ({e!r}); the pace line is linear until it is fixed"
+        return c
 
 
 def learn_curve(p, now, rows):
     """The weekly percent is cumulative within a window, so its rise is the use
     in between; a gap with no readings (agents work while no status line runs)
-    has its rise spread evenly across it. Only a rise above the highest reading
-    so far in the window counts, spread back to when that high was last seen:
-    sessions whose payload has no five-hour block log a seven-day value that
-    lags the real one, and crediting every climb back after such a low reading
-    would count use twice and squeeze it into five minutes. The
-    model is hour-of-day times weekday, each shrunk toward the average rate,
-    and the hour-of-day profile is smoothed. Too little history gives a flat
-    curve."""
+    has its rise spread evenly across it.
+
+    Only a fresh reading, one that carries a five-hour value, proves when the
+    quota stood where. Sessions whose payload has no five-hour block repeat a
+    lagging seven-day value for hours, so such a reading is believed only when
+    it is a new high (the quota never falls within a window). Each rise above
+    the running high is spread back to the last reading that set or freshly
+    confirmed that high; lower or stale-equal readings in between say nothing
+    about when the use happened. A window's baseline is its opening 0% when
+    that is in range, otherwise its first fresh reading.
+
+    The model is hour-of-day times weekday, each shrunk toward the average
+    rate, and the hour-of-day profile is smoothed. Too little history gives a
+    flat curve."""
     floor = float(p["curve_floor"])
     if p["curve"] == "flat":
         return flat_curve("pacing.curve is flat", 0.0, floor)
@@ -380,25 +391,28 @@ def learn_curve(p, now, rows):
         at, pct, resets = to_epoch(r.get("at")), number(r.get("seven_day_pct")), to_epoch(r.get("seven_day_resets_at"))
         if pct is None or resets is None or not since <= at <= now:
             continue
-        points.append((resets, at, pct))
+        points.append((resets, at, pct, number(r.get("five_hour_pct")) is not None))
     use, cover = [0.0] * 168, [0.0] * 168
     for resets, pts in group_windows(points):
         start = resets - WINDOW_S
         # Every window opens at 0%, which places the use before its first reading.
         if since <= start:
-            pts.append((start, 0.0))
+            pts.append((start, 0.0, True))
         pts.sort()
-        t_high, high = pts[0]
-        for (t1, _), (t2, p2) in zip(pts, pts[1:]):
+        first = next((i for i, x in enumerate(pts) if x[2]), None)
+        if first is None:
+            continue
+        pts = pts[first:]
+        t_high, high, _ = pts[0]
+        for (t1, _, _), (t2, p2, fresh) in zip(pts, pts[1:]):
             if t2 > t1:
                 spread(cover, t1, t2, (t2 - t1) / 3600)
-            if p2 < high:
-                continue
-            # The rise happened somewhere since the high was last seen; a lower
-            # reading in between is a lagging source and says nothing about when.
-            if p2 > high and t2 > t_high:
-                spread(use, t_high, t2, p2 - high)
-            t_high, high = t2, p2
+            if p2 > high:
+                if t2 > t_high:
+                    spread(use, t_high, t2, p2 - high)
+                t_high, high = t2, p2
+            elif p2 == high and fresh:
+                t_high = t2
     history_h = sum(cover)
     if history_h < float(p["curve_min_history_h"]):
         return flat_curve(f"thin history: {history_h:.0f} h of {float(p['curve_min_history_h']):g} h needed",
@@ -458,6 +472,8 @@ def pace_state(cfg, now):
          "curve": {"mode": curve["mode"], "reason": curve["reason"], "history_h": curve["history_h"],
                    "elapsed_weighted_pct": None, "linear_line_pct": None},
          "_curve": curve}
+    if "warning" in curve:
+        s["curve"]["warning"] = curve["warning"]
 
     five = newest_with(rows, "five_hour_pct")
     if five:
@@ -701,9 +717,14 @@ def cmd_curve(args):
     c = build_curve(cfg["pacing"], now, rows)
     w = c["weights"]
     table = [{"day": WEEKDAYS[d], **{f"h{h:02d}": round(w[d * 24 + h], 2) for h in range(24)}} for d in range(7)]
-    emit({"mode": c["mode"], "reason": c["reason"], "history_h": c["history_h"], "floor": c["floor"],
-          "hours": "UTC; 1 is an average hour", "weights": table}, args.json)
-    return 0
+    out = {"mode": c["mode"], "reason": c["reason"], "history_h": c["history_h"], "floor": c["floor"],
+           "hours": "UTC; 1 is an average hour", "weights": table}
+    if "warning" in c:
+        out = {"warning": c["warning"], **out}
+    emit(out, args.json)
+    # Dispatch carries on with a straight line, but whoever asked for the curve
+    # must not mistake the fallback for a learned one.
+    return EXIT_FAIL if "warning" in c else 0
 
 
 # ── Ladder and assign ────────────────────────────────────────────────────────

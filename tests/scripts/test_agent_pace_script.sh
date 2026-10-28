@@ -29,6 +29,9 @@ export AGENT_PACE_LANES="$policy"
 export AGENT_PACE_QUOTA="$tmp/quota.jsonl"
 export AGENT_EVAL_STATE="$tmp/eval"
 export AGENT_PACE_EVAL="$tmp/agent-eval-stub"
+# An empty store, so no test reads history from the machine it runs on.
+export AGENT_PACE_QUOTA_STORE="$tmp/empty-store"
+mkdir -p "$AGENT_PACE_QUOTA_STORE"
 
 # The stub prints whatever weights.json holds, the way `agent-eval weights --json` would.
 printf '#!/bin/sh\nexec cat "%s/weights.json"\n' "$tmp" >"$tmp/agent-eval-stub"
@@ -296,31 +299,46 @@ run 0 curve --json
 check "j['mode'] == 'flat' and len(j['weights']) == 7 and all(r[f'h{h:02d}'] == 1.0 for r in j['weights'] for h in range(24))" \
     "a flat curve is not all ones"
 
-# history NOW_ISO DAYS: half-hourly readings for DAYS before NOW in Monday-aligned
-# 7-day windows, with one point used per hour 14..22 UTC on weekdays only.
+# history NOW_ISO DAYS [ANCHOR_ISO] [VARIANT] [FILE]: half-hourly readings for DAYS
+# before NOW in 7-day windows starting at ANCHOR (default a Monday 00:00 UTC),
+# with one point used per hour 14..22 UTC on weekdays only. VARIANT mixed adds a
+# reading every 5 minutes with no five-hour value whose weekly percent lags the
+# real one by 8 hours, the way an idle session's payload does; gap drops every
+# reading from Wednesday 00:00 to Thursday 12:00 UTC.
 history() {
-    python3 - "$AGENT_PACE_QUOTA" "$@" <<'PY'
+    python3 - "${5:-$AGENT_PACE_QUOTA}" "$1" "$2" "${3:-2026-10-05T00:00:00Z}" "${4:-clean}" <<'PY'
 import datetime as dt, json, sys
-path, now_iso, days = sys.argv[1], sys.argv[2], float(sys.argv[3])
-now = dt.datetime.fromisoformat(now_iso.replace("Z", "+00:00")).timestamp()
-monday = dt.datetime(2026, 10, 5, tzinfo=dt.timezone.utc).timestamp()
+path, now_iso, days, anchor_iso, variant = sys.argv[1:]
+ts = lambda s: dt.datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+now, days, anchor = ts(now_iso), float(days), ts(anchor_iso)
 week = 7 * 86400
 def worked(t):
     d = dt.datetime.fromtimestamp(t, dt.timezone.utc)
     return d.weekday() < 5 and 14 <= d.hour <= 22
+def window(t):
+    return anchor + (t - anchor) // week * week
+def used(t):
+    start = window(t)
+    return sum(1 for h in range(int(start), int(t), 3600) if worked(h))
+def skipped(t):
+    d = dt.datetime.fromtimestamp(t, dt.timezone.utc)
+    return variant == "gap" and (d.weekday() == 2 or (d.weekday() == 3 and d.hour < 12))
 rows, t = [], now - days * 86400
 t -= t % 1800
 while t < now - 60:
-    start = monday + (t - monday) // week * week
-    used = sum(1 for h in range(int(start), int(t), 3600) if worked(h))
-    rows.append({"at": t, "five_hour_pct": 5, "five_hour_resets_at": t + 3600,
-                 "seven_day_pct": used, "seven_day_resets_at": start + week})
+    if not skipped(t):
+        rows.append({"at": t, "five_hour_pct": 5, "five_hour_resets_at": t + 3600,
+                     "seven_day_pct": used(t), "seven_day_resets_at": window(t) + week})
+    if variant == "mixed":
+        for k in range(1, 6):
+            s = t + k * 300
+            lag = max(window(s), s - 8 * 3600)
+            rows.append({"at": s, "seven_day_pct": used(lag), "seven_day_resets_at": window(s) + week})
     t += 1800
 t = now - 60
-start = monday + (t - monday) // week * week
 rows.append({"at": t, "five_hour_pct": 5, "five_hour_resets_at": t + 3600,
-             "seven_day_pct": sum(1 for h in range(int(start), int(t), 3600) if worked(h)),
-             "seven_day_resets_at": start + week})
+             "seven_day_pct": used(t), "seven_day_resets_at": window(t) + week})
+rows.sort(key=lambda r: r["at"])
 open(path, "w").write("".join(json.dumps(r) + "\n" for r in rows))
 PY
 }
@@ -396,7 +414,13 @@ for r in rows:
     if r["seven_day_pct"] >= hours.get(h, {}).get("seven_day_pct", -1):
         hours[h] = {"hour": dt.datetime.fromtimestamp(h, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                     "readings": 2, "seven_day_pct": r["seven_day_pct"], "seven_day_resets_at": r["seven_day_resets_at"]}
-open(sys.argv[2], "w").write("".join(json.dumps(hours[h]) + "\n" for h in sorted(hours)) + "not json\n")
+open(sys.argv[2], "w").write("".join(json.dumps(hours[h]) + "\n" for h in sorted(hours)) 
+    + "not json\n"
+    + '{"hour": "garbage", "seven_day_pct": 99, "seven_day_resets_at": 1793314800}\n'
+    + '{"hour": 1e30, "seven_day_pct": 99, "seven_day_resets_at": 1793314800}\n'
+    + '{"hour": null, "seven_day_pct": 99}\n'
+    + '{"hour": "2026-10-20T05:00:00Z", "seven_day_pct": NaN, "seven_day_resets_at": 1793314800}\n'
+    + '{"hour": "2026-10-20T05:00:00Z", "seven_day_pct": 99, "seven_day_resets_at": "soon"}\n')
 open(sys.argv[1], "w").write(json.dumps(rows[-1]) + "\n")
 PY
 AGENT_PACE_NOW="$sat" run 0 status --json
@@ -405,6 +429,72 @@ AGENT_PACE_NOW="$sat" AGENT_PACE_QUOTA_STORE="$store" run 0 status --json
 check "j['curve']['mode'] == 'weighted' and j['curve']['elapsed_weighted_pct'] > j['elapsed_pct'] + 10" \
     "the store's hourly history was not used"
 check "j['quota_skipped'] == 0" "store rows were counted as skipped local readings"
+# Curve robustness, in-process: the same work logged three ways gives the same curve.
+history "$sat" 21 "" clean "$tmp/clean.jsonl"
+history "$sat" 21 "" mixed "$tmp/mixed.jsonl"
+history "$sat" 21 "" gap "$tmp/gap.jsonl"
+python3 -I - "$pace" "$tmp" <<'PY' || fail "the curve is not robust to lagging, falling or missing readings"
+import importlib.machinery, importlib.util, sys
+pace, tmp = sys.argv[1:]
+loader = importlib.machinery.SourceFileLoader("agent_pace", pace)
+mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("agent_pace", loader))
+loader.exec_module(mod)
+p = mod.load_policy()["pacing"]
+now = mod.to_epoch("2026-10-31T00:00:00Z")
+def curve(name):
+    rows, skipped = mod.read_quota(f"{tmp}/{name}.jsonl")
+    assert skipped == 0, (name, skipped)
+    c = mod.build_curve(p, now, rows)
+    assert c["mode"] == "weighted", (name, c["reason"])
+    return c
+clean, mixed, gap = curve("clean"), curve("mixed"), curve("gap")
+# A lagging source between fresh readings neither adds use nor moves it.
+diff = max(abs(a - b) for a, b in zip(clean["weights"], mixed["weights"]))
+assert diff < 0.05, diff
+# A 36-hour gap still counts as history, and its rise is spread evenly across
+# it: night hours gain weight, the afternoon peak loses some, the mean stays 1.
+assert gap["history_h"] == clean["history_h"], (gap["history_h"], clean["history_h"])
+hour = lambda c, h: sum(c["weights"][d * 24 + h] for d in range(7)) / 7
+assert hour(gap, 4) > hour(clean, 4) + 0.05 and hour(gap, 18) < hour(clean, 18) - 0.05, \
+    (hour(gap, 4), hour(clean, 4), hour(gap, 18), hour(clean, 18))
+assert abs(sum(gap["weights"]) / 168 - 1) < 1e-9
+wed4 = 2 * 24 + 4
+# Falling readings: a source that drops back and climbs again is credited only
+# above its running high, so the window's use is its peak, not every climb.
+start = mod.to_epoch("2026-10-05T00:00:00Z")
+resets = start + mod.WINDOW_S
+seq = [(14, 16), (15, 37), (15.5, 10), (16, 40), (17, 10), (18, 46), (19, 10), (20, 46)]
+fall = [{"at": start + 2 * 86400 + h * 3600, "seven_day_pct": v, "seven_day_resets_at": resets} for h, v in seq]
+quiet = [{"at": start + d * 86400, "seven_day_pct": 46, "seven_day_resets_at": resets} for d in (3, 4, 5, 6)]
+c = mod.build_curve({**p, "curve_min_history_h": 100}, start + mod.WINDOW_S - 1, fall + quiet)
+w = c["weights"]
+# All 46 points landed on Wednesday: Wednesday 15:00, where 16 -> 37 rose, outweighs
+# 17:00, which only saw 40 -> 46 spread over two hours; with every climb credited
+# (157 points) the late afternoon would have dwarfed it.
+assert c["mode"] == "weighted" and w[wed4 - 4 + 15] > w[wed4 - 4 + 17], [round(x, 2) for x in w[48 + 13:48 + 21]]
+# Readings of one window whose reset times differ by seconds are one window.
+jitter = [{**r, "seven_day_resets_at": resets + (i % 3) * 7} for i, r in enumerate(fall + quiet)]
+cj = mod.build_curve({**p, "curve_min_history_h": 100}, start + mod.WINDOW_S - 1, jitter)
+assert max(abs(a - b) for a, b in zip(w, cj["weights"])) < 1e-9
+# Any failure inside the curve falls back to a flat line instead of stopping dispatch.
+def boom(*a):
+    raise ZeroDivisionError("x")
+mod.learn_curve = boom
+c = mod.build_curve(p, now, [])
+assert c["mode"] == "flat" and "failed" in c["reason"] and set(c["weights"]) == {1.0}, c
+PY
+# A real-style window: resets on Thursday 23:00 UTC, so Friday's work comes early.
+history "$sat" 21 "2026-10-08T23:00:00Z"
+AGENT_PACE_NOW="$sat" run 0 status --json
+check "j['window_start'] == '2026-10-29T23:00:00Z' and j['curve']['mode'] == 'weighted'"
+check "j['elapsed_pct'] == 14.9 and j['curve']['elapsed_weighted_pct'] > j['elapsed_pct']" "Friday's work hours did not count early"
+check "abs(j['pace_line_pct'] - 95 * j['curve']['elapsed_weighted_pct'] / 100) < 0.1"
+# A curve that needs no history at all is a configuration error, not a division by zero.
+sed 's/^curve_min_history_h = .*/curve_min_history_h = 0/' "$policy" >"$tmp/zero.toml"
+grep -q '^curve_min_history_h = 0$' "$tmp/zero.toml" || fail "lanes.toml has no curve_min_history_h"
+AGENT_PACE_LANES="$tmp/zero.toml" run 1 status --json
+grep -q "curve_min_history_h" "$out" || fail "min history 0 was not rejected by name" "$(cat "$out")"
+history "$sat" 21
 # Assignment output keeps its fields whatever the curve does.
 AGENT_PACE_NOW="$sat" AGENT_PACE_QUOTA_STORE="$store" run 0 assign --class impl --risk R1 --seed c --no-log --json
 check "set(j) == {'assignment', 'lane', 'provider', 'model', 'class', 'risk', 'reason', 'review_lane', 'fallback', 'result', 'logged'}" \

@@ -192,7 +192,7 @@ def load_policy():
             raise ValueError(f"pacing.curve {p['curve']!r}: weighted or flat")
         if not 0 <= float(p["curve_floor"]) <= 1:
             raise ValueError("pacing.curve_floor outside 0..1")
-        if float(p["curve_min_history_h"]) < 0 or float(p["curve_history_days"]) <= 0:
+        if float(p["curve_min_history_h"]) <= 0 or float(p["curve_history_days"]) <= 0:
             raise ValueError("pacing.curve_min_history_h or curve_history_days out of range")
         cfg["evaluation"]["min_samples"]
         cfg["evaluation"]["prior_weight"]
@@ -334,39 +334,71 @@ def flat_curve(reason, history_h, floor):
     return {"mode": "flat", "reason": reason, "history_h": r1(history_h), "floor": floor, "weights": [1.0] * 168}
 
 
+def group_windows(points):
+    """(resets, [(at, pct)]) per seven-day window. Readings of one window can
+    disagree on its reset by a few seconds, so resets closer than ten minutes
+    apart are one window."""
+    out = []
+    for resets, at, pct in sorted(points):
+        if out and resets - out[-1][2] < 600:
+            out[-1][1].append((at, pct))
+            out[-1][2] = resets
+        else:
+            out.append([resets, [(at, pct)], resets])
+    return [(first, pts) for first, pts, _ in out]
+
+
 def build_curve(p, now, rows):
     """Hour-of-week weights (Monday 00 UTC first, mean 1) for the pace line,
-    from how fast the weekly quota rose in each hour of the recent past.
+    from how fast the weekly quota rose in each hour of the recent past. Any
+    failure gives a flat curve: a bad history must not stop dispatch."""
+    try:
+        return learn_curve(p, now, rows)
+    except (ArithmeticError, ValueError, TypeError, OverflowError) as e:
+        log(f"pace curve failed, using a flat line: {e!r}")
+        return flat_curve(f"curve failed: {type(e).__name__}", 0.0, float(p["curve_floor"]))
 
-    The weekly percent is cumulative within a window, so the rise between two
-    readings is the use in between; a gap with no readings (agents work while
-    no status line runs) has its rise spread evenly across it. The model is
-    hour-of-day times weekday, each shrunk toward the average rate, and the
-    hour-of-day profile is smoothed. Too little history gives a flat curve."""
+
+def learn_curve(p, now, rows):
+    """The weekly percent is cumulative within a window, so its rise is the use
+    in between; a gap with no readings (agents work while no status line runs)
+    has its rise spread evenly across it. Only a rise above the highest reading
+    so far in the window counts, spread back to when that high was last seen:
+    sessions whose payload has no five-hour block log a seven-day value that
+    lags the real one, and crediting every climb back after such a low reading
+    would count use twice and squeeze it into five minutes. The
+    model is hour-of-day times weekday, each shrunk toward the average rate,
+    and the hour-of-day profile is smoothed. Too little history gives a flat
+    curve."""
     floor = float(p["curve_floor"])
     if p["curve"] == "flat":
         return flat_curve("pacing.curve is flat", 0.0, floor)
     since = now - float(p["curve_history_days"]) * 86400
     rows = rows + store_history(rows)
-    windows = {}
+    points = []
     for r in rows:
         at, pct, resets = to_epoch(r.get("at")), number(r.get("seven_day_pct")), to_epoch(r.get("seven_day_resets_at"))
         if pct is None or resets is None or not since <= at <= now:
             continue
-        # Readings of one window can disagree on its reset by a few seconds.
-        windows.setdefault(round(resets / 600), (resets, []))[1].append((at, pct))
+        points.append((resets, at, pct))
     use, cover = [0.0] * 168, [0.0] * 168
-    for resets, pts in windows.values():
+    for resets, pts in group_windows(points):
         start = resets - WINDOW_S
         # Every window opens at 0%, which places the use before its first reading.
         if since <= start:
             pts.append((start, 0.0))
         pts.sort()
-        for (t1, p1), (t2, p2) in zip(pts, pts[1:]):
-            if t2 <= t1:
+        t_high, high = pts[0]
+        for (t1, _), (t2, p2) in zip(pts, pts[1:]):
+            if t2 > t1:
+                spread(cover, t1, t2, (t2 - t1) / 3600)
+            if p2 < high:
                 continue
-            spread(use, t1, t2, max(0.0, p2 - p1))
-            spread(cover, t1, t2, (t2 - t1) / 3600)
+            # The rise happened somewhere since the high was last seen; a lower
+            # reading in between is a lagging source and says nothing about when.
+            if p2 > high and t2 > t_high:
+                spread(use, t_high, t2, p2 - high)
+            t_high, high = t2, p2
     history_h = sum(cover)
     if history_h < float(p["curve_min_history_h"]):
         return flat_curve(f"thin history: {history_h:.0f} h of {float(p['curve_min_history_h']):g} h needed",

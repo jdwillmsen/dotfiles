@@ -40,7 +40,20 @@ rules-file change, which is itself R3.
 
 `agent-pace status` shows where the 7-day window should be by now. Under the
 line, more tasks go to Sonnet and Opus until the quota is used by the end of
-the window; over it, work shifts to free lanes. At 85% of the five-hour window
+the window; over it, work shifts to free lanes.
+
+The line is not straight in time. It follows when work actually happens:
+`agent-pace curve` prints an hour-of-week weight table (UTC, 1 is an average
+hour) learned from the last 28 days of quota readings, the local log plus the
+metrics store's hourly rollup. The rise in the weekly percent between two
+readings is the use in between, spread evenly over gaps when no status line
+was running. Each hour of day and each weekday is shrunk toward the average,
+the hour-of-day profile is smoothed over neighbouring hours, and no hour weighs
+less than a quarter of an average one. Under a week of history the line stays
+linear and `status` says why. `status` shows both the weighted share of the
+window gone (`curve.elapsed_weighted_pct`) and the linear line for comparison;
+the end-of-window floor on the multiplier still keys off clock time. Set
+`curve = "flat"` under `[pacing]` to go back to a straight line. At 85% of the five-hour window
 Claude lanes pause until it resets. Opus is capped at 20% of dispatches.
 Targets, gain and caps are in `lanes.toml` under `[pacing]`.
 
@@ -96,6 +109,7 @@ merge-captain status                       # config in force, caps used, last ru
 tail -n 20 ~/.local/state/merge-captain/log.jsonl
 merge-captain explain jdwillmsen/gameops#210    # what it would do for one PR, no side effects
 agent-pace status                          # where the week should be, and the model mix
+agent-pace curve                           # the hour-of-week weights the pace line follows
 agent-eval scoreboard                      # how each model is doing per task class
 ```
 
@@ -125,12 +139,10 @@ dotfiles source (a change to that file is R3, so a person approves it).
   trailers for that (`Assisted-by:`), and falls back to "unknown" without them.
 - GitHub search allows 30 calls a minute; `agent-eval enrich` paces itself and
   resumes on the next run if it hits the limit.
-- The weekly pace line is linear in time, not weighted by when work happens.
 
 ## Not built yet
 
 - GitHub rulesets keyed to the risk tier, and a Jira field for it.
 - Mirroring the ledgers into the metrics store.
-- A weekday-weighted pace curve (JDW-195).
 - A rollback safety net for production services: a last-known-good record and an
   automatic revert on a failed health check.

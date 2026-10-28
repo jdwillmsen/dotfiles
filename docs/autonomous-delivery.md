@@ -42,25 +42,39 @@ rules-file change, which is itself R3.
 line, more tasks go to Sonnet and Opus until the quota is used by the end of
 the window; over it, work shifts to free lanes.
 
-The line is not straight in time. It follows when work actually happens:
+At 85% of the five-hour window Claude lanes pause until it resets. Opus is
+capped at 20% of dispatches. Targets, gain and caps are in `lanes.toml` under
+`[pacing]`.
+
+### The pace curve
+
+The line is not straight in time; it follows when work actually happens.
 `agent-pace curve` prints an hour-of-week weight table (UTC, 1 is an average
-hour) learned from the last 28 days of quota readings, the local log plus the
-metrics store's hourly rollup. The rise in the weekly percent is the use in
-between, spread evenly over gaps when no status line was running. Only a rise
-above the highest reading so far in the window counts, spread back to when
-that high was last seen: a session whose payload has no five-hour block logs a
-weekly value that lags the real one, so a falling reading is ignored rather
-than credited again when the log climbs back. The window's credited use is
-therefore its peak. Reset times a few seconds apart are one window, and any
-error while learning the curve gives a straight line instead. Each hour of day and each weekday is shrunk toward the average,
-the hour-of-day profile is smoothed over neighbouring hours, and no hour weighs
-less than a quarter of an average one. Under a week of history the line stays
-linear and `status` says why. `status` shows both the weighted share of the
-window gone (`curve.elapsed_weighted_pct`) and the linear line for comparison;
-the end-of-window floor on the multiplier still keys off clock time. Set
-`curve = "flat"` under `[pacing]` to go back to a straight line. At 85% of the five-hour window
-Claude lanes pause until it resets. Opus is capped at 20% of dispatches.
-Targets, gain and caps are in `lanes.toml` under `[pacing]`.
+hour) learned from the last 28 days of quota readings: the local log plus the
+metrics store's hourly rollup.
+
+- The rise in the weekly percent is the use in between, spread evenly over a
+  gap when no status line was running.
+- Only a reading with a five-hour value is fresh. A session whose payload has
+  no five-hour block repeats a lagging weekly value for hours, so such a
+  reading counts only when it is a new high.
+- Each rise above the window's running high is spread back to the last
+  reading that set or freshly confirmed that high. Falling readings, and stale
+  ones equal to the high, are ignored, so a window's credited use is its peak.
+- A window's baseline is its opening 0% when that is within the 28 days,
+  otherwise its first fresh reading. Reset times a few seconds apart are one
+  window.
+- Each hour of day and each weekday is shrunk toward the average, the
+  hour-of-day profile is smoothed over neighbouring hours, and no hour weighs
+  less than a quarter of an average one.
+
+Under a week of history the line stays linear and `status` says why. If
+learning the curve fails, the line is linear, `status` carries a
+`curve.warning` and `agent-pace curve` exits 1; dispatch carries on. `status`
+shows the weighted share of the window gone (`curve.elapsed_weighted_pct`) and
+the linear line for comparison; the end-of-window floor on the multiplier
+still keys off clock time. Set `curve = "flat"` under `[pacing]` to go back to
+a straight line.
 
 ## Choosing a lane
 

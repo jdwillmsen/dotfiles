@@ -4507,6 +4507,8 @@ labelled || fail "a suspect rollout must label needs-human" "$(cat "$S/gh.log")"
 [ "$(alerts)" = 1 ] || fail "a suspect rollout must comment once" "$(cat "$S/gh.log")"
 grep -q 'merge-captain:rollout sha='"$LANDED"' state=suspect' "$S/posted_1.txt" && grep -q 'actions/runs/11' "$S/posted_1.txt" ||
     fail "suspect comment" "$(cat "$S/posted_1.txt")"
+grep -q 'rollout signal for the landed commit failed once' "$S/posted_1.txt" || fail "suspect wording" "$(cat "$S/posted_1.txt")"
+! grep -q 'had passed' "$S/posted_1.txt" || fail "suspect must not claim a prior pass" "$(cat "$S/posted_1.txt")"
 grep -q '"action": "rollout-suspect"' "$STATE/log.jsonl" || fail "suspect not logged"
 verify 20:20 suspect
 [ "$(alerts)" = 1 ] || fail "a suspect rollout was commented on twice"
@@ -4552,6 +4554,8 @@ fx run id=11 sha="$LANDED" conclusion=failure attempt=2 updated=2026-10-23T20:12
 verify 20:15 failed
 [ "$(alerts)" = 2 ] || fail "failed must add one comment of its own" "$(cat "$S/gh.log")"
 grep -q 'state=failed' "$S/posted_1.txt" || fail "failed comment" "$(cat "$S/posted_1.txt")"
+grep -q 'rollout signal for the landed commit failed twice' "$S/posted_1.txt" || fail "failed wording" "$(cat "$S/posted_1.txt")"
+! grep -q 'different runs' "$S/posted_1.txt" || fail "a same-run retry is not a different run" "$(cat "$S/posted_1.txt")"
 grep -q '"action": "rollout-failed"' "$STATE/log.jsonl" || fail "failed not logged"
 no_revert "a failed rollout"
 # ... or both attempts already over when first looked at.

@@ -2689,10 +2689,9 @@ class Captain:
         repo, n, state = rc["name"], row["pr"], row["state"]
         self.ensure_labels(repo, ["needs-human"])
         self.edit_labels(repo, n, ["needs-human"], [])
-        what = ("failed twice, in different runs" if state == "failed"
-                else "failed once where it had passed before")
+        what = "failed twice" if state == "failed" else "failed once"
         lines = [f"<!-- merge-captain:rollout sha={row['head']} state={state} -->",
-                 f"merge-captain: after this pull request merged, a check on the landed commit {what} "
+                 f"merge-captain: after this pull request merged, a rollout signal for the landed commit {what} "
                  f"(rollout {state}). The captain only observes at this stage: nothing was re-run or reverted. "
                  "Look at the runs and decide.", ""]
         for f in row["failures"][:6]:

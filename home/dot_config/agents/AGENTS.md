@@ -173,10 +173,10 @@ unsure, classify up. Put the result on the PR and ticket as labels
   any; *Verified* — what was actually run, one line each. No file-by-file
   lists, restated diff, pasted prompts, logs or unticked checkboxes. Every
   claim must match the final diff — rewrite the body after the last push.
-- **In a T3 thread, link every PR you open** with the `link_pull_request` tool
-  right after creating it, each layer of a stack included, so the owner can
-  review it from the chat. Before finishing, check `list_thread_pull_requests`
-  and link any PR from your work that is missing.
+- **Every PR you mention in a reply is a full link**, `[owner/repo#N](url)`,
+  never a bare `#N` or `repo #N`: the owner works across many repos and orgs,
+  so a bare number names no repository and cannot be opened. This covers
+  summaries, tables and status reports, not only PRs you create.
 
 ## Devbox
 

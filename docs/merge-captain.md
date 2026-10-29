@@ -133,8 +133,10 @@ For each of the three owners:
    The trade-off is that a leaked token reaches every repository the owner can write
    to; choose Only select repositories (the ones under `repos` in `merge-captain
    status`) if that matters more than not reissuing.
-4. **Expiration**: none for the personal account; the organizations cap tokens at 366
-   days, so use that and rotate before `merge-captain status` warns.
+4. **Expiration**: the longest GitHub allows for that owner. An organization policy
+   can require an expiration (366 days by default for fine-grained tokens) or a
+   shorter one, so pick whatever the policy permits, and rotate before
+   `merge-captain status` warns.
 5. **Repository permissions**, and nothing else (no Administration, no Workflows
    write):
    - Contents: Read and write
@@ -142,11 +144,13 @@ For each of the three owners:
    - Issues: Read and write
    - Metadata: Read
    - Commit statuses: Read
+   - Checks: Read
    - Actions: Read
    - Code scanning alerts: Read
 
-   There is no Checks permission on fine-grained tokens; check state comes from
-   commit statuses and Actions.
+   Check state comes from `statusCheckRollup`, which combines check runs (Checks),
+   commit statuses (Commit statuses) and Actions runs (Actions); the captain needs
+   all three to read it completely.
 6. Generate it. An organization can require an owner to approve a fine-grained token
    before it works; if the organization asks for that, approve it under the
    organization's Settings > Personal access tokens.

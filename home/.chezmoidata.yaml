@@ -76,22 +76,26 @@ agentClis:
   # rather than the `agent` alias the same installer also places.
   - name: codex
     kind: npm
-    version: "0.163.0"
+    version: "0.166.0"
     package: "@openai/codex"
+  # OpenCode 2.x ships as @opencode/cli, which owns the same `opencode` binary
+  # name as the 1.x opencode-ai package, so npm refuses to install over it;
+  # `replaces` is removed first. T3 Code needs 2.0.18 or newer for full support.
   - name: opencode
     kind: npm
-    version: "1.19.3"
-    package: opencode-ai
+    version: "2.2.3"
+    package: "@opencode/cli"
+    replaces: opencode-ai
   - name: grok
     kind: npm
-    version: "1.0.62"
+    version: "1.0.70"
     package: "@xai-official/grok"
   # Cursor's installer declares `#!/usr/bin/env bash` and uses a `[[ ]]`
   # conditional, which the dash that `sh` resolves to on Debian parses but
   # cannot run — so this row asks to be piped to bash rather than sh.
   - name: cursor-agent
     kind: script
-    version: "2026.10.19-6bbf2c4"
+    version: "2026.10.22-27dcf5f"
     shell: bash
     posixUrl: "https://cursor.com/install"
     windowsUrl: "https://cursor.com/install?win32=true"

@@ -5,12 +5,7 @@
       "api_base_url": "https://integrate.api.nvidia.com/v1/chat/completions",
       "api_key": "$PLATFORMCTL_JDWLABS_NVIDIA_API_KEY",
       "models": [
-        "moonshotai/kimi-k3",
-        "z-ai/glm-5.3",
-        "deepseek-ai/deepseek-v4.1-flash",
         "nvidia/nemotron-3-ultra-550b-a55b",
-        "z-ai/glm-5.3-flash",
-        "nvidia/nemotron-3-super-120b-a12b",
         "nvidia/nemotron-3.5-lightning-30b-a3b",
         "poolside/laguna-xs-2.1"
       ]

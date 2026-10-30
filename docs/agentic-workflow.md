@@ -154,7 +154,7 @@ it.
 | Main-session planning; architecture, final pre-merge review, security, and a bug Sonnet already failed on — in any session or subagent | Claude Opus 5.5 (Fable 5.1 for the hardest) |
 | Implementation, research, routine review | Claude Sonnet 5.5 — the subagent default |
 | Search, summarizing, log reading | Claude Haiku 5.5, or the LAN model |
-| Bulk or mechanical edits, test scaffolding, overflow implementation | OpenCode on NVIDIA NIM (`z-ai/glm-5.3`, `moonshotai/kimi-k3`) |
+| Bulk or mechanical edits, test scaffolding, overflow implementation | OpenCode on NVIDIA NIM (`nemotron-3-ultra-550b`, `poolside/laguna-xs-2.1`; GLM 5.3 and Kimi K3 retired 2026) |
 | Private or unlimited grunt work under 32K tokens | OpenCode `gpu-stack/local-chat` |
 | Second-opinion review from another model family | Codex (GPT-6 Luna), Grok 4.7 |
 

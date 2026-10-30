@@ -410,6 +410,11 @@ putting it back does not — the one case where a pin must not be a no-op.
 `run_onchange_` keys on the script name and re-runs whenever the contents
 differ from the last run, in either direction.
 
+An `npm` row may name `replaces`, an npm package that owns the same binary
+name. OpenCode 2.x (`@opencode/cli`) and 1.x (`opencode-ai`) both install an
+`opencode` bin, so npm fails with EEXIST over the old one; the script removes
+`replaces` first, and that is a no-op once it is gone.
+
 A `script` row is piped to `sh` unless it names a `shell`. Cursor's installer
 is the reason the field exists: it declares `#!/usr/bin/env bash` and uses a
 `[[ ]]` conditional, which the dash behind `sh` on Debian parses without

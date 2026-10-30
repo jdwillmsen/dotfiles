@@ -282,8 +282,10 @@ node (see Operating notes).
 T3 does not use the `cursor-agent` CLI's own login. The Cursor provider has its
 own browser sign-in in Settings → Providers, or reads `CURSOR_API_KEY` from the
 provider's environment, so a CLI that says "Logged in" can still show "Not
-authenticated" in T3. The Free tier also only includes Grok 4.7, Grok 4.6 and
-Auto; Composer and Gemini models need Cursor Pro.
+authenticated" in T3. A 2026-10-30 probe on the Free tier was refused for
+Composer 2.5 and Gemini 4 Argon ("Model unavailable on Free") and hit the usage
+limit on Auto, though Cursor's published model list says Free includes Composer;
+re-probe before relying on either.
 
 ### OpenCode models
 

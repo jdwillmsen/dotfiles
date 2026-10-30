@@ -211,7 +211,7 @@ separately, and the harness only launches what is already working.
 | Codex | `codex` | `@openai/codex`, npm row in `agentClis` | `codex login` (ChatGPT plan or `OPENAI_API_KEY`) |
 | Cursor | `cursor-agent` | `https://cursor.com/install`, script row in `agentClis` | `cursor-agent login` |
 | Grok | `grok` | `@xai-official/grok`, npm row in `agentClis` | `grok` on first run, or `XAI_API_KEY` |
-| OpenCode | `opencode` | `opencode-ai`, npm row in `agentClis` | `opencode auth login`, plus the providers in `~/.config/opencode/opencode.json` |
+| OpenCode | `opencode` | `@opencode/cli` (2.x), npm row in `agentClis` | `opencode auth login`, plus the providers in `~/.config/opencode/opencode.json` |
 | Antigravity | `agy_acp_server.par` | T3 itself — an action in its settings | Google account, Gemini API key, or Gemini Enterprise, chosen in T3's settings |
 
 Versions are pinned in the `agentClis` table described in
@@ -276,6 +276,14 @@ on the environment rendering it — an apply and a verify disagreed, and CI
 failed on drift that was real. After an nvm major-version change, run
 `chezmoi apply` to repoint the symlink; the unit itself does not depend on
 node (see Operating notes).
+
+### Cursor sign-in
+
+T3 does not use the `cursor-agent` CLI's own login. The Cursor provider has its
+own browser sign-in in Settings → Providers, or reads `CURSOR_API_KEY` from the
+provider's environment, so a CLI that says "Logged in" can still show "Not
+authenticated" in T3. The Free tier also only includes Grok 4.7, Grok 4.6 and
+Auto; Composer and Gemini models need Cursor Pro.
 
 ### OpenCode models
 

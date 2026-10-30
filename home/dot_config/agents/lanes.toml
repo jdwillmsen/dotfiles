@@ -117,7 +117,7 @@ provider = "opencode"
 model = "opencode/glm-5.3-flash-free"
 family = "glm"
 status = "active"
-share = 12
+share = 13
 max_risk = "R1"
 concurrency = 3
 prior = 0.78
@@ -144,13 +144,13 @@ group = "free"
 provider = "opencode"
 model = "nvidia/z-ai/glm-5.3"
 family = "glm"
-status = "active"
-share = 4
-max_risk = "R1"
-concurrency = 3
+status = "paused"
+share = 0
+max_risk = "R0"
+concurrency = 1
 prior = 0.60
-classes = ["impl", "impl-large", "review-fix", "research"]
-notes = "429s above about 3 concurrent agents; commits survive a mid-run kill, so inspect the worktree."
+classes = []
+notes = "Retired on NIM 2026-10-28 (end of life); history still maps here."
 
 [[lane]]
 id = "opencode-nemotron-ultra-free"
@@ -278,6 +278,48 @@ concurrency = 1
 prior = 0.60
 classes = ["docs", "test", "summarize"]
 notes = "Probably shares the high variant quota; judge on R0 work only."
+
+[[lane]]
+id = "opencode-nim-nemotron-ultra"
+group = "free"
+provider = "opencode"
+model = "nvidia/nvidia/nemotron-3-ultra-550b-a55b"
+family = "nemotron"
+status = "explore"
+share = 1
+max_risk = "R0"
+concurrency = 2
+prior = 0.60
+classes = ["impl", "review-fix", "test", "docs"]
+notes = "Probe answered 2026-10-30; NIM, so 429s above about 3 concurrent agents. Judge on R0 work only."
+
+[[lane]]
+id = "opencode-nim-laguna"
+group = "free"
+provider = "opencode"
+model = "nvidia/poolside/laguna-xs-2.1"
+family = "poolside"
+status = "explore"
+share = 1
+max_risk = "R0"
+concurrency = 1
+prior = 0.55
+classes = ["impl", "review-fix", "test"]
+notes = "Probe answered 2026-10-30; code-tuned. Judge on R0 work only."
+
+[[lane]]
+id = "opencode-nim-nemotron-lightning"
+group = "free"
+provider = "opencode"
+model = "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b"
+family = "nemotron"
+status = "explore"
+share = 1
+max_risk = "R0"
+concurrency = 1
+prior = 0.50
+classes = ["docs", "test", "summarize"]
+notes = "Probe answered 2026-10-30; small and fast. Judge on R0 work only."
 
 # Paused lanes never receive work. They exist so history from models that left
 # the catalog or cannot run agent tasks maps to a named lane instead of

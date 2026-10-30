@@ -43,6 +43,11 @@ if [ -n "$have" ] && [ "${have#v}" = "${want#v}" ]; then
 {{- if eq .kind "npm" }}
 elif command -v npm &>/dev/null; then
     pkg={{ .package | quote }}
+{{- if hasKey . "replaces" }}
+    # Another package owns this binary name, so npm would fail with EEXIST;
+    # removing it first is a no-op when it is already gone.
+    npm uninstall -g {{ .replaces | quote }} || true
+{{- end }}
     if npm install -g "$pkg@${want#v}"; then
         confirm_version {{ .name | quote }} "$want"
     else

@@ -804,8 +804,8 @@ weights '{"lanes": {
   "opencode-glm-flash-free": {"impl": {"n": 40, "success": 24, "quality_mean": 0.60, "quality_lb": 0.5, "infra_rate": 0.0, "median_s": 90, "cooldown_until": null}}
 }}'
 run 0 ladder --class impl --risk R1 --json
-check "[l for l in (r['lane'] for r in j['ladder']) if l in ('opencode-mimo-free', 'opencode-glm-flash-free', 'opencode-nim-glm',
-  'opencode-deepseek-flash-free')] == ['opencode-mimo-free', 'opencode-glm-flash-free', 'opencode-nim-glm',
+check "[l for l in (r['lane'] for r in j['ladder']) if l in ('opencode-mimo-free', 'opencode-glm-flash-free',
+  'opencode-deepseek-flash-free')] == ['opencode-mimo-free', 'opencode-glm-flash-free',
   'opencode-deepseek-flash-free']" \
     "free lanes are not ordered by evidence"
 check "[r['lane'] for r in j['ladder']][-2:] == ['claude-sonnet', 'claude-opus']" "ladder does not end sonnet, opus"

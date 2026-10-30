@@ -83,7 +83,7 @@ Route by task: free OpenCode (glm-5.3-flash-free, deepseek-v4.1-flash-free,
 minimax-m3.1-flash-free) for implementation and review-fix rounds; Sonnet for
 research, spikes and anything a free model failed; Opus only for planning,
 final pre-merge review, security and architecture. Skip Codex/Grok on the free
-plans, NIM GLM above 3 concurrent, NIM DeepSeek, kimi-k3 and local-chat for
+plans, NIM above 3 concurrent, retired NIM models (GLM 5.3, kimi-k3), NIM DeepSeek and local-chat for
 agent tasks. A ticket that fails on one rung is escalated, not retried on the
 same model.
 

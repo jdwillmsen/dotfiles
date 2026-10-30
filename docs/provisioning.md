@@ -414,7 +414,10 @@ An `npm` row may name `replaces`, an npm package that owns the same binary
 name. OpenCode 2.x (`@opencode/cli`) and 1.x (`opencode-ai`) both install an
 `opencode` bin, so npm fails with EEXIST over the old one; the script removes
 `replaces` first, and that is a no-op once it is gone. If the install then
-fails it reinstalls `replaces`, so the binary is never left missing.
+fails it reinstalls `replaces`, so the binary is never left missing. Rolling the
+OpenCode row back to 1.x is not automatic: reverting drops `replaces`, so run
+`npm uninstall -g @opencode/cli` by hand before the next apply, or npm fails
+with EEXIST and the machine stays on 2.x.
 
 OpenCode 2.x starts a lasting `opencode serve --service` on the first `run` and
 later runs reuse it, so a caller that sets per-run environment (for example

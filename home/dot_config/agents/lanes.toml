@@ -216,12 +216,12 @@ provider = "grok"
 model = "grok-4.7"
 family = "xai"
 status = "active"
-share = 2
+share = 8
 max_risk = "R1"
-concurrency = 1
+concurrency = 2
 prior = 0.60
-classes = ["review", "research"]
-notes = "Free Build quota exhausts fast; reserve for second-opinion review."
+classes = ["impl", "review-fix", "test", "docs", "review", "research"]
+notes = "Free Build quota exhausts fast; earlier failures were mostly infra, so cooldown handles it. Probe answered 2026-10-30."
 
 [[lane]]
 id = "antigravity-gemini-flash"
@@ -230,13 +230,54 @@ provider = "antigravity"
 model = "gemini-3.8-flash-high"
 family = "google"
 status = "active"
-share = 0
+share = 10
+max_risk = "R1"
+concurrency = 2
+prior = 0.70
+classes = ["impl", "review-fix", "test", "docs", "plan", "summarize"]
+notes = "Quota back 2026-10-30 (probe answered); 6 of 6 earlier tasks succeeded. Keep to bounded work."
+
+[[lane]]
+id = "grok-4-6"
+group = "free"
+provider = "grok"
+model = "grok-4.6"
+family = "xai"
+status = "explore"
+share = 2
 max_risk = "R0"
 concurrency = 1
-prior = 0.70
-classes = ["docs", "plan", "summarize"]
-unavailable_until = "2026-10-28"
-notes = "Quota exhausted 2026-10-21; design drafts and tiny fixes only."
+prior = 0.55
+classes = ["docs", "test", "review-fix", "summarize"]
+notes = "Separate quota check from grok-4.7; judge on R0 work only."
+
+[[lane]]
+id = "grok-build"
+group = "free"
+provider = "grok"
+model = "grok-build"
+family = "xai"
+status = "explore"
+share = 2
+max_risk = "R0"
+concurrency = 1
+prior = 0.55
+classes = ["impl", "test", "docs"]
+notes = "Build-tuned model; judge on R0 work only."
+
+[[lane]]
+id = "antigravity-gemini-flash-medium"
+group = "free"
+provider = "antigravity"
+model = "gemini-3.8-flash-medium"
+family = "google"
+status = "explore"
+share = 2
+max_risk = "R0"
+concurrency = 1
+prior = 0.60
+classes = ["docs", "test", "summarize"]
+notes = "Cheaper overflow for the high variant; judge on R0 work only."
 
 # Paused lanes never receive work. They exist so history from models that left
 # the catalog or cannot run agent tasks maps to a named lane instead of

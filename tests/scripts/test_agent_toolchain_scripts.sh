@@ -51,6 +51,8 @@ tmp="$(mktemp -d "$CHEZ_TMP_ROOT/agentcli.XXXXXXXX")"
 printf '%s\n' "$clis" >"$tmp/clis.sh"
 
 fail() { echo "FAIL: $1"; [ -n "${2:-}" ] && echo "--- $2"; exit 1; }
+grep -q 'npm uninstall -g "opencode-ai"' "$tmp/clis.sh" || fail "the replaced npm package is not removed before the install"
+grep -q 'npm install -g "opencode-ai" ||' "$tmp/clis.sh" || fail "a failed install does not restore the replaced package"
 
 # Declared versions come from the same data the script renders from, so a
 # routine version bump does not turn into a test edit.

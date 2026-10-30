@@ -413,7 +413,14 @@ differ from the last run, in either direction.
 An `npm` row may name `replaces`, an npm package that owns the same binary
 name. OpenCode 2.x (`@opencode/cli`) and 1.x (`opencode-ai`) both install an
 `opencode` bin, so npm fails with EEXIST over the old one; the script removes
-`replaces` first, and that is a no-op once it is gone.
+`replaces` first, and that is a no-op once it is gone. If the install then
+fails it reinstalls `replaces`, so the binary is never left missing.
+
+OpenCode 2.x starts a lasting `opencode serve --service` on the first `run` and
+later runs reuse it, so a caller that sets per-run environment (for example
+merge-captain's `OPENCODE_CONFIG_CONTENT`) must pass `--standalone`. It shares
+`~/.local/share/opencode/opencode.db` with 1.x, so copy that file before the
+first apply if a rollback to 1.x must stay possible.
 
 A `script` row is piped to `sh` unless it names a `shell`. Cursor's installer
 is the reason the field exists: it declares `#!/usr/bin/env bash` and uses a

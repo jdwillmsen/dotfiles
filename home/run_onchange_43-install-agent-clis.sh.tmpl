@@ -46,12 +46,17 @@ elif command -v npm &>/dev/null; then
 {{- if hasKey . "replaces" }}
     # Another package owns this binary name, so npm would fail with EEXIST;
     # removing it first is a no-op when it is already gone.
-    npm uninstall -g {{ .replaces | quote }} || true
+    npm uninstall -g {{ .replaces | quote }} || echo "{{ .name }}: could not remove {{ .replaces }}"
 {{- end }}
     if npm install -g "$pkg@${want#v}"; then
         confirm_version {{ .name | quote }} "$want"
     else
         echo "{{ .name }} npm install failed"
+{{- if hasKey . "replaces" }}
+        # The replaced package was already removed; put it back so callers that
+        # spawn the binary by bare name are not left without one.
+        npm install -g {{ .replaces | quote }} || echo "{{ .name }}: could not restore {{ .replaces }}"
+{{- end }}
     fi
 else
     echo "{{ .name }} requires npm — install node first"

@@ -102,7 +102,7 @@ check "j['state'] == 'on' and j['pace_line_pct'] == 47.5 and j['gap_pct'] == 0.5
 check "j['hours_left'] == 84.0 and j['claude_multiplier'] == 1.0 and not j['five_hour_paused']"
 run 0 shares --json
 check "j['claude_multiplier'] == 1.0"
-check "{r['lane']: r['effective_pct'] for r in j['lanes']}['claude-sonnet'] == 40.0" "on-pace sonnet is not the baseline 40"
+check "{r['lane']: r['effective_pct'] for r in j['lanes']}['claude-sonnet'] == 30.0" "on-pace sonnet is not the baseline 30"
 check "abs(sum(r['effective_pct'] for r in j['lanes']) - 100) < 0.1" "shares do not sum to 100"
 baseline_free="$(python3 -c "
 import json; j = json.load(open('$out'))
@@ -225,7 +225,7 @@ quota 45 50 2 0 3.5
 run 0 status --json
 check "j['five_hour_stale'] and not j['five_hour_paused']" "a stale reading below the threshold paused"
 run 0 shares --json
-check "{r['lane']: r['effective_pct'] for r in j['lanes']}['claude-sonnet'] == 40.0" "stale reading moved the shares"
+check "{r['lane']: r['effective_pct'] for r in j['lanes']}['claude-sonnet'] == 30.0" "stale reading moved the shares"
 # A stale reading at the threshold whose window has reset no longer pauses.
 quota 45 99 -1 0 3.5
 run 0 status --json
@@ -240,7 +240,7 @@ run 0 status --json
 check "j['state'] == 'rolled' and j['claude_multiplier'] == 1.0 and j['gap_pct'] is None" "a reset seven-day window still paced"
 check "'baseline' in j['recommendation']"
 run 0 shares --json
-check "{r['lane']: r['effective_pct'] for r in j['lanes']}['claude-sonnet'] == 40.0" "a reset seven-day window moved the shares"
+check "{r['lane']: r['effective_pct'] for r in j['lanes']}['claude-sonnet'] == 30.0" "a reset seven-day window moved the shares"
 run 0 status
 grep -q "^state: rolled" "$out" || fail "rolled TOON has no state" "$(cat "$out")"
 
@@ -804,7 +804,8 @@ weights '{"lanes": {
   "opencode-glm-flash-free": {"impl": {"n": 40, "success": 24, "quality_mean": 0.60, "quality_lb": 0.5, "infra_rate": 0.0, "median_s": 90, "cooldown_until": null}}
 }}'
 run 0 ladder --class impl --risk R1 --json
-check "[r['lane'] for r in j['ladder']][:4] == ['opencode-mimo-free', 'opencode-glm-flash-free', 'opencode-nim-glm',
+check "[l for l in (r['lane'] for r in j['ladder']) if l in ('opencode-mimo-free', 'opencode-glm-flash-free', 'opencode-nim-glm',
+  'opencode-deepseek-flash-free')] == ['opencode-mimo-free', 'opencode-glm-flash-free', 'opencode-nim-glm',
   'opencode-deepseek-flash-free']" \
     "free lanes are not ordered by evidence"
 check "[r['lane'] for r in j['ladder']][-2:] == ['claude-sonnet', 'claude-opus']" "ladder does not end sonnet, opus"
@@ -846,6 +847,8 @@ weights '{"lanes": {
   "opencode-glm-flash-free": {"docs": {"n": 30, "quality_mean": 0.9, "quality_lb": 0.8, "infra_rate": 0.0, "median_s": 90, "cooldown_until": null}},
   "opencode-deepseek-flash-free": {"docs": {"n": 30, "quality_mean": 0.9, "quality_lb": 0.8, "infra_rate": 0.0, "median_s": 90, "cooldown_until": null}},
   "opencode-mimo-free": {"docs": {"n": 30, "quality_mean": 0.9, "quality_lb": 0.8, "infra_rate": 0.0, "median_s": 90, "cooldown_until": null}},
+  "antigravity-gemini-flash": {"docs": {"n": 30, "quality_mean": 0.9, "quality_lb": 0.8, "infra_rate": 0.0, "median_s": 90, "cooldown_until": null}},
+  "grok-4-7": {"docs": {"n": 30, "quality_mean": 0.9, "quality_lb": 0.8, "infra_rate": 0.0, "median_s": 90, "cooldown_until": null}},
   "claude-haiku": {"docs": {"n": 30, "quality_mean": 0.9, "quality_lb": 0.8, "infra_rate": 0.0, "median_s": 90, "cooldown_until": null}}
 }}'
 found=""

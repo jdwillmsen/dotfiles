@@ -81,8 +81,8 @@ horizontal plus TikTok vertical):
 
 Current pick: option 1 for dual format; option 2 if the same picture goes to
 several platforms and the rig must stay light. Option 3 needs another PC with a
-a stronger encoder (a GPU or a faster CPU). Not decided or built; the rig has OBS Studio 33.0.1 installed and is not
-configured for any of this.
+stronger encoder (a GPU or a faster CPU). Not decided or built; the rig has OBS
+Studio 33.0.1 installed and is not configured for any of this.
 
 Twitch's dual-format streaming and Restream's vertical OBS plugin both have
 first-party documentation; check account, plan and eligibility requirements on

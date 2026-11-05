@@ -7,5 +7,6 @@
 set -euo pipefail
 
 if [ -n "${CHEZMOI_AGE_KEY:-}" ]; then
-    printf '%s' "$CHEZMOI_AGE_KEY" > "${RUNNER_TEMP:-/tmp}/chezmoi-age-key.txt"
+    # chezmoi rejects an age identity readable by group or others.
+    (umask 077 && printf '%s' "$CHEZMOI_AGE_KEY" > "${RUNNER_TEMP:-/tmp}/chezmoi-age-key.txt")
 fi

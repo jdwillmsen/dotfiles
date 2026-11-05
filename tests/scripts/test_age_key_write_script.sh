@@ -18,6 +18,13 @@ written="$tmp/chezmoi-age-key.txt"
 [ "$(wc -c <"$written")" = "${#key}" ] || fail "key file is not byte-exact (stray newline?)"
 [ "$(cat "$written")" = "$key" ] || fail "key file contents do not match CHEZMOI_AGE_KEY"
 
+# chezmoi refuses an identity file with group/world access, even under a
+# permissive umask in the caller.
+[ "$(stat -c %a "$written")" = "600" ] || fail "key file mode is not 600"
+rm -f "$written"
+(umask 000 && CHEZMOI_AGE_KEY="$key" RUNNER_TEMP="$tmp" bash "$script")
+[ "$(stat -c %a "$written")" = "600" ] || fail "key file mode is not 600 under umask 000"
+
 # Locally the on-disk identity is used instead, so an unset env key must leave
 # no file behind rather than truncating one.
 empty="$(mktemp -d)"

@@ -60,7 +60,7 @@ Facts: the rig has 12 cores and an RTX 2070 (NVENC); the devbox is a local VM
 Three ways to send the same game to two destinations (for example Twitch
 horizontal plus TikTok vertical):
 
-1. **Two outputs from OBS on the rig (simplest).** OBS Studio has one canvas;
+1. **Two outputs from OBS on the rig (simplest, mostly already in place).** OBS Studio has one canvas;
    horizontal plus vertical at once needs a plugin (Aitum Vertical or Restream's
    Vertical plugin), or a second OBS instance. NVENC handles two encodes on this
    card. TikTok LIVE Studio is a separate app that can run beside OBS, but it
@@ -81,8 +81,16 @@ horizontal plus TikTok vertical):
 
 Current pick: option 1 for dual format; option 2 if the same picture goes to
 several platforms and the rig must stay light. Option 3 needs another PC with a
-stronger encoder (a GPU or a faster CPU). Not decided or built; the rig has OBS
-Studio 33.0.1 installed and is not configured for any of this.
+stronger encoder (a GPU or a faster CPU). Not decided or built.
+
+What the rig already has (read 2026-11-05): OBS Studio 33.0.1 with a `Main`
+profile (Twitch service, Simple mode, NVENC, 1920x1080 at 60 fps, 6000 kbps),
+`Main` and `Halloween` scene collections, and the Aitum Vertical Canvas plugin
+(1.6.6) with a 1080x1920 NVENC H.264 vertical output. A 25 to 35 second local
+recording with the `Main` profile started on NVENC and wrote a file. Frame-drop
+numbers were not captured, because OBS ignored a polite close and had to be
+stopped. Upload measured about 280 to 330 Mbps to Cloudflare, far above what
+the Twitch bitrate needs.
 
 Twitch's dual-format streaming and Restream's vertical OBS plugin both have
 first-party documentation; check account, plan and eligibility requirements on

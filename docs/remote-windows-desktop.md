@@ -20,7 +20,10 @@ That is enough for:
 
 Limits learned the hard way:
 
-- `RunLevel Limited` produced result `0xFFFD0000` and no output; use `Highest`.
+- The screenshot task with `RunLevel Limited` ended with `LastTaskResult`
+  `4294770688` (`0xFFFD0000`) and wrote no file; the same script with
+  `Highest` worked. The cause was not diagnosed, so `Highest` is what is known
+  to work, not proof that elevation is required.
 - Delete the PNG after reading it. A capture contains whatever is on screen
   (chat, browser tabs, accounts); never keep or attach it.
 - Script files via `scp`, never inline SSH quoting. Never kill all `powershell`.
@@ -31,7 +34,7 @@ Limits learned the hard way:
 
 | Tool | Shares the live console | Notes |
 |---|---|---|
-| **TightVNC / TigerVNC server** | Yes, mirrors the physical screen | Best fit for "watch and take over". Agent side: `vncdotool` for screenshots and clicks. Bind to the Tailscale interface only; set a password. No GPU capture, so heavy motion is laggy. |
+| **TightVNC server** | Yes, mirrors the physical screen | Best fit for "watch and take over". (TigerVNC's own wiki says official Windows server support ended in 2020, so it is not recommended here.) Agent side: `vncdotool` for screenshots and clicks. Bind to the Tailscale interface only; set a password. No GPU capture, so heavy motion is laggy. |
 | **Sunshine + Moonlight** | Yes | GPU (NVENC) capture, lowest latency, built for games. Moonlight is a client app, not scriptable, so it suits the human, not an agent. |
 | **RDP** | No: connecting locks or replaces the console session | Unsuitable while streaming. `TermService` is stopped on the rig and RDP is off (`fDenyTSConnections = 1`); leave it that way. |
 | **PowerShell screenshot + input injection** (AutoHotkey or `SendInput` inside an Interactive task) | Yes | Zero install and nothing listening. Fiddly for input; fine for occasional clicks. |
@@ -62,22 +65,25 @@ horizontal plus TikTok vertical):
    Vertical plugin), or a second OBS instance. NVENC handles two encodes on this
    card. TikTok LIVE Studio is a separate app that can run beside OBS, but it
    captures the screen on its own, so it adds GPU and CPU load while gaming.
-2. **Relay on the devbox.** OBS sends one high-bitrate stream (SRT or RTMP) to
-   MediaMTX or nginx-rtmp on the devbox, and `ffmpeg` fans it out to each
-   platform. Copy mode costs almost nothing; a **vertical** re-encode is x264 on
-   8 vCPUs and is the part that may not keep up. Costs the home upload twice
-   (rig to devbox is LAN, devbox to platforms is WAN), so check upload bandwidth
-   against the combined bitrates first.
+2. **Relay on the devbox.** OBS sends one high-bitrate stream to the devbox
+   (RTMP to nginx-rtmp or MediaMTX, or SRT to MediaMTX; nginx-rtmp is RTMP
+   only) and `ffmpeg` fans it out to each platform. Copy mode costs almost
+   nothing; a **vertical** re-encode is x264 on 8 vCPUs and is the part that may
+   not keep up. The rig-to-devbox hop is LAN and uses no home upload; WAN upload
+   must still cover the sum of the platform bitrates plus overhead, the same as
+   sending them straight from the rig.
 3. **Run OBS itself on another PC.** Possible only by sending it the game
    picture: NDI or SRT from the rig's OBS, or a capture card. That adds a hop and
-   puts a second encode on the other machine, so it only helps if that machine
-   has a GPU. The devbox VM does not, so it cannot do this well today.
+   puts a second encode on the other machine. OBS can encode with x264 on a CPU,
+   so a GPU is not strictly required, but a CPU-only host needs lower
+   resolution, frame rate or preset. Whether the 8-vCPU devbox VM can sustain
+   that is untested and likely insufficient.
 
 Current pick: option 1 for dual format; option 2 if the same picture goes to
 several platforms and the rig must stay light. Option 3 needs another PC with a
-GPU. Not decided or built; the rig has OBS Studio 33.0.1 installed and is not
+a stronger encoder (a GPU or a faster CPU). Not decided or built; the rig has OBS Studio 33.0.1 installed and is not
 configured for any of this.
 
-Platform-side dual-format features (Twitch dual format, Restream) were reported
-only by secondary guides at time of writing; check each platform's own docs
-before building on them.
+Twitch's dual-format streaming and Restream's vertical OBS plugin both have
+first-party documentation; check account, plan and eligibility requirements on
+each platform's own help pages before building on them.

@@ -37,14 +37,24 @@ claude-usage snapshot         read now and append one row to the log
 claude-usage show --limit 24  newest logged readings
 ```
 
-`claude-usage.timer` runs `snapshot` hourly at :07. A browser it started is
-stopped afterwards; one that was already running is left alone.
+`claude-usage.timer` runs `snapshot --if-idle` hourly at :07. `--if-idle` skips
+the run unless the browser is fully stopped, so a person using the viewer is
+never interrupted; a browser the run starts is stopped afterwards, and one that
+was running or half up is left as found. While it runs (about 30 seconds) the
+viewer is up on the tailnet address, as for any `agent-browser start`. The
+timer is enabled only where Chrome, Xvfb, x11vnc, websockify, tailscale and uv
+are installed, and the command is not deployed to gaming machines.
 
 ## Limits
 
-- The endpoints are the claude.ai web app's, not a documented API. If they move,
-  `snapshot` fails with a structured error naming the status, and a response with
-  no quota window prints a note instead of an empty reading.
+- The endpoints are the claude.ai web app's, not a documented API. If the usage
+  endpoint moves, `snapshot` fails with a structured error naming the status;
+  one that returns no quota window logs nothing and fails. A failed credit or
+  promo read is logged as `unavailable`, never as a zero balance.
+- Exit codes: 3 only when the browser says claude.ai is not signed in; any other
+  failure, including a failed sign-in check, is 1.
+- The first organisation the page contacts is used; an account in several
+  organisations would need that choice made explicit.
 - The promo credit endpoint reports state and expiry, not the amount spent. To
   see what a batch of cloud routines cost, take a snapshot before and after.
 - Percentages only: Max plan windows report no dollars, so cost stays a

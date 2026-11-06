@@ -17,7 +17,8 @@ ever read, printed or stored. If the profile is not signed in the tool stops
 and says so; the human signs in through the viewer. A row holds percentages,
 reset times, dollar amounts and a promo state, never an identifier of the
 account or organisation. Calls no model. Agent-facing: stdout is TOON,
-diagnostics go to stderr.
+including structured errors; exceptions are reduced to their type name so a
+response body never reaches the journal.
 """
 import argparse
 import datetime as dt
@@ -46,7 +47,7 @@ STATE = am.STATE
 LOG = STATE / "claudeai.jsonl"
 LOCK = STATE / "claudeai.lock"
 SITE = os.environ.get("CLAUDE_USAGE_SITE", "https://claude.ai")
-CDP = os.environ.get("AGENT_BROWSER_CDP", "http://127.0.0.1:9222")
+CDP = f"http://127.0.0.1:{os.environ.get('AGENT_BROWSER_CDP_PORT', '9222')}"
 
 WINDOW_NAMES = {
     "five_hour": "session_5h",
@@ -93,6 +94,8 @@ def parse_usage(usage):
 
 
 def parse_credits(credits):
+    if credits is None:
+        return {"error": "unavailable"}
     credits = credits or {}
     out = {"amount": credits.get("amount"), "currency": credits.get("currency"),
            "balance": credits.get("balance"), "next_expires_at": credits.get("next_expires_at")}
@@ -100,6 +103,8 @@ def parse_credits(credits):
 
 
 def parse_promo(promo):
+    if promo is None:
+        return {"state": "unavailable"}
     promo = promo or {}
     return {k: promo.get(k) for k in ("state", "claimed", "expires_at") if k in promo}
 
@@ -117,26 +122,50 @@ def run(cmd, timeout=90):
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
 
 
-def browser_up():
+def browser_state():
+    """running, stopped, or partial (some component down, e.g. a dead viewer)."""
     out = run(["agent-browser"]).stdout
-    return "state: running" in out
+    if "state: running" in out:
+        return "running"
+    return "stopped" if "state: stopped" in out else "partial"
 
 
-def logged_in():
-    out = run(["agent-browser", "check", SITE + "/new"]).stdout
-    return "logged_in: yes" in out
+def sign_in():
+    """yes, no, or None when the check itself failed (never read as "no")."""
+    try:
+        out = run(["agent-browser", "check", SITE + "/new"]).stdout
+    except subprocess.TimeoutExpired:
+        return None
+    for line in out.splitlines():
+        if line.startswith("logged_in: "):
+            v = line.split(": ", 1)[1].strip()
+            return v if v in ("yes", "no") else None
+    return None
+
+
+def stop_browser():
+    try:
+        run(["agent-browser", "stop"])
+    except Exception:
+        pass
 
 
 def fetch_all():
     """Return (usage, credits, promo) from the logged-in page, or die with a hint."""
-    started = False
-    if not browser_up():
-        r = run(["agent-browser", "start", SITE + "/new"], timeout=120)
-        if r.returncode != 0:
+    # Stop only what this run brought up from fully stopped. A browser that is
+    # running, or half up, belongs to someone else and is left as found.
+    before = browser_state()
+    started = before == "stopped"
+    if before != "running":
+        run(["agent-browser", "start", SITE + "/new"], timeout=120)
+        if browser_state() != "running":
             am.die(EXIT_FAIL, "agent-browser would not start", "run `agent-browser` for component status")
-        started = True
     try:
-        if not logged_in():
+        signed = sign_in()
+        if signed is None:
+            am.die(EXIT_FAIL, "could not check whether claude.ai is signed in",
+                   "run `agent-browser check claude.ai` to see why")
+        if signed == "no":
             viewer = next((l.split(": ", 1)[1] for l in run(["agent-browser"]).stdout.splitlines()
                            if l.startswith("viewer: ")), "run `agent-browser start`")
             am.die(EXIT_LOGIN, "claude.ai is not signed in on the devbox browser",
@@ -148,6 +177,7 @@ def fetch_all():
             ctx = browser.contexts[0]
             # A fresh tab, so a human using the browser keeps theirs.
             page = ctx.new_page()
+            page.set_default_timeout(30000)
             org = []
             page.on("response", lambda r: org.append(m.group(1)) if (
                 m := re.search(rf"/api/organizations/({UUID})/", r.url)) else None)
@@ -163,8 +193,11 @@ def fetch_all():
                 base = f"{SITE}/api/organizations/{org[0]}"
                 # The /v1 endpoints refuse a call without the API version and the
                 # organisation header the page itself sends; neither is a secret.
-                js = """async ([u, h]) => { const r = await fetch(u, {credentials: 'include', headers: h});
-                    return r.ok ? await r.json() : {__status: r.status}; }"""
+                js = """async ([u, h]) => { try {
+                        const r = await fetch(u, {credentials: 'include', headers: h});
+                        if (!r.ok) return {__status: r.status};
+                        return await r.json();
+                    } catch (e) { return {__status: 'unreadable'}; } }"""
                 v1 = {"anthropic-version": "2023-06-01", "x-organization-uuid": org[0]}
                 got = [page.evaluate(js, [u, h]) for u, h in (
                     (f"{base}/usage", {}), (f"{base}/prepaid/credits", {}),
@@ -177,13 +210,16 @@ def fetch_all():
         return [None if isinstance(g, dict) and "__status" in g else g for g in got]
     finally:
         if started:
-            run(["agent-browser", "stop"])
+            stop_browser()
 
 
 # ── commands ─────────────────────────────────────────────────────────────────
 
 def present(row):
-    out = {"at": row["at"], "source": row["source"], "windows": row["windows"],
+    keys = ["name", "used_pct", "resets_at", "used_usd", "limit_usd"]
+    used = [k for k in keys if k in ("name", "used_pct", "resets_at") or any(k in w for w in row["windows"])]
+    wins = [{k: w.get(k) for k in used} for w in row["windows"]]
+    out = {"at": row["at"], "source": row["source"], "windows": wins,
            "credit": row["credit"], "cloud_credit": row["cloud_credit"]}
     if not row["windows"]:
         out["note"] = "no quota window in the response; the endpoint shape may have changed"
@@ -195,6 +231,11 @@ def cmd_now(args):
 
 
 def cmd_snapshot(args):
+    # The timer passes --if-idle so a person using the viewer is never
+    # interrupted: only a stopped browser is started for a reading.
+    if args.if_idle and browser_state() != "stopped":
+        am.emit({"snapshot": "skipped", "reason": "the browser is in use or half up; left alone"})
+        return
     STATE.mkdir(parents=True, exist_ok=True)
     with open(LOCK, "w") as lk:
         try:
@@ -203,6 +244,9 @@ def cmd_snapshot(args):
             am.emit({"snapshot": "skipped", "reason": "another run holds the lock"})
             return
         row = build_row(*fetch_all(), now_utc())
+        if not row["windows"]:
+            am.die(EXIT_FAIL, "no quota window in the response; nothing logged",
+                   "run `claude-usage now`; the endpoint shape may have changed")
         with open(LOG, "a") as fh:
             fh.write(json.dumps(row, separators=(",", ":")) + "\n")
     am.emit({"snapshot": "logged", "log": am.tilde(LOG),
@@ -243,7 +287,10 @@ def main(argv=None):
         formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="command")
     sub.add_parser("now", help="read and print the current numbers (default)").set_defaults(fn=cmd_now)
-    sub.add_parser("snapshot", help="read now and append one row to the state log").set_defaults(fn=cmd_snapshot)
+    sn = sub.add_parser("snapshot", help="read now and append one row to the state log")
+    sn.add_argument("--if-idle", action="store_true",
+                    help="skip unless the browser is fully stopped (what the timer uses)")
+    sn.set_defaults(fn=cmd_snapshot)
     sh = sub.add_parser("show", help="print the newest logged readings")
     sh.add_argument("--limit", type=int, default=12)
     sh.set_defaults(fn=cmd_show)
@@ -257,5 +304,5 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except Exception as e:  # keep the agent-facing contract: structured error, not a traceback
-        am.emit({"error": f"{type(e).__name__}: {e}", "help": "re-run with the browser up: `agent-browser start`"})
+        am.emit({"error": type(e).__name__, "help": "re-run `claude-usage now` with the browser up: `agent-browser start`"})
         sys.exit(EXIT_FAIL)

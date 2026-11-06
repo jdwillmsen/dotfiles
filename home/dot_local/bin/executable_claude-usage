@@ -1,0 +1,308 @@
+#!/usr/bin/env -S uv run -q --script
+# /// script
+# requires-python = ">=3.10"
+# dependencies = ["playwright"]
+# ///
+"""claude-usage — the Claude plan numbers that claude.ai shows, logged as a time series.
+
+Reads the usage endpoints the claude.ai Settings > Usage panel itself calls
+(plan windows, prepaid credit balance, the cloud-session promo credit) from
+inside the logged-in devbox browser (`agent-browser`), and appends one reading
+per run to ~/.local/state/agent-metrics/claudeai.jsonl. It covers what the
+transcript collector cannot see: cloud routines, claude.ai chat and Cowork
+spend, and quota when no interactive session is open.
+
+The page's own fetch carries the session, so no cookie, token or password is
+ever read, printed or stored. If the profile is not signed in the tool stops
+and says so; the human signs in through the viewer. A row holds percentages,
+reset times, dollar amounts and a promo state, never an identifier of the
+account or organisation. Calls no model. Agent-facing: stdout is TOON,
+including structured errors; exceptions are reduced to their type name so a
+response body never reaches the journal.
+"""
+import argparse
+import datetime as dt
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+
+VERSION = "1.0.0"
+
+if __name__ == "__main__" and len(sys.argv) == 2 and sys.argv[1] in ("-v", "-V", "--version"):
+    print(VERSION)
+    sys.exit(0)
+
+EXIT_FAIL, EXIT_USAGE, EXIT_LOGIN = 1, 2, 3
+
+# Reuse the store helpers (TOON output, state directory) rather than fork them.
+_here = Path(__file__).resolve().parent
+am = SourceFileLoader("agent_metrics", str(next(
+    p for p in (_here / "agent-metrics", _here / "executable_agent-metrics") if p.exists()))).load_module()
+STATE = am.STATE
+LOG = STATE / "claudeai.jsonl"
+LOCK = STATE / "claudeai.lock"
+SITE = os.environ.get("CLAUDE_USAGE_SITE", "https://claude.ai")
+CDP = f"http://127.0.0.1:{os.environ.get('AGENT_BROWSER_CDP_PORT', '9222')}"
+
+WINDOW_NAMES = {
+    "five_hour": "session_5h",
+    "seven_day": "weekly",
+    "seven_day_opus": "weekly_opus",
+    "seven_day_sonnet": "weekly_sonnet",
+    "seven_day_cowork": "weekly_cowork",
+    "seven_day_oauth_apps": "weekly_oauth_apps",
+}
+UUID = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+
+
+def now_utc():
+    fixed = os.environ.get("CLAUDE_USAGE_NOW")
+    if fixed:
+        return dt.datetime.fromisoformat(fixed).astimezone(dt.timezone.utc)
+    return dt.datetime.now(dt.timezone.utc)
+
+
+def iso(t):
+    return t.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ── parsing: the only part that knows the endpoints' shape ───────────────────
+
+def parse_usage(usage):
+    """Every top-level object that carries a utilization is a quota window.
+
+    Matched by shape rather than by name: the endpoint also holds many feature
+    flags with obfuscated keys, and a window added later should be logged
+    without a code change.
+    """
+    rows = []
+    for key, val in (usage or {}).items():
+        if isinstance(val, dict) and isinstance(val.get("utilization"), (int, float)):
+            row = {"name": WINDOW_NAMES.get(key, key),
+                   "used_pct": val["utilization"],
+                   "resets_at": val.get("resets_at")}
+            for src, dst in (("used_dollars", "used_usd"), ("limit_dollars", "limit_usd")):
+                if isinstance(val.get(src), (int, float)):
+                    row[dst] = val[src]
+            rows.append(row)
+    return rows
+
+
+def parse_credits(credits):
+    if credits is None:
+        return {"error": "unavailable"}
+    credits = credits or {}
+    out = {"amount": credits.get("amount"), "currency": credits.get("currency"),
+           "balance": credits.get("balance"), "next_expires_at": credits.get("next_expires_at")}
+    return {k: v for k, v in out.items() if v is not None} or {"amount": credits.get("amount", 0)}
+
+
+def parse_promo(promo):
+    if promo is None:
+        return {"state": "unavailable"}
+    promo = promo or {}
+    return {k: promo.get(k) for k in ("state", "claimed", "expires_at") if k in promo}
+
+
+def build_row(usage, credits, promo, at):
+    return {"at": iso(at), "source": "claude.ai",
+            "windows": parse_usage(usage),
+            "credit": parse_credits(credits),
+            "cloud_credit": parse_promo(promo)}
+
+
+# ── the browser ──────────────────────────────────────────────────────────────
+
+def run(cmd, timeout=90):
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def browser_state():
+    """running, stopped, or partial (some component down, e.g. a dead viewer)."""
+    out = run(["agent-browser"]).stdout
+    if "state: running" in out:
+        return "running"
+    return "stopped" if "state: stopped" in out else "partial"
+
+
+def sign_in():
+    """yes, no, or None when the check itself failed (never read as "no")."""
+    try:
+        out = run(["agent-browser", "check", SITE + "/new"]).stdout
+    except subprocess.TimeoutExpired:
+        return None
+    for line in out.splitlines():
+        if line.startswith("logged_in: "):
+            v = line.split(": ", 1)[1].strip()
+            return v if v in ("yes", "no") else None
+    return None
+
+
+def stop_browser():
+    try:
+        run(["agent-browser", "stop"])
+    except Exception:
+        pass
+
+
+def fetch_all():
+    """Return (usage, credits, promo) from the logged-in page, or die with a hint."""
+    # Stop only what this run brought up from fully stopped. A browser that is
+    # running, or half up, belongs to someone else and is left as found.
+    before = browser_state()
+    started = before == "stopped"
+    if before != "running":
+        run(["agent-browser", "start", SITE + "/new"], timeout=120)
+        if browser_state() != "running":
+            am.die(EXIT_FAIL, "agent-browser would not start", "run `agent-browser` for component status")
+    try:
+        signed = sign_in()
+        if signed is None:
+            am.die(EXIT_FAIL, "could not check whether claude.ai is signed in",
+                   "run `agent-browser check claude.ai` to see why")
+        if signed == "no":
+            viewer = next((l.split(": ", 1)[1] for l in run(["agent-browser"]).stdout.splitlines()
+                           if l.startswith("viewer: ")), "run `agent-browser start`")
+            am.die(EXIT_LOGIN, "claude.ai is not signed in on the devbox browser",
+                   f"sign in once through the viewer ({viewer}), then re-run; this tool never handles credentials")
+        # Imported here so --help, show and the parser need no browser library.
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.connect_over_cdp(CDP)
+            ctx = browser.contexts[0]
+            # A fresh tab, so a human using the browser keeps theirs.
+            page = ctx.new_page()
+            page.set_default_timeout(30000)
+            org = []
+            page.on("response", lambda r: org.append(m.group(1)) if (
+                m := re.search(rf"/api/organizations/({UUID})/", r.url)) else None)
+            try:
+                page.goto(SITE + "/new", wait_until="domcontentloaded", timeout=60000)
+                for _ in range(40):
+                    if org:
+                        break
+                    page.wait_for_timeout(500)
+                if not org:
+                    am.die(EXIT_FAIL, "no organisation endpoint seen while claude.ai loaded",
+                           "open claude.ai in the viewer and check the page loads")
+                base = f"{SITE}/api/organizations/{org[0]}"
+                # The /v1 endpoints refuse a call without the API version and the
+                # organisation header the page itself sends; neither is a secret.
+                js = """async ([u, h]) => { try {
+                        const r = await fetch(u, {credentials: 'include', headers: h});
+                        if (!r.ok) return {__status: r.status};
+                        return await r.json();
+                    } catch (e) { return {__status: 'unreadable'}; } }"""
+                v1 = {"anthropic-version": "2023-06-01", "x-organization-uuid": org[0]}
+                got = [page.evaluate(js, [u, h]) for u, h in (
+                    (f"{base}/usage", {}), (f"{base}/prepaid/credits", {}),
+                    (f"{SITE}/v1/code/promo/cloud_credit", v1))]
+            finally:
+                page.close()
+        if isinstance(got[0], dict) and "__status" in got[0]:
+            am.die(EXIT_FAIL, f"usage endpoint answered {got[0]['__status']}",
+                   "the endpoint may have moved; check Settings > Usage in the viewer")
+        return [None if isinstance(g, dict) and "__status" in g else g for g in got]
+    finally:
+        if started:
+            stop_browser()
+
+
+# ── commands ─────────────────────────────────────────────────────────────────
+
+def present(row):
+    keys = ["name", "used_pct", "resets_at", "used_usd", "limit_usd"]
+    used = [k for k in keys if k in ("name", "used_pct", "resets_at") or any(k in w for w in row["windows"])]
+    wins = [{k: w.get(k) for k in used} for w in row["windows"]]
+    out = {"at": row["at"], "source": row["source"], "windows": wins,
+           "credit": row["credit"], "cloud_credit": row["cloud_credit"]}
+    if not row["windows"]:
+        out["note"] = "no quota window in the response; the endpoint shape may have changed"
+    return out
+
+
+def cmd_now(args):
+    am.emit(present(build_row(*fetch_all(), now_utc())))
+
+
+def cmd_snapshot(args):
+    # The timer passes --if-idle so a person using the viewer is never
+    # interrupted: only a stopped browser is started for a reading.
+    if args.if_idle and browser_state() != "stopped":
+        am.emit({"snapshot": "skipped", "reason": "the browser is in use or half up; left alone"})
+        return
+    STATE.mkdir(parents=True, exist_ok=True)
+    with open(LOCK, "w") as lk:
+        try:
+            fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            am.emit({"snapshot": "skipped", "reason": "another run holds the lock"})
+            return
+        row = build_row(*fetch_all(), now_utc())
+        if not row["windows"]:
+            am.die(EXIT_FAIL, "no quota window in the response; nothing logged",
+                   "run `claude-usage now`; the endpoint shape may have changed")
+        with open(LOG, "a") as fh:
+            fh.write(json.dumps(row, separators=(",", ":")) + "\n")
+    am.emit({"snapshot": "logged", "log": am.tilde(LOG),
+             "windows": [{"name": w["name"], "used_pct": w["used_pct"]} for w in row["windows"]]})
+
+
+def read_log():
+    rows = []
+    if LOG.exists():
+        for line in LOG.read_text().splitlines():
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                continue
+    return rows
+
+
+def cmd_show(args):
+    rows = read_log()[-args.limit:]
+    if not rows:
+        am.emit({"readings": 0, "log": am.tilde(LOG)})
+        return
+    flat = []
+    for r in rows:
+        w = {x["name"]: x["used_pct"] for x in r.get("windows", [])}
+        flat.append({"at": r["at"], "session_5h": w.get("session_5h"), "weekly": w.get("weekly"),
+                     "cloud_credit": (r.get("cloud_credit") or {}).get("state")})
+    am.emit({"readings": len(read_log()), "log": am.tilde(LOG), "latest": flat})
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(
+        prog="claude-usage",
+        description="Claude plan usage as claude.ai reports it, from the logged-in devbox browser.",
+        epilog="examples:\n  claude-usage                 read and print now\n"
+               "  claude-usage snapshot        read now and append to the log\n"
+               "  claude-usage show --limit 24 newest logged readings",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="command")
+    sub.add_parser("now", help="read and print the current numbers (default)").set_defaults(fn=cmd_now)
+    sn = sub.add_parser("snapshot", help="read now and append one row to the state log")
+    sn.add_argument("--if-idle", action="store_true",
+                    help="skip unless the browser is fully stopped (what the timer uses)")
+    sn.set_defaults(fn=cmd_snapshot)
+    sh = sub.add_parser("show", help="print the newest logged readings")
+    sh.add_argument("--limit", type=int, default=12)
+    sh.set_defaults(fn=cmd_show)
+    args = ap.parse_args(argv)
+    (args.fn if getattr(args, "fn", None) else cmd_now)(args)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception as e:  # keep the agent-facing contract: structured error, not a traceback
+        am.emit({"error": type(e).__name__, "help": "re-run `claude-usage now` with the browser up: `agent-browser start`"})
+        sys.exit(EXIT_FAIL)

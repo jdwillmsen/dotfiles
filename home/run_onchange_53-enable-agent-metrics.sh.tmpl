@@ -6,6 +6,8 @@ set -euo pipefail
 # {{ include "dot_config/systemd/user/agent-metrics-collect.timer" | sha256sum }}
 # {{ include "dot_config/systemd/user/agent-metrics-providers.service" | sha256sum }}
 # {{ include "dot_config/systemd/user/agent-metrics-providers.timer" | sha256sum }}
+# {{ include "dot_config/systemd/user/claude-usage.service" | sha256sum }}
+# {{ include "dot_config/systemd/user/claude-usage.timer" | sha256sum }}
 
 if [ "$(uname -s)" != "Linux" ]; then
     echo "agent-metrics: not Linux — skipping"
@@ -46,3 +48,19 @@ if [ ! -d "${AGENT_METRICS_STORE:-${XDG_DATA_HOME:-$HOME/.local/share}/agent-met
     echo "agent-metrics: the store is not cloned — run: agent-metrics init && agent-metrics collect --since 90"
 fi
 echo "agent-metrics: timer enabled"
+# Hourly reading of the plan numbers claude.ai shows. It needs the agent-browser
+# stack, so a box without it (a laptop with no Chrome or tailscale) is left
+# without the timer rather than failing every hour. Each run starts the browser
+# only when it is fully stopped, so it never touches a viewer in use; the
+# viewer is up on the tailnet address for the ~30 seconds a run takes. Until the
+# human has signed in once, a run logs a structured "not signed in" error.
+missing=""
+for bin in google-chrome Xvfb x11vnc websockify tailscale uv; do
+    command -v "$bin" >/dev/null 2>&1 || missing="$missing $bin"
+done
+if [ -n "$missing" ]; then
+    echo "claude-usage: missing${missing} — timer not enabled (see docs/agent-browser.md)"
+else
+    systemctl --user enable --now claude-usage.timer
+    echo "claude-usage: timer enabled"
+fi

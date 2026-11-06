@@ -81,6 +81,10 @@ Readings exist only while an interactive session is open. `agent-pace` reads
 this log and the store's hourly `quota/` rollup to learn when in the week the
 quota is used, and bends its pace line to match.
 
+Claude's own plan numbers as claude.ai reports them (including usage that
+never reaches a local transcript, such as cloud routines) are logged by
+[`claude-usage`](claude-usage.md).
+
 ## Provider limits
 
 T3 Code keeps each provider's plan and quota windows fresh in

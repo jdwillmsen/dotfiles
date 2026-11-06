@@ -53,7 +53,7 @@ is a record of one boot, not a guarantee about the next.
 Everything else in `systemctl list-units` is stock Ubuntu (journald, resolved,
 logind, udev, cron, rsyslog, oomd, qemu-guest-agent, unattended-upgrades).
 `t3-session-expiry.timer`, the four `agent-audit-*.timer`s,
-`agent-metrics-collect.timer`, the six `agent-report-*.timer`s, `agent-notify.timer`,
+`agent-metrics-collect.timer`, `claude-usage.timer`, the six `agent-report-*.timer`s, `agent-notify.timer`,
 `agent-notify-digest.timer`, `agent-trends.timer`, `agent-label.timer`, the three `agent-propose-*.timer`s, `merge-captain.timer` and
 `agent-eval-collect.timer` are the
 only timers this repo owns. Baseline for the

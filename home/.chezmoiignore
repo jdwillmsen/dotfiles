@@ -62,6 +62,7 @@ run_once_49-install-dev-tools.sh.tmpl
 .config/streams.json
 .config/claude-jira.json
 .local/bin/agent-*
+.local/bin/claude-usage
 .local/bin/aipick
 .local/bin/check-openrouter-freshness
 .local/bin/refresh-openrouter-free

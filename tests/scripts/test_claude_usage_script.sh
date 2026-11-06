@@ -58,21 +58,87 @@ py show --limit 5 >"$tmp/out"
 grep -q "^readings: 1" "$tmp/out" || fail "show skips a corrupt line and counts the rest" "$(cat "$tmp/out")"
 grep -q "8,5,expired" "$tmp/out" || fail "show does not flatten the windows" "$(cat "$tmp/out")"
 
-# ── a profile that is not signed in stops with a login hint and exit 3 ──
+# ── a failed credit or promo read is an error state, never a $0 balance ──
+python3 - "$cli" <<'PY' || fail "unavailable reads must not look like zero"
+import sys
+from importlib.machinery import SourceFileLoader
+m = SourceFileLoader("cu2", sys.argv[1]).load_module()
+assert m.parse_credits(None) == {"error": "unavailable"}
+assert m.parse_credits({"amount": 0}) == {"amount": 0}
+assert m.parse_promo(None) == {"state": "unavailable"}
+row = {"at": "t", "source": "s", "credit": {}, "cloud_credit": {},
+       "windows": [{"name": "a", "used_pct": 1, "resets_at": "r"},
+                   {"name": "b", "used_pct": 2, "resets_at": "r", "used_usd": 3.5}]}
+w = m.present(row)["windows"]
+assert all(set(x) == set(w[0]) and "used_usd" in x for x in w), w
+PY
+
+# ── the browser: stop only what this run started, from fully stopped ──
 bin="$tmp/bin"; mkdir -p "$bin"
 cat >"$bin/agent-browser" <<'STUB'
 #!/usr/bin/env bash
+d="${STUB_DIR:?}"
+echo "${1:-status}" >>"$d/calls"
 case "${1:-}" in
-    check) echo "logged_in: no" ;;
-    stop) : ;;
-    *) printf 'state: running\nviewer: http://100.64.0.1:6080/vnc.html\n' ;;
+    check)
+        case "$(cat "$d/login")" in
+            fail) exit 1 ;;
+            *) echo "site: x"; echo "logged_in: $(cat "$d/login")" ;;
+        esac ;;
+    start) echo running >"$d/state"; echo "state: running" ;;
+    stop) echo stopped >"$d/state" ;;
+    *) printf 'state: %s\nviewer: http://100.64.0.1:6080/vnc.html\n' "$(cat "$d/state")" ;;
 esac
 STUB
 chmod +x "$bin/agent-browser"
-code=0
-PATH="$bin:$PATH" py now >"$tmp/out" 2>"$tmp/err" || code=$?
+export STUB_DIR="$tmp/stub"; mkdir -p "$STUB_DIR"
+# Run with the stub and no Playwright: after the sign-in check the browser
+# library is imported, so a "yes" ends in a structured error and exit 1, and
+# the calls show what was started and stopped.
+drive() {  # drive STATE LOGIN [claude-usage args...]
+    printf '%s\n' "$1" >"$STUB_DIR/state"; printf '%s\n' "$2" >"$STUB_DIR/login"; : >"$STUB_DIR/calls"
+    shift 2
+    code=0
+    PATH="$bin:$PATH" py "$@" >"$tmp/out" 2>"$tmp/err" || code=$?
+    calls="$(tr '\n' ' ' <"$STUB_DIR/calls")"
+}
+
+drive running yes now
+[ "$calls" = "status check " ] || fail "a running browser must be neither started nor stopped" "$calls"
+drive stopped yes now
+[ "$calls" = "status start status check stop " ] || fail "a stopped browser is started, then stopped by this run" "$calls"
+drive partial yes now
+[ "$calls" = "status start status check " ] || fail "a half-up browser is repaired but never stopped" "$calls"
+drive stopped fail now
+[ "$code" = 1 ] || fail "a failing sign-in check must exit 1, got $code" "$(cat "$tmp/out")"
+grep -q "could not check" "$tmp/out" || fail "a failing check is not reported as such" "$(cat "$tmp/out")"
+[ "$calls" = "status start status check stop " ] || fail "the browser this run started is stopped even on error" "$calls"
+drive running no now
 [ "$code" = 3 ] || fail "not signed in should exit 3, got $code" "$(cat "$tmp/out" "$tmp/err")"
 grep -q "not signed in" "$tmp/out" || fail "no structured login error" "$(cat "$tmp/out")"
 grep -q "never handles credentials" "$tmp/out" || fail "login error does not say credentials are the human's" "$(cat "$tmp/out")"
+[ "$calls" = "status check status " ] || fail "a sign-in miss must not stop a browser it did not start" "$calls"
+
+# ── --if-idle: the timer leaves a browser that is in use alone ──
+drive running yes snapshot --if-idle
+[ "$code" = 0 ] || fail "--if-idle skipping must exit 0, got $code" "$(cat "$tmp/out")"
+grep -q "snapshot: skipped" "$tmp/out" || fail "--if-idle must skip while the browser runs" "$(cat "$tmp/out")"
+[ "$calls" = "status " ] || fail "--if-idle must not start, check or stop anything" "$calls"
+drive partial yes snapshot --if-idle
+grep -q "snapshot: skipped" "$tmp/out" || fail "--if-idle must skip a half-up browser" "$(cat "$tmp/out")"
+
+# ── wiring: unit, timer, enable hook and gaming-machine ignore ──
+svc="$here/home/dot_config/systemd/user/claude-usage.service"
+tim="$here/home/dot_config/systemd/user/claude-usage.timer"
+grep -q "^ExecStart=%h/.local/bin/claude-usage snapshot --if-idle$" "$svc" || fail "the service must run snapshot --if-idle"
+grep -q "^Unit=claude-usage.service$" "$tim" || fail "the timer does not point at the service"
+grep -q "^Persistent=false$" "$tim" || fail "readings of now must not be caught up"
+hook="$here/home/run_onchange_53-enable-agent-metrics.sh.tmpl"
+grep -q 'include "dot_config/systemd/user/claude-usage.service" | sha256sum' "$hook" || fail "service edits must retrigger the hook"
+grep -q 'include "dot_config/systemd/user/claude-usage.timer" | sha256sum' "$hook" || fail "timer edits must retrigger the hook"
+grep -q "enable --now claude-usage.timer" "$hook" || fail "the hook does not enable the timer"
+grep -q 'for bin in google-chrome Xvfb x11vnc websockify tailscale uv' "$hook" || fail "the timer must be gated on the browser stack"
+grep -qx ".local/bin/claude-usage" "$here/home/.chezmoiignore" || fail "gaming machines must not get claude-usage"
+grep -q "claude-usage.timer" "$here/docs/services.md" || fail "docs/services.md does not list the timer"
 
 echo "claude-usage OK"

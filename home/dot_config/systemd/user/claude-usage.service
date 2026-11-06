@@ -4,13 +4,15 @@ Documentation=file://%h/.local/share/chezmoi/docs/claude-usage.md
 
 [Service]
 Type=oneshot
-ExecStart=%h/.local/bin/claude-usage snapshot
+ExecStart=%h/.local/bin/claude-usage snapshot --if-idle
 # A user manager starts with a bare PATH; uv runs the script and agent-browser
 # starts Chrome.
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-# Starting the browser can take a minute on a cold box.
-TimeoutStartSec=4min
-# No NoNewPrivileges or PrivateTmp here, unlike the other snapshot units:
-# Chrome's own sandbox and agent-browser's runtime directory need them off.
+# Starting the browser can take a minute on a cold box; the longest chain
+# (start, sign-in check, page load, three fetches, stop) stays under this.
+TimeoutStartSec=5min
+# No NoNewPrivileges or PrivateTmp here, unlike the other snapshot units. Xvfb
+# puts its socket under /tmp and Chrome's sandbox wants to create namespaces;
+# which of the two actually breaks was not tested, so both stay off.
 Nice=10
 IOSchedulingClass=idle

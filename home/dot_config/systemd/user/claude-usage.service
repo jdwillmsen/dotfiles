@@ -1,0 +1,16 @@
+[Unit]
+Description=Claude plan usage snapshot (claude.ai, via the devbox browser)
+Documentation=file://%h/.local/share/chezmoi/docs/claude-usage.md
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/claude-usage snapshot
+# A user manager starts with a bare PATH; uv runs the script and agent-browser
+# starts Chrome.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Starting the browser can take a minute on a cold box.
+TimeoutStartSec=4min
+# No NoNewPrivileges or PrivateTmp here, unlike the other snapshot units:
+# Chrome's own sandbox and agent-browser's runtime directory need them off.
+Nice=10
+IOSchedulingClass=idle

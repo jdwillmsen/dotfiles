@@ -6,6 +6,8 @@ set -euo pipefail
 # {{ include "dot_config/systemd/user/agent-metrics-collect.timer" | sha256sum }}
 # {{ include "dot_config/systemd/user/agent-metrics-providers.service" | sha256sum }}
 # {{ include "dot_config/systemd/user/agent-metrics-providers.timer" | sha256sum }}
+# {{ include "dot_config/systemd/user/claude-usage.service" | sha256sum }}
+# {{ include "dot_config/systemd/user/claude-usage.timer" | sha256sum }}
 
 if [ "$(uname -s)" != "Linux" ]; then
     echo "agent-metrics: not Linux — skipping"
@@ -46,3 +48,7 @@ if [ ! -d "${AGENT_METRICS_STORE:-${XDG_DATA_HOME:-$HOME/.local/share}/agent-met
     echo "agent-metrics: the store is not cloned — run: agent-metrics init && agent-metrics collect --since 90"
 fi
 echo "agent-metrics: timer enabled"
+# Hourly reading of the plan numbers claude.ai shows. It reuses the devbox
+# browser's signed-in profile, so it logs a structured "not signed in" error,
+# and nothing else, until the human has signed in once through the viewer.
+systemctl --user enable --now claude-usage.timer

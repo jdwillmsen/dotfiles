@@ -1,0 +1,12 @@
+[Unit]
+Description=Hourly Claude plan usage snapshot
+
+[Timer]
+OnCalendar=*-*-* *:07:00
+Unit=claude-usage.service
+# A missed run is not caught up: each reading is a time series of "now".
+Persistent=false
+RandomizedDelaySec=3min
+
+[Install]
+WantedBy=timers.target

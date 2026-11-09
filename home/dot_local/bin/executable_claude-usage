@@ -178,35 +178,53 @@ def fetch_all():
             # A fresh tab, so a human using the browser keeps theirs.
             page = ctx.new_page()
             page.set_default_timeout(30000)
-            org = []
-            page.on("response", lambda r: org.append(m.group(1)) if (
-                m := re.search(rf"/api/organizations/({UUID})/", r.url)) else None)
+            orgs = []
+
+            def seen(r):
+                # Only organisations the page reached successfully are candidates,
+                # in the order it contacted them.
+                m = re.search(rf"/api/organizations/({UUID})/", r.url)
+                if m and r.ok and m.group(1) not in orgs:
+                    orgs.append(m.group(1))
+
+            page.on("response", seen)
             try:
                 page.goto(SITE + "/new", wait_until="domcontentloaded", timeout=60000)
                 for _ in range(40):
-                    if org:
+                    if orgs:
                         break
                     page.wait_for_timeout(500)
-                if not org:
-                    am.die(EXIT_FAIL, "no organisation endpoint seen while claude.ai loaded",
+                if not orgs:
+                    am.die(EXIT_FAIL, "no organisation endpoint answered while claude.ai loaded",
                            "open claude.ai in the viewer and check the page loads")
-                base = f"{SITE}/api/organizations/{org[0]}"
-                # The /v1 endpoints refuse a call without the API version and the
-                # organisation header the page itself sends; neither is a secret.
+                # A failed or unreadable response is a status marker, not an
+                # exception, so one endpoint down does not lose the others.
                 js = """async ([u, h]) => { try {
                         const r = await fetch(u, {credentials: 'include', headers: h});
                         if (!r.ok) return {__status: r.status};
                         return await r.json();
                     } catch (e) { return {__status: 'unreadable'}; } }"""
-                v1 = {"anthropic-version": "2023-06-01", "x-organization-uuid": org[0]}
-                got = [page.evaluate(js, [u, h]) for u, h in (
-                    (f"{base}/usage", {}), (f"{base}/prepaid/credits", {}),
+                # The first candidate whose usage call succeeds is the active one.
+                usage, org, status = None, None, None
+                for cand in orgs:
+                    resp = page.evaluate(js, [f"{SITE}/api/organizations/{cand}/usage", {}])
+                    if isinstance(resp, dict) and "__status" in resp:
+                        status = resp["__status"]
+                        continue
+                    usage, org = resp, cand
+                    break
+                if org is None:
+                    am.die(EXIT_FAIL, f"usage endpoint answered {status}",
+                           "the endpoint may have moved; check Settings > Usage in the viewer")
+                base = f"{SITE}/api/organizations/{org}"
+                # The /v1 endpoints refuse a call without the API version and the
+                # organisation header the page itself sends; neither is a secret.
+                v1 = {"anthropic-version": "2023-06-01", "x-organization-uuid": org}
+                got = [usage] + [page.evaluate(js, [u, h]) for u, h in (
+                    (f"{base}/prepaid/credits", {}),
                     (f"{SITE}/v1/code/promo/cloud_credit", v1))]
             finally:
                 page.close()
-        if isinstance(got[0], dict) and "__status" in got[0]:
-            am.die(EXIT_FAIL, f"usage endpoint answered {got[0]['__status']}",
-                   "the endpoint may have moved; check Settings > Usage in the viewer")
         return [None if isinstance(g, dict) and "__status" in g else g for g in got]
     finally:
         if started:

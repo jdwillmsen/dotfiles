@@ -60,6 +60,9 @@ for bin in google-chrome Xvfb x11vnc websockify tailscale uv; do
 done
 if [ -n "$missing" ]; then
     echo "claude-usage: missing${missing} — timer not enabled (see docs/agent-browser.md)"
+    # An earlier apply may have enabled it; a timer whose service cannot run
+    # would fail every hour.
+    systemctl --user disable --now claude-usage.timer >/dev/null 2>&1 || true
 else
     systemctl --user enable --now claude-usage.timer
     echo "claude-usage: timer enabled"

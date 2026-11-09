@@ -156,11 +156,16 @@ def fetch_all():
     # running, or half up, belongs to someone else and is left as found.
     before = browser_state()
     started = before == "stopped"
-    if before != "running":
-        run(["agent-browser", "start", SITE + "/new"], timeout=120)
-        if browser_state() != "running":
-            am.die(EXIT_FAIL, "agent-browser would not start", "run `agent-browser` for component status")
+    # Everything after this point is inside the try, so a start that times out
+    # or brings up only some components is still cleaned up by the finally.
     try:
+        if before != "running":
+            try:
+                run(["agent-browser", "start", SITE + "/new"], timeout=120)
+            except subprocess.TimeoutExpired:
+                pass
+            if browser_state() != "running":
+                am.die(EXIT_FAIL, "agent-browser would not start", "run `agent-browser` for component status")
         signed = sign_in()
         if signed is None:
             am.die(EXIT_FAIL, "could not check whether claude.ai is signed in",

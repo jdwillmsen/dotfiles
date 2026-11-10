@@ -13,8 +13,8 @@ export PATH="$BIN:$PATH"
 # binary fails `terraform init` outright. Raise this with that constraint:
 # editing it changes this script's content, which is what makes a run_once_
 # script run again on machines that already have it recorded.
-TERRAFORM_MIN_VERSION=1.16.3
-TERRAFORM_FALLBACK_VERSION=1.16.4
+TERRAFORM_MIN_VERSION=1.17.0
+TERRAFORM_FALLBACK_VERSION=1.17.1
 
 # The vendor archives run to hundreds of megabytes. A CI apply — including the
 # smoke test, which applies with a real machine role into a throwaway HOME —

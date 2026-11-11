@@ -1,8 +1,9 @@
 {
-  "as_of": "2026-10-01",
+  "as_of": "2026-11-11",
   "cache_write_5m": 1.25,
   "cache_write_1h": 2.0,
   "models": {
+    "claude-fable-5-2": [8.0, 40.0, 0.20],
     "claude-fable-5-1": [10.0, 50.0, 0.25],
     "claude-fable-5": [10.0, 50.0, 1.0],
     "claude-mythos-5-1": [10.0, 50.0, 0.25],

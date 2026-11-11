@@ -72,8 +72,9 @@ CRED_ENV = re.compile(r"^JIRA_|TOKEN|SECRET|PASSW|API_KEY|PRIVATE_KEY|CREDENTIAL
 
 # API list prices in USD per million tokens: (input, output, cache read).
 # Cache writes are priced from input: 1.25x for the 5-minute TTL, 2x for 1-hour.
-# Prices as of 2026-10-01. Longest prefix wins, so dated ids resolve too.
+# Prices as of 2026-11-11. Longest prefix wins, so dated ids resolve too.
 PRICING = {
+    "claude-fable-5-2": (8.0, 40.0, 0.20),
     "claude-fable-5-1": (10.0, 50.0, 0.25),
     "claude-fable-5": (10.0, 50.0, 1.0),
     "claude-mythos-5-1": (10.0, 50.0, 0.25),
@@ -184,7 +185,7 @@ state: {DATA_DIR}/reports/<date>-<window>.md|.json, epic key in {EPIC_FILE.name}
 examples:
   agent-audit --window weekly --dry-run --no-jira
   agent-audit --window monthly --no-insights
-  agent-audit --window quarterly --end 2026-10-01"""
+  agent-audit --window quarterly --end 2026-11-11"""
 
 
 def parse_args(argv):
@@ -1390,7 +1391,7 @@ def main(argv):
         "coverage": {**{k: v for k, v in stats.items() if k != "unpriced_models"},
                      "unpriced_models": dict(stats["unpriced_models"]), "retention_days": retention,
                      "previous_partial": prev_partial and prev_source == "transcripts",
-                     "pricing_date": "2026-10-01"},
+                     "pricing_date": "2026-11-11"},
     }
 
     prior = load_json(stored_json) if not dry else None

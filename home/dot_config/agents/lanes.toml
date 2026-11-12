@@ -69,6 +69,20 @@ classes = ["plan", "impl", "impl-large", "review", "review-fix", "research", "sp
 notes = "Planning, final pre-merge review, security, architecture, and what Sonnet failed."
 
 [[lane]]
+id = "claude-fable"
+group = "claude"
+provider = "claudeAgent"
+model = "claude-fable-5-2"
+family = "anthropic"
+status = "active"
+share = 1
+max_risk = "R3"
+concurrency = 1
+prior = 0.92
+classes = ["plan", "research", "spike"]
+notes = "Scarce top tier at about twice Opus cost: R3 plans, hard research and spikes, and what Opus failed. Keep the share near 1%."
+
+[[lane]]
 id = "claude-sonnet"
 group = "claude"
 provider = "claudeAgent"
@@ -117,7 +131,7 @@ provider = "opencode"
 model = "opencode/glm-5.3-flash-free"
 family = "glm"
 status = "active"
-share = 13
+share = 12
 max_risk = "R1"
 concurrency = 3
 prior = 0.78

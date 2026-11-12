@@ -151,7 +151,7 @@ it.
 
 | Work | Route |
 |---|---|
-| Main-session planning; architecture, final pre-merge review, security, and a bug Sonnet already failed on — in any session or subagent | Claude Opus 5.5 (Fable 5.1 for the hardest) |
+| Main-session planning; architecture, final pre-merge review, security, and a bug Sonnet already failed on — in any session or subagent | Claude Opus 5.5 (Fable 5.2 for the hardest, held to about 1% of dispatches) |
 | Implementation, research, routine review | Claude Sonnet 5.5 — the subagent default |
 | Search, summarizing, log reading | Claude Haiku 5.5, or the LAN model |
 | Bulk or mechanical edits, test scaffolding, overflow implementation | OpenCode on NVIDIA NIM (`nemotron-3-ultra-550b-a55b`, `poolside/laguna-xs-2.1`, both still explore lanes; GLM 5.3 and Kimi K3 retired 2026) |

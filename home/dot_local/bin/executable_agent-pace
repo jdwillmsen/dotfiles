@@ -866,7 +866,7 @@ def choose(ctx, args, busy):
         weights[lane["id"]] = float(lane["share"]) * pace * evidence
 
     if ctx.evidence is not None and risk in ("R0", "R1"):
-        under = [x["id"] for x in pool if weights[x["id"]] > 0
+        under = [x["id"] for x in pool if weights[x["id"]] > 0 and not x.get("no_explore")
                  and (number(ctx.lane_class_stats(x["id"], cls).get("n")) or 0) < float(ev_cfg["min_samples"])]
         w_under = sum(weights[i] for i in under)
         w_rest = sum(weights.values()) - w_under

@@ -53,6 +53,8 @@ promote_min_n = 15
 # status: active (normal) | explore (R0 only, to be judged) | paused (never).
 # max_risk: highest tier the lane may implement; reviews follow the tier rule.
 # unavailable_until: ISO date; the lane is skipped before then.
+# no_explore: true keeps the lane out of the under-sampled exploration boost,
+#   so a costly lane stays at its share.
 
 [[lane]]
 id = "claude-opus"
@@ -79,6 +81,7 @@ share = 1
 max_risk = "R3"
 concurrency = 1
 prior = 0.92
+no_explore = true
 classes = ["plan", "research", "spike"]
 notes = "Scarce top tier at about twice Opus cost: R3 plans, hard research and spikes, and what Opus failed. Keep the share near 1%."
 

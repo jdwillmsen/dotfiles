@@ -410,6 +410,12 @@ putting it back does not — the one case where a pin must not be a no-op.
 `run_onchange_` keys on the script name and re-runs whenever the contents
 differ from the last run, in either direction.
 
+npm 12 does not run install scripts for global packages unless they are
+allow-listed, so `home/dot_npmrc` lists `@xai-official/grok` and
+`@opencode/cli`, whose postinstall fetches the native binary. A new npm row whose
+package has a postinstall must be added there, or the install succeeds but the
+binary is broken.
+
 An `npm` row may name `replaces`, an npm package that owns the same binary
 name. OpenCode 2.x (`@opencode/cli`) and 1.x (`opencode-ai`) both install an
 `opencode` bin, so npm fails with EEXIST over the old one; the script removes

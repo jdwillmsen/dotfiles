@@ -34,6 +34,7 @@ confirm_version() {
         echo "$name: now at $want"
     fi
 }
+failed=0
 {{ range .agentClis }}
 want={{ .version | quote }}
 have="$(installed_version {{ .name | quote }})"
@@ -48,10 +49,11 @@ elif command -v npm &>/dev/null; then
     # removing it first is a no-op when it is already gone.
     npm uninstall -g {{ .replaces | quote }} || echo "{{ .name }}: could not remove {{ .replaces }}"
 {{- end }}
-    if npm install -g "$pkg@${want#v}"; then
+    if npm install -g{{ if hasKey . "allowScripts" }} --allow-scripts="$pkg"{{ end }} "$pkg@${want#v}"; then
         confirm_version {{ .name | quote }} "$want"
     else
         echo "{{ .name }} npm install failed"
+        failed=1
 {{- if hasKey . "replaces" }}
         # The replaced package was already removed; put it back so callers that
         # spawn the binary by bare name are not left without one.
@@ -115,4 +117,10 @@ if command -v no-mistakes &>/dev/null; then
     echo "note: run 'no-mistakes init' inside a repo to gate it (also installs the /no-mistakes skill)"
 fi
 
+# A failed npm install must not look like a completed run: chezmoi records a
+# zero exit as done and would not retry the bump until the pin changes again.
+if [ "$failed" -ne 0 ]; then
+    echo "agent CLIs: at least one npm install failed" >&2
+    exit 1
+fi
 echo "agent CLIs reconciled"

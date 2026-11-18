@@ -411,10 +411,10 @@ putting it back does not — the one case where a pin must not be a no-op.
 differ from the last run, in either direction.
 
 npm 12 does not run install scripts for global packages unless they are
-allow-listed, so `home/dot_npmrc` lists `@xai-official/grok` and
-`@opencode/cli`, whose postinstall fetches the native binary. A new npm row whose
-package has a postinstall must be added there, or the install succeeds but the
-binary is broken.
+allow-listed, so a row whose package has a postinstall (grok, opencode) sets
+`allowScripts: true` and the script passes `--allow-scripts` for it. Without it
+the install succeeds but the binary is broken. A failed npm install makes the
+script exit nonzero so the next apply retries it.
 
 An `npm` row may name `replaces`, an npm package that owns the same binary
 name. OpenCode 2.x (`@opencode/cli`) and 1.x (`opencode-ai`) both install an

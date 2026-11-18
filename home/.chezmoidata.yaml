@@ -56,6 +56,8 @@ agentSkills:
 # installers that take no version input, so there the declared value is what
 # the result is checked against afterwards rather than something that can be
 # handed to the installer (see docs/provisioning.md).
+# `allowScripts` marks an npm row whose postinstall fetches the native binary;
+# npm 12 skips dependency install scripts unless the install allow-lists them.
 agentClis:
   - name: no-mistakes
     kind: script
@@ -85,11 +87,13 @@ agentClis:
     kind: npm
     version: "2.3.2"
     package: "@opencode/cli"
+    allowScripts: true
     replaces: opencode-ai
   - name: grok
     kind: npm
     version: "1.0.89"
     package: "@xai-official/grok"
+    allowScripts: true
   # Cursor's installer declares `#!/usr/bin/env bash` and uses a `[[ ]]`
   # conditional, which the dash that `sh` resolves to on Debian parses but
   # cannot run — so this row asks to be piped to bash rather than sh.

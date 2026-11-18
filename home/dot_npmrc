@@ -1,4 +1,0 @@
-# npm 12 skips dependency install scripts unless allow-listed; these
-# global agent CLIs need their postinstall to fetch the native binary.
-allow-scripts[]=@xai-official/grok
-allow-scripts[]=@opencode/cli

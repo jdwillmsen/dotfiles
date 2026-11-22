@@ -48,7 +48,7 @@ elif command -v npm &>/dev/null; then
     # removing it first is a no-op when it is already gone.
     npm uninstall -g {{ .replaces | quote }} || echo "{{ .name }}: could not remove {{ .replaces }}"
 {{- end }}
-    if npm install -g "$pkg@${want#v}"; then
+    if npm install -g{{ if hasKey . "allowScripts" }} --allow-scripts="$pkg"{{ end }} "$pkg@${want#v}"; then
         confirm_version {{ .name | quote }} "$want"
     else
         echo "{{ .name }} npm install failed"

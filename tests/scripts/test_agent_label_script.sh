@@ -724,7 +724,9 @@ rm -f "$srv/delay" "$srv/req"/*.json
 echo 1 >"$srv/hang_after"
 got=0
 AGENT_METRICS_STORE="$store2" AGENT_LABEL_FLUSH_EVERY=1 timeout -s KILL 3 "$label" run >"$out" 2>"$err" || got=$?
-[ "$got" = 137 ] || fail "the killed run exited $got, want 137"
+# GNU timeout reports a SIGKILLed child as 137; the timeout shipped on newer
+# runner images reports every expiry as 124.
+case "$got" in 124 | 137) ;; *) fail "the killed run exited $got, want 124 or 137" ;; esac
 [ "$(cat "$store2"/labels/*.jsonl | wc -l)" = 3 ] || fail "labels answered before the kill were lost" "$(cat "$store2"/labels/*.jsonl)"
 [ "$(sg2 rev-parse HEAD)" = "$(git -C "$remote2" rev-parse main)" ] || fail "labels answered before the kill were not pushed"
 rm -f "$srv/hang_after" "$srv/req"/*.json

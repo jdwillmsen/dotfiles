@@ -56,6 +56,8 @@ agentSkills:
 # installers that take no version input, so there the declared value is what
 # the result is checked against afterwards rather than something that can be
 # handed to the installer (see docs/provisioning.md).
+# `allowScripts` marks an npm row whose postinstall fetches the native binary;
+# npm 12 skips dependency install scripts unless the install allow-lists them.
 agentClis:
   - name: no-mistakes
     kind: script
@@ -68,7 +70,7 @@ agentClis:
     windowsUrl: "https://raw.githubusercontent.com/kunchenguid/no-mistakes/main/docs/install.ps1"
   - name: gnhf
     kind: npm
-    version: "0.1.51"
+    version: "0.1.53"
     package: gnhf
   # The four agent CLIs T3 Code can drive besides Claude Code, which arrives
   # with its own installer. T3 resolves each by bare binary name on PATH, so
@@ -76,20 +78,22 @@ agentClis:
   # rather than the `agent` alias the same installer also places.
   - name: codex
     kind: npm
-    version: "0.166.0"
+    version: "0.170.0"
     package: "@openai/codex"
   # OpenCode 2.x ships as @opencode/cli, which owns the same `opencode` binary
   # name as the 1.x opencode-ai package, so npm refuses to install over it;
   # `replaces` is removed first. T3 Code needs 2.0.18 or newer for full support.
   - name: opencode
     kind: npm
-    version: "2.2.3"
+    version: "2.3.2"
     package: "@opencode/cli"
+    allowScripts: true
     replaces: opencode-ai
   - name: grok
     kind: npm
-    version: "1.0.70"
+    version: "1.0.89"
     package: "@xai-official/grok"
+    allowScripts: true
   # Cursor's installer declares `#!/usr/bin/env bash` and uses a `[[ ]]`
   # conditional, which the dash that `sh` resolves to on Debian parses but
   # cannot run — so this row asks to be piped to bash rather than sh.

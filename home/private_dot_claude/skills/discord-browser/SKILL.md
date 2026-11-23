@@ -37,9 +37,12 @@ Drive it with `uv run -q --with playwright python script.py` using
    (`li[id^="chat-messages-"]`) and note the `/channels/@me/<id>` URL.
 2. **Read channels directly.** Open the channel and read the messages; Discord search misses
    things.
-3. **Stage the text.** Click `div[role="textbox"][data-slate-editor="true"]` (last match), then
-   `page.keyboard.insert_text(line)` per line with `Shift+Enter` between lines. Plain Enter
-   sends. Messages cap at 2000 characters. Markdown works (`**bold**`).
+3. **Stage the text.** Click `div[role="textbox"][data-slate-editor="true"]` (last match). For
+   a single line, `page.keyboard.insert_text`. For anything with markdown blocks (`>` quotes,
+   code fences, headings), dispatch a `paste` ClipboardEvent carrying the whole text via
+   `page.evaluate`: typing line by line with `Shift+Enter` makes the editor auto-continue quote
+   and code-fence blocks, which doubles the `>` markers and swallows lines. Check the composer
+   text before sending. Plain Enter sends. Messages cap at 2000 characters.
 4. **Show it.** Take a screenshot and show the user the text.
 5. **Send** with Enter only after approval, then reload and re-read to verify.
 6. `agent-browser stop` when done; the login persists.
@@ -56,4 +59,8 @@ Drive it with `uv run -q --with playwright python script.py` using
   check the "Replying to" bar before sending.
 - Remove one attachment from a posted message: edit it, call `.click()` through JS on the
   "Remove Message Attachment" button, confirm the dialog.
+- Delete your own message: hover it, click `div[role="button"][aria-label="More"]`, choose the
+  "Delete Message" menu item, then confirm. Do this at once if a send renders wrong.
+- Screenshot the sent message after a reload to confirm markdown rendered (headings, quotes,
+  code blocks), not only that the text arrived.
 - DM list rows include Friends, Nitro, Shop and Quests before the first person.

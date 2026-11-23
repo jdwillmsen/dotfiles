@@ -14,9 +14,10 @@ credential-free API for a person's own account, so send and read through the web
 
 ## Rules
 
-- **Stage, show, then send.** Type the exact text into the composer, screenshot it, and wait for
-  the user's approval of that specific message. Send only after approval, or when the user said
-  "just send" for that message. Never send on a general "message X" alone.
+- **Stage, show, then send.** Type the exact text into the composer, show the user that full
+  text, and wait for their approval of those exact words. "Just send" authorizes sending only
+  text the user already supplied or has already approved; if you drafted the wording, still wait
+  for approval of it. Never send on a general "message X" alone.
 - **Verify every send** by reloading the channel and confirming the message is still there; a
   post can be accepted and then removed by the server's automod.
 - Never handle credentials, tokens or cookies. If Discord shows a login, hand the user the
@@ -25,16 +26,27 @@ credential-free API for a person's own account, so send and read through the web
 ## Workflow
 
 ```bash
-agent-browser start https://discord.com/channels/@me
+agent-browser start https://discord.com/channels/@me   # prints the cdp endpoint
 agent-browser check https://discord.com/channels/@me   # logged_in: yes|no
 ```
 
-Drive it with `uv run -q --with playwright python script.py` using
-`connect_over_cdp("http://127.0.0.1:9222").contexts[0].pages[-1]`; keep scripts in the scratchpad.
+Drive it with `uv run -q --with playwright python script.py`; keep scripts in the scratchpad.
+Connect to the `cdp:` endpoint that `agent-browser start` printed (9222 only by default), and do
+not trust `pages[-1]`: Chrome may already be open on another site, since the start URL applies
+only when Chrome launches. Pick the page whose URL contains `discord.com`, or open a new page and
+`goto` Discord:
 
-1. **Find the DM.** `ul[aria-label="Direct Messages"] li` filtered by `has_text=<name>`, then
-   click. Confirm the right person by reading the last messages
-   (`li[id^="chat-messages-"]`) and note the `/channels/@me/<id>` URL.
+```python
+b = p.chromium.connect_over_cdp(CDP)
+ctx = b.contexts[0]
+page = next((pg for pg in ctx.pages if "discord.com" in pg.url), None) or ctx.new_page()
+page.goto("https://discord.com/channels/@me")
+```
+
+1. **Find the DM.** List the rows of `ul[aria-label="Direct Messages"] li` and match the name
+   exactly (a `has_text` filter on "Ann" also matches "Anna"). If more than one row matches,
+   stop and ask the user which one. Click it, confirm the person by reading the last messages
+   (`li[id^="chat-messages-"]`), and note the `/channels/@me/<id>` URL.
 2. **Read channels directly.** Open the channel and read the messages; Discord search misses
    things.
 3. **Stage the text.** Click `div[role="textbox"][data-slate-editor="true"]` (last match). For
@@ -43,14 +55,17 @@ Drive it with `uv run -q --with playwright python script.py` using
    `page.evaluate`: typing line by line with `Shift+Enter` makes the editor auto-continue quote
    and code-fence blocks, which doubles the `>` markers and swallows lines. Check the composer
    text before sending. Plain Enter sends. Messages cap at 2000 characters.
-4. **Show it.** Take a screenshot and show the user the text.
+4. **Show it.** Paste the full staged text into your reply for the user to read, and add the
+   composer screenshot only as a check that it staged correctly; a screenshot alone can crop or
+   hide text.
 5. **Send** with Enter only after approval, then reload and re-read to verify.
 6. `agent-browser stop` when done; the login persists.
 
 ## Quirks
 
 - Photos must be full quality; iCloud album zips give 360x480 thumbnails. Get originals through
-  Taildrop (`sudo tailscale file get --wait=false <dir>`).
+  Taildrop (`sudo tailscale file get --wait=false <dir>`; sudo is needed only because the
+  Taildrop inbox is root-owned, and the command just moves received files into `<dir>`).
 - Upload input may be single-file; set `multiple = true` on it before `set_input_files`.
   Videos over 10 MB are rejected; compress with ffmpeg to about 9 MB.
 - Some servers remove multi-photo messages; messages of 3 or fewer photos with no caption

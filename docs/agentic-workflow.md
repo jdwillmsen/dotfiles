@@ -70,9 +70,9 @@ Usage figures are from a 30-day transcript review.
 skills under any key spelling (`tdd`, `mattpocock-skills:tdd`, …). The
 **skill-trim** mod (`~/.claude/mods/skill-trim`, loaded in every session by
 `CLAUDE_CODE_PLUGIN_DIRS` in the settings template) does it instead: a
-`prompt.attachment` hook drops 27 skills from the skill listing: unused
-atlassian, mattpocock-skills and superpowers skills, the anthropic-skills that
-need the desktop app or were never invoked, and `find-skills`. They still run
+`prompt.attachment` hook drops 26 skills from the skill listing: unused
+atlassian, mattpocock-skills and superpowers skills, and the anthropic-skills
+that need the desktop app or were never invoked. They still run
 when invoked by name. A `classic.SessionStart` hook swaps superpowers' 3.4 KB
 `<EXTREMELY_IMPORTANT>` bootstrap for a 551 B version with the same routing
 (check for a matching skill first, process skills before implementation ones,
@@ -179,3 +179,6 @@ A skill must appear in exactly one of these. `run_onchange_33-install-agent-skil
 reports anything installed but undeclared rather than deleting it, so drift is
 visible without being destructive; it does delete dangling symlinks, which are
 always a bug (a skill Claude Code lists but cannot read).
+To drop an `agentSkills` entry, move its name to `retiredAgentSkills`: the
+script then removes it with `skills remove --global`, which also clears its
+lock entry and agent links. Only skills this file installed belong there.

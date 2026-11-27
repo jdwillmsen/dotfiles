@@ -29,8 +29,6 @@ export const HIDDEN_SKILLS = [
   'anthropic-skills:pptx',
   'anthropic-skills:skill-creator',
   'anthropic-skills:xlsx',
-  // Pushes installing skills, which the global rules restrict.
-  'find-skills',
 ]
 
 import { sha256 } from './sha256.js'

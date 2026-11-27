@@ -36,13 +36,13 @@ test('keeps visible skills and their continuation lines', () => {
   expect(out).toContain('The following skills are available')
 })
 
-test('hides exactly the twenty-seven agreed skills', () => {
-  expect(HIDDEN_SKILLS.length).toBe(27)
+test('hides exactly the twenty-six agreed skills', () => {
+  expect(HIDDEN_SKILLS.length).toBe(26)
 })
 
 test('hides un-namespaced skills too', () => {
-  const out = trimListing('- find-skills: Helps users install skills.\n- axi: Agent eXperience Interface.')
-  expect(out).not.toContain('find-skills')
+  const out = trimListing('- plain-skill: An un-namespaced skill.\n- axi: Agent eXperience Interface.', ['plain-skill'])
+  expect(out).not.toContain('plain-skill')
   expect(out).toContain('- axi:')
 })
 

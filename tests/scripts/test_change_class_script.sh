@@ -1096,7 +1096,23 @@ grep -q 'fwb-reference,R3,charts/crew-lab/values.yaml' "$out" || fail "the FWB l
 lab_diff R3 "      name: fwb_afk_bot_2"
 lab_diff R2 "      server: crew-lab"
 lab_diff R2 "  # An idle unit holds what an FWB AFK bot holds."
-lab_diff R2 "      name: crew-fwbx-unit"
+lab_diff R3 "      chest: *fwbSeedDeliveryChest"
+lab_diff R3 "        port: 31301"
+grep -q 'fwb-reference,R3,charts/crew-lab/values.yaml' "$out" || fail "an fwb-seed port gave no fwb-reference reason" "$(cat "$out")"
+lab_diff R3 "        nodePort: 31315"
+lab_diff R2 "        port: 31302"
+lab_diff R2 "  # fwb-seed listens on 31301."
+
+# A plain crew-lab template change stays R2; values.yaml is never lowered.
+git -C "$lab_repo" reset -q --hard origin/main
+mkdir -p "$lab_repo/charts/crew-lab/templates"
+printf 'kind: Deployment\n' >"$lab_repo/charts/crew-lab/templates/crew-deployment.yaml"
+commit_all "$lab_repo" template
+( cd "$lab_repo" && "$cc" --rules "$rules" --repo jdwillmsen/jdw-deployments ) >"$out" 2>"$err"
+grep -qx 'tier: R2' "$out" || fail "a plain crew-lab template change was not R2" "$(cat "$out")"
+exc_paths jdwillmsen/jdw-deployments R2 charts/crew-lab/templates/crew-control-db-externalsecret.yaml
+exc_paths jdwillmsen/jdw-deployments R2 charts/crew-lab/values.yaml
+grep -q 'lab-pg-crew' "$out" && fail "the exception reached charts/crew-lab/values.yaml" "$(cat "$out")"
 
 # The policy file guards its own exceptions.
 exc_rules() {

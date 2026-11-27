@@ -18,7 +18,7 @@ import time
 import tomllib
 from pathlib import Path
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 EXIT_FAIL, EXIT_USAGE, EXIT_DENIED = 1, 2, 3
 TIERS = ("R0", "R1", "R2", "R3")
 TIER_INDEX = {t: i for i, t in enumerate(TIERS)}
@@ -310,8 +310,45 @@ def load_policy(path):
             "paths": paths, "exclude": exclude, "content": content, "plan": plan, "repos": repos,
         })
 
+    by_id = {r["id"]: r for r in rules}
+    exceptions = []
+    raw_exceptions = data.get("exception", [])
+    if not isinstance(raw_exceptions, list):
+        fail(f"rules {path}: [[exception]] must be a list of tables")
+    for i, exc in enumerate(raw_exceptions):
+        where = f"{path}: exception {i + 1}"
+        if not isinstance(exc, dict):
+            fail(f"rules {where}: must be a table")
+        eid = exc.get("id")
+        if not isinstance(eid, str) or not eid:
+            fail(f"rules {where}: id must be a non-empty string")
+        where = f"{path}: exception {eid}"
+        tier = _tier(exc.get("tier"), where)
+        lowers = exc.get("rules")
+        if not isinstance(lowers, list) or not lowers or not all(isinstance(r, str) for r in lowers):
+            fail(f"rules {where}: rules must be a non-empty list of rule ids")
+        for rid in lowers:
+            if rid not in by_id:
+                fail(f"rules {where}: unknown rule {rid}")
+            # Changed lines carry secrets and destructive commands wherever
+            # they sit, so no scope may soften a content rule.
+            if by_id[rid]["content"]:
+                fail(f"rules {where}: rule {rid} scans content and cannot be lowered")
+        repos = repo_list(exc.get("repos"), where)
+        if not repos:
+            fail(f"rules {where}: repos must name the repositories it covers")
+        paths = glob_list(exc.get("paths"), where)
+        plan = regex_list(exc.get("plan"), where)
+        if not paths and not plan:
+            fail(f"rules {where}: needs paths or plan")
+        exceptions.append({
+            "id": eid, "tier": tier, "rules": set(lowers), "repos": repos, "paths": paths,
+            "exclude": glob_list(exc.get("exclude"), where), "plan": plan,
+            "plan_exclude": regex_list(exc.get("plan_exclude"), where),
+        })
+
     return {"tiers": clean_tiers, "size": clean_size, "default": clean_default,
-            "floors": floors, "rules": rules}
+            "floors": floors, "rules": rules, "exceptions": exceptions}
 
 
 # ── Repository and diff inputs ───────────────────────────────────────────────
@@ -748,6 +785,36 @@ def _rule_applies(rule, full, bare, repo_known):
     return any(_repo_matches(r, full, bare) for r in rule["repos"])
 
 
+def _plan_sentences(text):
+    return [s for s in re.split(r"(?<=[.!?;])\s+|\n", text) if s.strip()]
+
+
+def _exception_for(policy, rule, full, bare, repo_known, in_scope):
+    """The first owner-approved exception that lowers this rule for this hit, if any."""
+    if not repo_known:
+        return None
+    for exc in policy.get("exceptions", []):
+        if rule["id"] in exc["rules"] and TIER_INDEX[rule["tier"]] > TIER_INDEX[exc["tier"]] \
+                and any(_repo_matches(r, full, bare) for r in exc["repos"]) and in_scope(exc):
+            return exc
+    return None
+
+
+def _path_in_scope(exc, path):
+    return bool(exc["paths"]) and matches(exc["paths"], path) and not matches(exc["exclude"], path)
+
+
+def _plan_in_scope(exc, rule, sentences):
+    # Every sentence that trips the rule must name the scope and nothing that
+    # widens it; a match only the whole text makes is never lowered.
+    if not exc["plan"]:
+        return False
+    hits = [s for s in sentences if any(rx.search(s) for rx in rule["plan"])]
+    return bool(hits) and all(
+        any(rx.search(s) for rx in exc["plan"]) and not any(rx.search(s) for rx in exc["plan_exclude"])
+        for s in hits)
+
+
 def classify(paths, bad, lines, changed, plan_text, policy, repo, repo_known, content_scanned, explain,
              scan_skipped=False):
     reasons = []
@@ -792,10 +859,14 @@ def classify(paths, bad, lines, changed, plan_text, policy, repo, repo_known, co
             best = max(best, TIER_INDEX[default["tier"]])
             continue
         for rule in matched:
-            reasons.append({"rule": rule["id"], "tier": rule["tier"], "where": path,
-                            "tag": rule["tag"]})
+            tier, name = rule["tier"], rule["id"]
+            exc = _exception_for(policy, rule, repo, bare, repo_known,
+                                 lambda e: _path_in_scope(e, path))
+            if exc:
+                tier, name = exc["tier"], f"{rule['id']} ({exc['id']})"
+            reasons.append({"rule": name, "tier": tier, "where": path, "tag": rule["tag"]})
             tags.add(rule["tag"])
-            best = max(best, TIER_INDEX[rule["tier"]])
+            best = max(best, TIER_INDEX[tier])
 
     deadline = time.monotonic() + SCAN_BUDGET_SECONDS
     out_of_time = False
@@ -833,16 +904,21 @@ def classify(paths, bad, lines, changed, plan_text, policy, repo, repo_known, co
             plan_text = plan_text[:PLAN_SCAN_CAP]
             clip_reason("plan")
         plan_hit = False
+        sentences = _plan_sentences(plan_text)
         for rule in plan_rules:
             if time.monotonic() > deadline:
                 clip_reason("plan")
                 break
             if any(rx.search(plan_text) for rx in rule["plan"]):
                 plan_hit = True
-                reasons.append({"rule": rule["id"], "tier": rule["tier"], "where": "plan",
-                                "tag": rule["tag"]})
+                tier, name = rule["tier"], rule["id"]
+                exc = _exception_for(policy, rule, repo, bare, repo_known,
+                                     lambda e: _plan_in_scope(e, rule, sentences))
+                if exc:
+                    tier, name = exc["tier"], f"{rule['id']} ({exc['id']})"
+                reasons.append({"rule": name, "tier": tier, "where": "plan", "tag": rule["tag"]})
                 tags.add(rule["tag"])
-                best = max(best, TIER_INDEX[rule["tier"]])
+                best = max(best, TIER_INDEX[tier])
         # With no paths to judge, a plan nothing recognised is ordinary code.
         if not plan_hit and not paths:
             default = policy["default"]

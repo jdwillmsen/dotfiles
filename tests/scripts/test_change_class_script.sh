@@ -764,7 +764,7 @@ run 2 --fail-at R9
 run 2 --bogus
 
 run 0 --version
-grep -qx '1.0.0' "$out" || fail "--version did not print the version" "$(cat "$out")"
+grep -qx '1.1.0' "$out" || fail "--version did not print the version" "$(cat "$out")"
 
 
 # --plan alone must ignore the working diff (the repo above has an R1 diff).
@@ -1017,5 +1017,50 @@ real_case jdwlabs/apps apps/auth/package.json R2
 real_case jdwlabs/deployments tools/check-prd-drift.py R3
 real_case dotablaze-tech/deployments charts/meowbot/templates/deployment.yaml R3
 real_case jdwillmsen/jdw-deployments charts/crew-lab/templates/crew-deployment.yaml R2
+
+# ── Exceptions: the policy file guards its own ──
+exc_rules() {
+    sed -n '1,/^# --- path rules/p' "$rules" >"$tmp/exc.toml"
+    cat >>"$tmp/exc.toml"
+    run 1 --rules "$tmp/exc.toml" --plan /dev/null
+}
+exc_rules <<'TOML'
+[[rule]]
+id = "k"
+tag = "secrets"
+tier = "R3"
+content = ['key']
+
+[[exception]]
+id = "x"
+tier = "R2"
+rules = ["k"]
+repos = ["a/b"]
+paths = ["x/**"]
+TOML
+grep -q 'cannot be lowered' "$out" || fail "an exception lowered a content rule" "$(cat "$out")"
+exc_rules <<'TOML'
+[[exception]]
+id = "x"
+tier = "R2"
+rules = ["nope"]
+repos = ["a/b"]
+paths = ["x/**"]
+TOML
+grep -q 'unknown rule nope' "$out" || fail "an exception named an unknown rule" "$(cat "$out")"
+exc_rules <<'TOML'
+[[rule]]
+id = "p"
+tag = "prd"
+tier = "R3"
+paths = ["**/prd/**"]
+
+[[exception]]
+id = "x"
+tier = "R2"
+rules = ["p"]
+paths = ["x/**"]
+TOML
+grep -q 'repos must name' "$out" || fail "an exception without repos was accepted" "$(cat "$out")"
 
 echo "test_change_class_script: OK"

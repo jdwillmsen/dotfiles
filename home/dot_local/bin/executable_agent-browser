@@ -1,26 +1,30 @@
 #!/usr/bin/env bash
-set -uo pipefail
-# A logged-in browser an agent can drive while the human handles every login.
+# agent-browser: a persistent, logged-in Chrome that agents drive over CDP
+# while the human does every login through a noVNC viewer.
 #
-# The human signs in once per site through a noVNC viewer; the session lives
-# in one persistent Chrome profile, so later tasks reuse it instead of asking
-# again. The agent drives the page over the Chrome DevTools Protocol and never
-# types, reads or stores a credential: the check subcommand only looks at what
-# a logged-in page shows, never at cookies or password fields.
+# Security model:
+# - Agents never handle credentials or cookies; the human signs in through
+#   the viewer and the session persists in the profile.
+# - CDP grants full control of every logged-in session, so it binds to
+#   127.0.0.1 only. Anyone with a shell as this user can still use it.
+# - VNC binds to localhost; only websockify is reachable, on the tailnet
+#   address only, never 0.0.0.0, and the last lease's stop closes it.
 #
-# Two ports carry the trust boundary. CDP grants full control of every
-# logged-in session, so it binds to loopback only. The viewer binds to the
-# tailnet address only, never 0.0.0.0, and stop closes it after each task.
+# Concurrency: several agents share the browser through leases. Each lease
+# owns one tab; the browser stays up until the last live lease is released.
+# A slot is an isolated browser (own display, ports, viewer and profile) for
+# agents that must not share cookies or a site with another agent.
 #
 # See docs/agent-browser.md.
+set -uo pipefail
 
-PROFILE="${AGENT_BROWSER_PROFILE:-$HOME/.cache/agent-browser}"
-RUN="${AGENT_BROWSER_RUN:-${XDG_RUNTIME_DIR:-/tmp/agent-browser-$UID}/agent-browser}"
-DISPLAY_NUM="${AGENT_BROWSER_DISPLAY:-99}"
-CDP_PORT="${AGENT_BROWSER_CDP_PORT:-9222}"
-VNC_PORT="${AGENT_BROWSER_VNC_PORT:-5900}"
-WEB_PORT="${AGENT_BROWSER_WEB_PORT:-6080}"
+PROFILE_BASE="${AGENT_BROWSER_PROFILE:-$HOME/.cache/agent-browser}"
+RUN_BASE="${AGENT_BROWSER_RUN:-${XDG_RUNTIME_DIR:-/tmp/agent-browser-$UID}/agent-browser}"
+LIB_DIR="${AGENT_BROWSER_LIB:-$HOME/.local/share/agent-browser}"
 NOVNC_DIR="${AGENT_BROWSER_NOVNC_DIR:-/usr/share/novnc}"
+MAX_SLOTS="${AGENT_BROWSER_MAX_SLOTS:-4}"
+LEASE_TTL="${AGENT_BROWSER_LEASE_TTL:-7200}"  # seconds without use before a lease is stale
+LEASES="$RUN_BASE/leases"
 COMPONENTS="xvfb chrome vnc web"
 
 err() {  # err CODE MESSAGE [HINT]
@@ -29,7 +33,79 @@ err() {  # err CODE MESSAGE [HINT]
     exit 1
 }
 
+# Slot 0 keeps the original paths and ports, so existing logins and tools
+# that hardcode 9222 keep working; slot N shifts every port by N.
+use_slot() {
+    SLOT="$1"
+    case "$SLOT" in ''|*[!0-9]*) err usage "slot must be a number or auto" "agent-browser start --slot auto" ;; esac
+    [ "$SLOT" -lt "$MAX_SLOTS" ] || err usage "slot $SLOT is beyond AGENT_BROWSER_MAX_SLOTS=$MAX_SLOTS"
+    DISPLAY_NUM=$(( ${AGENT_BROWSER_DISPLAY:-99} + SLOT ))
+    CDP_PORT=$(( ${AGENT_BROWSER_CDP_PORT:-9222} + SLOT ))
+    VNC_PORT=$(( ${AGENT_BROWSER_VNC_PORT:-5900} + SLOT ))
+    WEB_PORT=$(( ${AGENT_BROWSER_WEB_PORT:-6080} + SLOT ))
+    if [ "$SLOT" -eq 0 ]; then
+        PROFILE="$PROFILE_BASE"; RUN="$RUN_BASE"
+    else
+        PROFILE="$PROFILE_BASE-slot$SLOT"; RUN="$RUN_BASE/slot$SLOT"
+    fi
+}
+
 alive() { [ -f "$RUN/$1.pid" ] && kill -0 "$(cat "$RUN/$1.pid")" 2>/dev/null; }
+
+up_count() {
+    local c n=0
+    for c in $COMPONENTS; do alive "$c" && n=$((n + 1)); done
+    echo "$n"
+}
+
+lock() {  # serialise start/stop so two agents never launch or kill a slot at once
+    mkdir -p "$RUN_BASE"; chmod 700 "$RUN_BASE"
+    exec 9>"$RUN_BASE/.lock"
+    flock -w 120 9 || err busy "another agent-browser start/stop held the lock for 2 minutes" "agent-browser"
+}
+
+lease_get() { sed -n "s/^$2=//p" "$LEASES/$1" 2>/dev/null | tail -n1; }
+
+lease_live() {  # a lease is live while it exists and was used within LEASE_TTL
+    local f="$LEASES/$1" age
+    [ -f "$f" ] || return 1
+    age=$(( $(date +%s) - $(stat -c %Y "$f") ))
+    [ "$age" -le "$LEASE_TTL" ]
+}
+
+live_leases() {  # live_leases SLOT -> lease ids, one per line
+    local f id
+    for f in "$LEASES"/*; do
+        [ -f "$f" ] || continue
+        id="${f##*/}"
+        lease_live "$id" && [ "$(lease_get "$id" slot)" = "$1" ] && echo "$id"
+    done
+    return 0
+}
+
+prune_leases() {  # drop stale leases; their tabs go with the browser or the next owner
+    local f
+    for f in "$LEASES"/*; do
+        [ -f "$f" ] || continue
+        lease_live "${f##*/}" || rm -f "$f"
+    done
+}
+
+need_lease() {  # need_lease ID -> selects its slot, refreshes it
+    local id="${1:-}"
+    [ -n "$id" ] || err usage "a lease id is required" "agent-browser start   # prints lease:"
+    lease_live "$id" || err unknown_lease "lease $id does not exist or expired" "agent-browser start [URL]   # take a new lease"
+    use_slot "$(lease_get "$id" slot)"
+    touch "$LEASES/$id"
+}
+
+cdp() {  # cdp METHOD PATH [curl args...]
+    curl -fsS --max-time 10 -X "$1" "http://127.0.0.1:$CDP_PORT$2" "${@:3}"
+}
+
+new_tab() {  # new_tab URL -> target id
+    cdp PUT /json/new -G --data-urlencode "=$1" | sed -n 's/.*"id": *"\([^"]*\)".*/\1/p' | head -n1
+}
 
 tailnet_ip() {
     [ -n "${AGENT_BROWSER_BIND:-}" ] && { echo "$AGENT_BROWSER_BIND"; return; }
@@ -38,13 +114,27 @@ tailnet_ip() {
 }
 
 launch() {  # launch NAME CMD... ; detached, pid recorded
-    "${@:2}" >"$RUN/$1.log" 2>&1 &
+    # 9>&-: a daemon that inherits the lock fd would hold the lock forever.
+    "${@:2}" >"$RUN/$1.log" 2>&1 9>&- &
     echo $! >"$RUN/$1.pid"
 }
 
-cmd_start() {
-    local url="${1:-about:blank}" ip
-    for bin in Xvfb google-chrome x11vnc websockify; do
+auto_slot() {  # first isolated slot no live lease holds, preferring one whose profile has logins
+    local s free=""
+    # Slot 0 is the shared slot every plain start joins, so it never isolates.
+    for ((s = 1; s < MAX_SLOTS; s++)); do
+        [ -z "$(live_leases "$s")" ] || continue
+        use_slot "$s"
+        [ -d "$PROFILE" ] && { echo "$s"; return; }
+        [ -n "$free" ] || free="$s"
+    done
+    [ -n "$free" ] || err no_free_slot "all $((MAX_SLOTS - 1)) isolated slots hold live leases" "agent-browser start [URL]   # share slot 0 in its own tab instead"
+    echo "$free"
+}
+
+bring_up() {
+    local ip
+    for bin in Xvfb google-chrome x11vnc websockify curl flock; do
         command -v "$bin" >/dev/null 2>&1 || err missing_dependency "$bin not found" "see docs/agent-browser.md for the packages"
     done
     ip="$(tailnet_ip)" || true
@@ -53,49 +143,174 @@ cmd_start() {
 
     alive xvfb || { launch xvfb Xvfb ":$DISPLAY_NUM" -screen 0 1440x900x24 -nolisten tcp; sleep 1; }
     alive chrome || {
+        # Background tabs must keep running at full speed: every lease but the
+        # one in front is a background tab.
         DISPLAY=":$DISPLAY_NUM" launch chrome google-chrome --user-data-dir="$PROFILE" \
             --remote-debugging-address=127.0.0.1 --remote-debugging-port="$CDP_PORT" \
-            --no-first-run --no-default-browser-check --window-size=1440,900 --start-maximized "$url"
-        sleep 2
+            --no-first-run --no-default-browser-check --window-size=1440,900 --start-maximized \
+            --disable-background-timer-throttling --disable-renderer-backgrounding \
+            --disable-backgrounding-occluded-windows about:blank
     }
     alive vnc || { launch vnc x11vnc -display ":$DISPLAY_NUM" -localhost -rfbport "$VNC_PORT" -forever -shared -nopw -quiet; sleep 1; }
     alive web || launch web websockify --web "$NOVNC_DIR" "$ip:$WEB_PORT" "localhost:$VNC_PORT"
     echo "$ip" >"$RUN/bind"
-    cmd_status
+    local i
+    for ((i = 0; i < 30; i++)); do cdp GET /json/version >/dev/null 2>&1 && return; sleep 1; done
+    err cdp_unreachable "chrome did not open CDP on 127.0.0.1:$CDP_PORT" "agent-browser stop --force --slot $SLOT && agent-browser start --slot $SLOT"
 }
 
-cmd_stop() {
-    local stopped=0
+shut_down() {
+    local c n=0
     for c in web vnc chrome xvfb; do
-        if alive "$c"; then kill "$(cat "$RUN/$c.pid")" 2>/dev/null && stopped=$((stopped + 1)); fi
+        if alive "$c"; then kill "$(cat "$RUN/$c.pid")" 2>/dev/null && n=$((n + 1)); fi
         rm -f "$RUN/$c.pid"
     done
     rm -f "$RUN/bind"
-    printf 'stopped: %d\nprofile: %s (kept; sessions persist)\n' "$stopped" "$PROFILE"
+    local id
+    for id in $(live_leases "$SLOT"); do rm -f "$LEASES/$id"; done
+    echo "$n"
+}
+
+print_lease() {  # print_lease ID
+    local ip
+    ip="$(cat "$RUN/bind" 2>/dev/null)"
+    printf 'lease: %s\nslot: %s\ntarget: %s\ncdp: http://127.0.0.1:%s\nviewer: http://%s:%s/vnc.html\nprofile: %s\n' \
+        "$1" "$SLOT" "$(lease_get "$1" target)" "$CDP_PORT" "$ip" "$WEB_PORT" "$PROFILE"
+    printf 'help[4]:\n  agent-browser py %s script.py   # script: from agent_browser import page\n' "$1"
+    printf '  agent-browser check <github|linkedin|URL> --lease %s\n' "$1"
+    printf '  agent-browser show %s   # bring this tab to the front of the viewer\n' "$1"
+    printf '  agent-browser stop %s   # at task end; closes only this tab\n' "$1"
+}
+
+cmd_start() {
+    local url="about:blank" slot="0" id target
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --slot) slot="${2:-}"; shift 2 ;;
+            --slot=*) slot="${1#*=}"; shift ;;
+            -*) err usage "unknown option $1" "agent-browser start [--slot N|auto] [URL]" ;;
+            *) url="$1"; shift ;;
+        esac
+    done
+    lock
+    mkdir -p "$LEASES"; chmod 700 "$LEASES"
+    prune_leases
+    if [ "$slot" = auto ]; then
+        slot="$(auto_slot)" || { printf '%s\n' "$slot"; exit 1; }
+    fi
+    use_slot "$slot"
+    bring_up
+    target="$(new_tab "$url")"
+    [ -n "$target" ] || err cdp_failed "could not open a tab over CDP on port $CDP_PORT" "agent-browser status --slot $SLOT"
+    id="s$SLOT-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
+    printf 'slot=%s\ntarget=%s\ncreated=%s\n' "$SLOT" "$target" "$(date +%s)" >"$LEASES/$id"
+    print_lease "$id"
+}
+
+cmd_stop() {
+    local id="" force=0 slot="0" others n
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --force) force=1; shift ;;
+            --slot) slot="${2:-}"; shift 2 ;;
+            --slot=*) slot="${1#*=}"; shift ;;
+            -*) err usage "unknown option $1" "agent-browser stop <lease> | stop --force [--slot N]" ;;
+            *) id="$1"; shift ;;
+        esac
+    done
+    lock
+    prune_leases
+    if [ -n "$id" ]; then
+        if lease_live "$id"; then
+            use_slot "$(lease_get "$id" slot)"
+            cdp GET "/json/close/$(lease_get "$id" target)" >/dev/null 2>&1 || true
+            rm -f "$LEASES/$id"
+            printf 'released: %s\n' "$id"
+        else
+            slot="${id#s}"; slot="${slot%%-*}"
+            case "$slot" in ''|*[!0-9]*) slot=0 ;; esac
+            use_slot "$slot"
+            printf 'released: none (lease %s already gone)\n' "$id"
+        fi
+    else
+        use_slot "$slot"
+    fi
+    others="$(live_leases "$SLOT" | wc -l)"
+    if [ "$force" -eq 0 ] && [ "$others" -gt 0 ]; then
+        printf 'slot: %s\nstate: kept (in use by %d other lease(s))\nprofile: %s\n' "$SLOT" "$others" "$PROFILE"
+        printf 'help[1]:\n  agent-browser stop <lease>   # release only your own lease\n'
+        return
+    fi
+    n="$(shut_down)"
+    printf 'slot: %s\nstopped: %d\nprofile: %s (kept; sessions persist)\n' "$SLOT" "$n" "$PROFILE"
+}
+
+slot_line() {  # slot_line N -> "N,state,leases,viewer"
+    local up ip state viewer=-
+    use_slot "$1"
+    up="$(up_count)"
+    case "$up" in 4) state=running ;; 0) state=stopped ;; *) state="partial($up/4)" ;; esac
+    if [ "$up" -eq 4 ]; then ip="$(cat "$RUN/bind" 2>/dev/null)"; viewer="http://$ip:$WEB_PORT/vnc.html"; fi
+    printf '  %s,%s,%s,%s\n' "$1" "$state" "$(live_leases "$1" | wc -l)" "$viewer"
 }
 
 cmd_status() {
-    local up=0 c ip
-    printf 'components[4]{name,state}:\n'
+    local slot="0" c up ip s
+    case "${1:-}" in --slot) slot="${2:-}" ;; --slot=*) slot="${1#*=}" ;; esac
+    [ -d "$LEASES" ] && prune_leases
+    use_slot "$slot"
+    printf 'slot: %s\ncomponents[4]{name,state}:\n' "$SLOT"
+    up=0
     for c in $COMPONENTS; do
         if alive "$c"; then printf '  %s,up\n' "$c"; up=$((up + 1)); else printf '  %s,down\n' "$c"; fi
     done
     printf 'profile: %s\n' "$PROFILE"
     if [ "$up" -eq 4 ]; then
         ip="$(cat "$RUN/bind" 2>/dev/null)"
-        printf 'state: running\nviewer: http://%s:%s/vnc.html\ncdp: http://127.0.0.1:%s\n' "$ip" "$WEB_PORT" "$CDP_PORT"
-        printf 'help[2]:\n  agent-browser check <github|linkedin|URL>\n  agent-browser stop\n'
+        printf 'state: running\nviewer: http://%s:%s/vnc.html\ncdp: http://127.0.0.1:%s\nleases: %s\n' \
+            "$ip" "$WEB_PORT" "$CDP_PORT" "$(live_leases "$SLOT" | wc -l)"
+        printf 'help[2]:\n  agent-browser start [URL]   # take your own lease and tab\n  agent-browser stop <lease>\n'
     elif [ "$up" -eq 0 ]; then
         printf 'state: stopped\nhelp[1]:\n  agent-browser start [URL]\n'
     else
-        printf 'state: partial (%d/4 up)\nhelp[1]:\n  agent-browser stop && agent-browser start\n' "$up"
+        printf 'state: partial (%d/4 up)\nhelp[1]:\n  agent-browser stop --force --slot %s && agent-browser start --slot %s\n' "$up" "$SLOT" "$SLOT"
     fi
+    printf 'slots[%d]{slot,state,leases,viewer}:\n' "$MAX_SLOTS"
+    for ((s = 0; s < MAX_SLOTS; s++)); do slot_line "$s"; done
+}
+
+cmd_show() {
+    need_lease "${1:-}"
+    cdp GET "/json/activate/$(lease_get "$1" target)" >/dev/null 2>&1 \
+        || err tab_gone "this lease's tab is closed" "agent-browser py $1 script.py   # reopens it"
+    printf 'shown: %s\nviewer: http://%s:%s/vnc.html\n' "$1" "$(cat "$RUN/bind" 2>/dev/null)" "$WEB_PORT"
+}
+
+cmd_py() {
+    local id="${1:-}"
+    [ $# -ge 2 ] || err usage "py needs a lease and a script" "agent-browser py <lease> script.py [args...]"
+    need_lease "$id"
+    command -v uv >/dev/null 2>&1 || err missing_dependency "uv not found" "install uv"
+    alive chrome || err not_running "slot $SLOT browser is not running" "agent-browser start --slot $SLOT"
+    shift
+    AGENT_BROWSER_LEASE="$id" AGENT_BROWSER_LEASE_FILE="$LEASES/$id" \
+        AGENT_BROWSER_CDP="http://127.0.0.1:$CDP_PORT" AGENT_BROWSER_TARGET="$(lease_get "$id" target)" \
+        PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" \
+        exec uv run -q --with playwright python "$@"
 }
 
 cmd_check() {
-    local site="${1:-}"
-    [ -n "$site" ] || err usage "check needs a site" "agent-browser check <github|linkedin|URL>"
-    alive chrome || err not_running "browser is not running" "agent-browser start"
+    local site="" slot="0"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --lease) need_lease "${2:-}"; slot="$SLOT"; shift 2 ;;
+            --slot) slot="${2:-}"; shift 2 ;;
+            *) site="$1"; shift ;;
+        esac
+    done
+    [ -n "$site" ] || err usage "check needs a site" "agent-browser check <github|linkedin|URL> [--lease ID]"
+    use_slot "$slot"
+    alive chrome || err not_running "slot $SLOT browser is not running" "agent-browser start --slot $SLOT"
     command -v uv >/dev/null 2>&1 || err missing_dependency "uv not found" "install uv"
     # Decides from what the page renders, never from cookies or field values.
     uv run -q --with playwright python - "$site" "$CDP_PORT" <<'PY'
@@ -139,15 +354,24 @@ with sync_playwright() as p:
         if user:
             print(f"user: {user}")
         if not ok:
-            print("help[1]:\n  open the viewer from `agent-browser status`, sign in, then re-run this check")
+            print("help[1]:\n  agent-browser show <lease>, have the human sign in through the viewer, then re-run this check")
     finally:
         page.close()
 PY
 }
 
 cmd_wipe() {
-    [ "${1:-}" = "--yes" ] || err confirmation_required "wipe deletes every saved login in $PROFILE" "agent-browser wipe --yes"
-    alive chrome && err running "stop the browser first" "agent-browser stop"
+    local yes=0 slot="0"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --yes) yes=1; shift ;;
+            --slot) slot="${2:-}"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    use_slot "$slot"
+    [ "$yes" -eq 1 ] || err confirmation_required "wipe deletes every saved login in $PROFILE" "agent-browser wipe --yes --slot $SLOT"
+    alive chrome && err running "stop the browser first" "agent-browser stop --force --slot $SLOT"
     rm -rf "$PROFILE"
     printf 'wiped: %s\n' "$PROFILE"
 }
@@ -155,14 +379,24 @@ cmd_wipe() {
 usage() {
     cat <<EOF
 agent-browser: logged-in browser for agents; the human does every login.
-usage: agent-browser [status|start [URL]|stop|check <github|linkedin|URL>|wipe --yes]
+usage:
+  agent-browser [status [--slot N]]
+  agent-browser start [--slot N|auto] [URL]   # takes a lease: your own tab
+  agent-browser py <lease> script.py [args]   # Playwright attached to your tab
+  agent-browser show <lease>                  # bring your tab to the viewer's front
+  agent-browser check <github|linkedin|URL> [--lease ID]
+  agent-browser stop <lease>                  # browser stops when the last lease goes
+  agent-browser stop --force [--slot N]       # kill a slot regardless of leases
+  agent-browser wipe --yes [--slot N]
 EOF
 }
 
 case "${1:-status}" in
-    status) cmd_status ;;
+    status) shift; cmd_status "$@" ;;
     start) shift; cmd_start "$@" ;;
-    stop) cmd_stop ;;
+    stop) shift; cmd_stop "$@" ;;
+    show) shift; cmd_show "$@" ;;
+    py) shift; cmd_py "$@" ;;
     check) shift; cmd_check "$@" ;;
     wipe) shift; cmd_wipe "$@" ;;
     -h|--help|help) usage ;;

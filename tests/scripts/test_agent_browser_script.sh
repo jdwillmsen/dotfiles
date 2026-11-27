@@ -14,7 +14,14 @@ shellcheck -s bash "$cli"
 
 tmp="$(mktemp -d)"
 # Stubs exec sleep, so they are found by their recorded pids, not by path.
-trap 'for f in "$tmp"/run/*.pid "$tmp"/run/slot*/*.pid; do [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null; done; rm -rf "$tmp"' EXIT
+cleanup() {
+    local f
+    for f in "$tmp"/run/*.pid "$tmp"/run/slot*/*.pid; do
+        [ -f "$f" ] && kill "$(cat "$f")" 2>/dev/null
+    done
+    rm -rf "$tmp"
+}
+trap cleanup EXIT
 bin="$tmp/bin"; mkdir -p "$bin"
 
 # Each stub records its argv and then stays alive like the real daemon, so
@@ -72,9 +79,9 @@ grep -q -- '--disable-background-timer-throttling' <<<"$chrome_args" || fail "ba
 grep -q -- '-localhost' "$tmp/x11vnc.args" || fail "VNC must bind to localhost"
 grep -q '100.64.0.7:6080' "$tmp/websockify.args" || fail "viewer must bind to the tailnet address only"
 [ "$(stat -c %a "$tmp/profile")" = 700 ] || fail "profile must be private"
-for p in $(cat "$tmp"/run/*.pid); do
+while read -r p; do
     [ ! -e "/proc/$p/fd/9" ] || fail "daemons must not inherit the lock fd; it would never be released"
-done
+done < <(cat "$tmp"/run/*.pid)
 
 out="$(run start)"
 b="$(lease "$out")"

@@ -40,12 +40,16 @@ agent-browser py <lease> script.py
 ```
 
 Keep scripts in the scratchpad. Other agents and the human share this Chrome, so never reuse
-or navigate another tab; drive only your lease's tab. If another agent may be posting to
-Discord at the same time, take an isolated slot with `start --slot auto` instead.
+or navigate another tab; drive only your lease's tab. Stay on slot 0, where the user's Discord
+account is signed in; an isolated slot may hold a different account or none.
 
 ```python
+from playwright.sync_api import sync_playwright
 import agent_browser
-page = agent_browser.page(p)   # inside `with sync_playwright() as p:`; already on the start URL
+
+with sync_playwright() as p:
+    page = agent_browser.page(p)   # your lease's tab, wherever the last script left it
+    page.goto("https://discord.com/channels/@me")
 ```
 
 1. **Find the DM.** List the rows of `ul[aria-label="Direct Messages"] li` and match the name

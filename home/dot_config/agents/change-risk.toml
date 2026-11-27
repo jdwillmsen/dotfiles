@@ -301,11 +301,10 @@ plan = ['(?i)\b(get rid of|tear ?down|take down|shut ?down|turn off|switch off|k
 
 # --- exceptions --------------------------------------------------------------
 # An owner ruling that a named scope tops out at a lower tier. It lowers only
-# the listed rules, only in the listed repos, and only where the hit sits in
-# scope: a path matching `paths` (minus `exclude`), or a plan whose every
-# sentence that trips the rule matches `plan` and no `plan_exclude`. Anything
-# else in the same change keeps its own tier, so a mixed change stays high.
-# Content rules can never be listed.
+# the listed path rules, only in the listed repos, and only for a path matching
+# `paths` (minus `exclude`). Anything else in the same change keeps its own
+# tier, so a mixed change stays high. Content and plan rules can never be
+# listed, so a plan for scoped work still gets its R3 interview.
 
 # The Minecraft lab, proving grounds and crew are test servers no real player
 # depends on. FWB and the fwb-seed world are not in scope. argocd/prd/config.yaml
@@ -314,9 +313,7 @@ plan = ['(?i)\b(get rid of|tear ?down|take down|shut ?down|turn off|switch off|k
 [[exception]]
 id = "lab-pg-crew"
 tier = "R2"
-rules = ["prd-config", "auth-and-secrets", "data-and-migrations", "game-world", "plan-production", "plan-people-impact"]
+rules = ["prd-config", "auth-and-secrets", "data-and-migrations", "game-world"]
 repos = ["jdwillmsen/jdw-deployments", "jdwillmsen/gameops"]
 paths = ["charts/crew-lab/**", "charts/proving-grounds/**", "tools/crew-lab-*", "tools/proving-grounds-lab*",
          "minecraft/crew/**", "minecraft/crew-control/**", "minecraft/lab-packs/**", "packs/lab-mods-*/**"]
-plan = ['(?i)\b(crew-lab|crew-control|crew|lab-packs|proving[- ]grounds|minecraft lab|the lab|lab (server|world)|pg (server|world))\b']
-plan_exclude = ['(?i)\b(fwb|seed|minecraft-fwb|main (server|world)|platform|shared|cluster|infra|jdwlabs|dotablaze|all (servers|worlds|apps)|every (server|world|app))\b']

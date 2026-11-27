@@ -1067,15 +1067,14 @@ exc_plan() {
     got="$(sed -n 's/^tier: //p' "$out")"
     [ "$got" = "$want" ] || fail "plan '$text' in $repo classified $got, want $want" "$(cat "$out")"
 }
-exc_plan jdwillmsen/jdw-deployments R2 "Roll out the crew-lab kit change to prd."
-exc_plan jdwillmsen/gameops R2 "Add a crew-control endpoint for unit jobs. Roll out crew-control to prd."
-exc_plan jdwillmsen/jdw-deployments R2 "Restart the proving grounds server after the values-prd bump."
-exc_plan jdwillmsen/jdw-deployments R3 "Roll out the crew-lab kit change to prd. Promote the platform chart too."
-exc_plan jdwillmsen/jdw-deployments R3 "Roll out the crew-lab and fwb-seed values to prd."
+# Plans are never lowered: a word list cannot prove a sentence stays in scope.
+exc_plan jdwillmsen/jdw-deployments R3 "Roll out the crew-lab kit change to prd."
+exc_plan jdwillmsen/jdw-deployments R3 "Restart the lab server and the main minecraft server."
+exc_plan jdwillmsen/jdw-deployments R3 "Restart the crew lab and the survival server."
+exc_plan jdwillmsen/gameops R3 "Roll out crew-control and the auth service to prd."
+exc_plan jdwillmsen/jdw-deployments R3 "Restart the proving grounds server, then the one players use."
 exc_plan jdwillmsen/jdw-deployments R3 "Tune FWB view distance in prd."
-exc_plan jdwillmsen/jdw-deployments R3 "Roll out the new chart to prd."
 exc_plan jdwillmsen/jdw-deployments R3 "Wipe the crew-lab world."
-exc_plan jdwlabs/deployments R3 "Roll out the crew-lab kit change to prd."
 
 # The policy file guards its own exceptions.
 exc_rules() {
@@ -1121,5 +1120,36 @@ rules = ["p"]
 paths = ["x/**"]
 TOML
 grep -q 'repos must name' "$out" || fail "an exception without repos was accepted" "$(cat "$out")"
+exc_rules <<'TOML'
+[[rule]]
+id = "p"
+tag = "prd"
+tier = "R3"
+paths = ["**/prd/**"]
+
+[[exception]]
+id = "x"
+tier = "R2"
+rules = ["p"]
+repos = ["a/b"]
+paths = ["x/**"]
+plan = ['x']
+TOML
+grep -q 'plan is not supported' "$out" || fail "an exception accepted plan scoping" "$(cat "$out")"
+exc_rules <<'TOML'
+[[rule]]
+id = "pp"
+tag = "prd"
+tier = "R3"
+plan = ['prd']
+
+[[exception]]
+id = "x"
+tier = "R2"
+rules = ["pp"]
+repos = ["a/b"]
+paths = ["x/**"]
+TOML
+grep -q 'reads plans and cannot be lowered' "$out" || fail "an exception lowered a plan rule" "$(cat "$out")"
 
 echo "test_change_class_script: OK"

@@ -2300,7 +2300,7 @@ grep -q 'merge refused: denied for \[redacted\]' "$STATE/log.jsonl" || fail "a t
 want 0 explain acme/live#2
 if token_strays "$TOK_ACME" | grep -q .; then fail "explain leaked the token" "$(token_strays "$TOK_ACME")"; fi
 python3 -I - "$tool" "$tmp" "$TOK_ACME" <<'PY' || fail "gh environment unit checks failed"
-import importlib.machinery, importlib.util, os, sys
+import importlib.machinery, importlib.util, os, re, sys
 tool, tmp, tok = sys.argv[1:4]
 sys.dont_write_bytecode = True
 os.makedirs(tmp + "/unit-tokens", mode=0o700, exist_ok=True)
@@ -2332,6 +2332,11 @@ except mc.Refused:
 else:
     raise SystemExit("a gh call with no repository in hand was allowed")
 assert tok not in mc.scrub(f"failed with {tok} in the message") and "[redacted]" in mc.scrub(f"x {tok}")
+# A new-shape token the captain never loaded (so not in KNOWN_SECRETS) must still go whole, "." and "-" included.
+stray = "gh" + "s_" + "".join(f"Seg{i}ment-part.Piece_" for i in range(18))
+for out in (mc.scrub(f"stderr: {stray} end"), mc.scrub_prompt(f"+ token = {stray}\n")):
+    leaked = [seg for seg in re.split(r"[.-]", stray) if len(seg) >= 4 and seg in out]
+    assert not leaked, f"a new-shape token leaked in part: {leaked[:3]}"
 cap.close()
 PY
 

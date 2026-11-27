@@ -3078,7 +3078,8 @@ done
 APP_ID=424242
 INST_ID=7070707
 GS="gh""s_"
-INST_TOKEN="${GS}InstallationTokenInstallationToken00"
+# GitHub's installation tokens are now ~380 characters and carry "." and "-", so the stub mints that shape.
+INST_TOKEN="${GS}$(printf 'Inst-allation.Token_%.0s' $(seq 19))00"
 openssl genrsa -out "$tmp/app_key.pem" 2048 2>/dev/null
 openssl rsa -in "$tmp/app_key.pem" -pubout -out "$tmp/app_pub.pem" 2>/dev/null
 export STUB_PUB="$tmp/app_pub.pem"

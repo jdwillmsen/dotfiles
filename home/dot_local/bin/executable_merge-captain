@@ -118,8 +118,8 @@ EXPIRY_HEADER = "github-authentication-token-expiration"
 OWNER = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}")
 FINE_GRAINED = re.compile(r"github_pat_[A-Za-z0-9_]{20,240}")
 # What a saved token must look like to be sent anywhere: no whitespace or control character could ride along into
-# a header.
-TOKEN_SHAPE = re.compile(r"[A-Za-z0-9_]{20,255}")
+# a header. GitHub's installation tokens grew to ~380 characters with "." and "-" in them.
+TOKEN_SHAPE = re.compile(r"[A-Za-z0-9_.-]{20,1024}")
 APP_NUMBER = re.compile(r"[1-9][0-9]{0,19}")
 PEM_KEY = re.compile(r"-----BEGIN (?:RSA )?PRIVATE KEY-----\n[A-Za-z0-9+/=\n]+-----END (?:RSA )?PRIVATE KEY-----\n?")
 KEY_MAX_BYTES = 16384

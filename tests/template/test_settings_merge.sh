@@ -105,3 +105,18 @@ old_entry='{"hooks":{"PreToolUse":[{"matcher":"Write|Edit|MultiEdit|Bash","hooks
 out="$(printf '%s' "$old_entry" | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
 out="$(printf '%s' "$out" | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
 echo "$out" | "$PY" -c "$guard_check; print(\"PASS\")"
+
+# The Jira transition check is enforced as a PostToolUse entry: present on a fresh install, added beside an on-disk
+# PostToolUse list written by hand, and never duplicated by a re-run.
+# shellcheck disable=SC2016  # the python source carries a literal $HOME, which the settings file keeps unexpanded
+jira_check='import json,sys; d=json.load(sys.stdin); post=d["hooks"]["PostToolUse"]; \
+ entries=[e for e in post if e["matcher"]=="mcp__plugin_atlassian_atlassian__transitionJiraIssue"]; \
+ assert len(entries)==1, "jira transition entries %d" % len(entries); \
+ assert entries[0]["hooks"]==[{"type":"command","command":"$HOME/.claude/hooks/verify-jira-transition.sh"}], entries'
+out="$(printf '' | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
+echo "$out" | "$PY" -c "$jira_check; print(\"PASS\")"
+existing='{"hooks":{"PostToolUse":[{"matcher":"Write","hooks":[{"type":"command","command":"my-post"}]}]}}'
+out="$(printf '%s' "$existing" | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
+out="$(printf '%s' "$out" | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
+echo "$out" | "$PY" -c "$jira_check; \
+assert any(h[\"command\"]==\"my-post\" for e in post for h in e[\"hooks\"]), \"user PostToolUse hook lost\"; print(\"PASS\")"

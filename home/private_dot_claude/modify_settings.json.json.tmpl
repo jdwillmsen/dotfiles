@@ -84,6 +84,10 @@ DEFAULTS='{
 # machine that already has the first entry on disk would otherwise keep it and
 # gain a near-duplicate.
 #
+# The PostToolUse entry after a Jira transition is enforced for the same reason: the
+# tool can report success with the status unchanged, and the hook's reminder to
+# re-read it is only worth having if no on-disk hooks list can drop it.
+#
 # CLAUDE_CODE_PLUGIN_DIRS loads the skill-trim mod in every session, including
 # ones started by apps that take no --plugin-dir flag. It is enforced because
 # the path is owned here: a stale on-disk value would silently drop the mod.
@@ -126,6 +130,14 @@ ENFORCED='{
         "matcher": "Read|Grep|Glob",
         "hooks": [
           { "type": "command", "command": "$HOME/.claude/hooks/guard-delivery-state.sh" }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "mcp__plugin_atlassian_atlassian__transitionJiraIssue",
+        "hooks": [
+          { "type": "command", "command": "$HOME/.claude/hooks/verify-jira-transition.sh" }
         ]
       }
     ]

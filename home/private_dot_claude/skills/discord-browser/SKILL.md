@@ -28,25 +28,24 @@ credential-free API for a person's own account, so send and read through the web
 - **Verify every send:** wait 5-10 s, reload the channel and confirm the message is still there;
   automod can remove a post after it is accepted. If it vanished, tell the user; do not re-post,
   split it or strip captions to get past a server's moderation without their go-ahead.
-- Never handle credentials, tokens or cookies. If Discord shows a login, hand the user the
-  viewer link from `agent-browser start`.
+- Never handle credentials, tokens or cookies. If Discord shows a login, run
+  `agent-browser show <lease>` and hand the user the viewer link.
 
 ## Workflow
 
 ```bash
-agent-browser start https://discord.com/channels/@me   # prints the cdp endpoint
-agent-browser check https://discord.com/channels/@me   # logged_in: yes|no
+agent-browser start https://discord.com/channels/@me   # prints lease:; opens your own tab
+agent-browser check https://discord.com/channels/@me --lease <lease>   # logged_in: yes|no
+agent-browser py <lease> script.py
 ```
 
-Drive it with `uv run -q --with playwright python script.py`; keep scripts in the scratchpad.
-Connect to the `cdp:` endpoint that `agent-browser start` printed (9222 only by default). Chrome
-may already be open on another site, and an existing tab may be one the human is using to log
-in, so never reuse or navigate an existing tab: open a new page and close it when done.
+Keep scripts in the scratchpad. Other agents and the human share this Chrome, so never reuse
+or navigate another tab; drive only your lease's tab. If another agent may be posting to
+Discord at the same time, take an isolated slot with `start --slot auto` instead.
 
 ```python
-b = p.chromium.connect_over_cdp(CDP)
-page = b.contexts[0].new_page()
-page.goto("https://discord.com/channels/@me")
+import agent_browser
+page = agent_browser.page(p)   # inside `with sync_playwright() as p:`; already on the start URL
 ```
 
 1. **Find the DM.** List the rows of `ul[aria-label="Direct Messages"] li` and match the name
@@ -69,7 +68,7 @@ page.goto("https://discord.com/channels/@me")
    composer screenshot only as a check that it staged correctly; a screenshot alone can crop or
    hide text.
 5. **Send** with Enter only after approval, then verify as in Rules.
-6. Close the page you opened and run `agent-browser stop` when done; the login persists.
+6. Run `agent-browser stop <lease>` when done; it closes your tab and the login persists.
 
 ## Quirks
 

@@ -52,7 +52,7 @@ Advisory hooks print context for the agent and exit 0 on any fault.
 | `guard-delivery-state.sh` | PreToolUse, writing and reading tools | Blocks edits to merge-captain state and delivery policy ([merge-captain.md](merge-captain.md)) |
 | `verify-jira-transition.sh` | PostToolUse, `transitionJiraIssue` | Tells the agent to re-read the status with `getJiraIssue` and retry once, since a transition can report success unchanged |
 | `warn-stray-clone.sh` | PreToolUse, `Bash` | Warns when `git clone`/`gh repo clone` lands anywhere under `~/projects` but a top-level `<owner>/<repo>` named after the repo, or `git worktree add` targets `~/projects`; points to `~/worktrees/<owner>/<repo>/<branch>` |
-| `suggest-dispatch-lane.sh` | PreToolUse, `Agent\|Task\|mcp__t3-code__delegate_task` | Runs `agent-pace assign --no-log` with the class (agent type, T3 role or brief; default `impl`), risk (stated, default R1) and ticket inferred from the call, and adds the lane it returns; the `task-dispatch` skill still covers briefing, verifying and `agent-eval record` |
+| `suggest-dispatch-lane.sh` | PreToolUse, `^(Agent\|Task\|mcp__t3-code__delegate_task)$` | Runs `agent-pace assign --no-log` with the class (agent type, T3 role or brief; default `impl`), risk and ticket inferred from the call, seeded with the tool-use id, and adds the lane it returns (with no stated tier, only as valid for R1 until the tier is stated); the `task-dispatch` skill still covers briefing, verifying and `agent-eval record` |
 
 ### Deliberately skipped
 

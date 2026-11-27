@@ -51,6 +51,7 @@ Advisory hooks print context for the agent and exit 0 on any fault.
 |---|---|---|
 | `guard-delivery-state.sh` | PreToolUse, writing and reading tools | Blocks edits to merge-captain state and delivery policy ([merge-captain.md](merge-captain.md)) |
 | `verify-jira-transition.sh` | PostToolUse, `transitionJiraIssue` | Tells the agent to re-read the status with `getJiraIssue` and retry once, since a transition can report success unchanged |
+| `warn-stray-clone.sh` | PreToolUse, `Bash` | Warns when `git clone`/`gh repo clone` lands anywhere under `~/projects` but a top-level `<owner>/<repo>` named after the repo, or `git worktree add` targets `~/projects`; points to `~/worktrees/<owner>/<repo>/<branch>` |
 
 ### Deliberately skipped
 

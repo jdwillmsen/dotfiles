@@ -121,3 +121,13 @@ out="$(printf '%s' "$existing" | bash "$here/home/private_dot_claude/modify_sett
 out="$(printf '%s' "$out" | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
 echo "$out" | "$PY" -c "$jira_check; \
 assert any(h[\"command\"]==\"my-post\" for e in post for h in e[\"hooks\"]), \"user PostToolUse hook lost\"; print(\"PASS\")"
+
+# The stray-clone warning is its own enforced Bash entry: present beside the rtk entry, kept once across re-runs.
+# shellcheck disable=SC2016  # the python source carries a literal $HOME, which the settings file keeps unexpanded
+clone_check='import json,sys; d=json.load(sys.stdin); pre=d["hooks"]["PreToolUse"]; \
+ entries=[e for e in pre if any(h["command"].endswith("warn-stray-clone.sh") for h in e["hooks"])]; \
+ assert entries==[{"matcher":"Bash","hooks":[{"type":"command","command":"$HOME/.claude/hooks/warn-stray-clone.sh"}]}], entries; \
+ assert any(h["command"]=="rtk hook claude" for e in pre for h in e["hooks"]), "rtk hook lost"'
+out="$(printf '' | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
+out="$(printf '%s' "$out" | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
+echo "$out" | "$PY" -c "$clone_check; print(\"PASS\")"

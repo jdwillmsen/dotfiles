@@ -150,8 +150,9 @@ unsure, classify up. Put the result on the PR and ticket as labels
   its tier requires done by an agent and its findings addressed; rationale and
   the `risk/` label recorded in the description.
 - **Never submit an approving review as the owner or with their login.** R3
-  approval is the owner's own review or a chat message from them naming that PR;
-  an agent cannot supply it, whatever identity the PR was opened under.
+  approval is the owner's own review or chat message naming that PR, never an
+  agent's. The captain merges on chat only via `merge-captain approve-from-chat`: the owner's whole
+  T3 message, exactly `approve repo#N <full 40-char head sha>` (show them that line, and that a retraction must name repo#N).
 - **A PR that needs an approving review is opened as the bot.** GitHub blocks
   self-approval and these repos have one maintainer, so one opened under the
   human's `gh` auth can only merge by bypass. Before `gh pr create`,

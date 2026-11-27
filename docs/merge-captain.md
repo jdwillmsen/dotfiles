@@ -2,7 +2,9 @@
 
 Classifies open pull requests by risk, has the lane `agent-pace` picks review
 them where the tier needs it, and rebase-merges what passes the repository's own
-gates. R3 is never merged; it is labelled `needs-human` and left for the owner.
+gates. R3, and any tier above a repository's ceiling, is labelled `needs-human`
+and left for the owner, unless the owner's chat approval of that exact head is on
+record (see "Owner chat approval").
 Design: `docs/superpowers/specs/2026-10-23-merge-captain-design.md`.
 
 ## What a run does
@@ -30,7 +32,8 @@ configured repository, ending at the first step that fails:
    waits (`head moved during classification`).
 3. `live` repos only: create and set the `risk/Rn` and `tag/*` labels.
 4. Above the repo's `max_tier` (R3 always): `needs-human` label plus one comment
-   per head commit.
+   per head commit, unless an owner chat approval for this head is on record; then
+   the PR goes on through steps 5 to 8 at its own tier.
 5. Gates on the current head: mergeable and clean, every check green (none
    pending, none failing, and at least one reported), no changes requested, no
    unresolved threads, no open code-scanning alerts, not updated in the last
@@ -103,6 +106,91 @@ owner's token (below) and the next run processes the repository, with no config
 edit. The option only withholds: an insecure or expired token keeps its own
 `insecure-token-file` / `token-expired` row, and a repository without it behaves as
 before, on the default login.
+
+## Owner chat approval
+
+The rules accept the owner's chat message naming a PR as its R3 approval. For a PR
+the captain looks after, an agent turns that message into something it merges on:
+
+```
+merge-captain approve-from-chat jdwillmsen/dotfiles#150 --thread <T3 thread id> \
+    --quote '<the owner's whole message, verbatim>'
+```
+
+The approval is bound to exactly one commit: the owner's message carries the head's
+full 40-character sha. An agent asking for approval shows the exact line to copy, and
+how to take it back, for example:
+
+```
+Approve: approve jdwillmsen/dotfiles#150 5f37f9634a2b1da1999f05e37743572979e825
+To withdraw later, send any message naming jdwillmsen/dotfiles#150, e.g. hold dotfiles#150
+```
+
+Any shorter prefix is refused. The agent that pushes the code can make two commits that
+share a prefix (a birthday search takes seconds at 12 hex characters), get one approved
+and push the other; only the full sha closes that.
+
+The owner's whole message must be exactly an approval word, the PR and the full sha
+(`<word> <pr> <sha>`), or the PR, the sha and the word (`<pr> <sha> <word>`), separated
+by spaces, `,`, `:` or `@` before the sha, optionally ending in `.` or `!`. The words
+are `approve`, `approved`, `lgtm`, `ship it` and `merge it`; the PR is `repo#N`,
+`owner/repo#N` or its URL. Anything else is refused, including a message with no sha or
+a 39-character one, "go dotfiles#150 <sha>", "approve dotfiles#150 <sha> if Opus
+agrees", a pasted command line, backticks, `>` and any non-ASCII character (zero-width
+spaces, curly apostrophes, dashes). The sha must be the PR's current head, so a push
+of any other commit, including one pushed back after the approval, voids it.
+
+The message itself is the proof, not the agent's say-so. The command opens T3 Code's
+own store (`~/.t3/userdata/statev2.sqlite`, read-only) and looks in that thread for a
+message with `createdBy: user` and `creationSource` `web` or `mobile`, that is, text
+the owner typed in the app, whose whole text is the quote (whitespace aside).
+Messages an agent sent (MCP sends, delegation briefs, notifications, scheduled tasks)
+and server-made user turns (an answer to an agent's question, an idle-compaction
+resume) never count, and neither does an edited message: T3 lets an agent rewrite a
+queued owner message in place, keeping its author and source and moving only
+`updatedAt`, so any message whose `updatedAt` differs from its `createdAt` (or lacks
+either) is ignored. A later message from the owner in any thread that names the PR
+without approving its current head is a retraction and wins. A retraction must name the
+PR (`repo#N`, `owner/repo#N` or its URL); a bare "wait" or "no" does not, so the agent
+tells the owner to name it, as in the line above. Where the bare repository name exists
+under more than one configured owner, only `owner/repo#N` (or the URL) counts.
+
+It refuses, writing nothing, when the message is not a plain approval with a sha, the
+sha is not the current head's, no such owner-typed message exists, it was retracted,
+it looks like it holds a credential, the repository is not `live`, the captain is
+paused or a run holds its lock, or the PR is not open. Otherwise, under the run lock,
+it posts one comment (marker `merge-captain:chat-approval`, the thread, the message
+id, its time and the owner's full message as T3 holds it), appends a row to
+`chat-approvals.jsonl` in the state directory and then adds the `approved/owner-chat`
+label. Recording the same message again changes nothing.
+
+A run then treats that PR as the owner-approved exception to step 4, and only while
+all of these hold:
+
+- a row in `chat-approvals.jsonl` names this repo, PR and current head, and T3 still
+  holds the message it points at: typed by the owner in that thread, a plain approval
+  of this PR naming this head's full sha, no later retraction naming the PR. The row,
+  the comment and the label prove nothing on their own; a forged row is ignored;
+- the `approved/owner-chat` label is still on the PR, read again just before the merge.
+  Removing it withdraws the approval;
+- steps 5 to 8 pass. The review runs at the PR's own tier, so an R3 PR gets the
+  reviewer `agent-pace` assigns for R3 (Opus), and a `changes` verdict blocks.
+
+A push voids the approval: the sha no longer matches, the next run takes the label off
+and comments `needs-human`. If T3 cannot be read (store missing, schema changed),
+nothing counts and the PR stays with the owner. The approver App still never approves
+above R2 and never as the owner, so on a repository whose ruleset requires an
+approving review the PR stops at `blocked` `merge state BLOCKED` (or `skipped` `R3
+above R2` where `approver = true`) until the owner approves on GitHub.
+
+This check stops mistakes, not a hostile agent. `statev2.sqlite` is owned by the same
+user every agent runs as (mode 644, so writable by that user), and so is the T3 server
+that accepts edits: an agent that sets out to forge an owner message can, by writing the
+database or driving the T3 web UI, which is recorded as `web`. What the check does stop
+is an agent recording an approval the owner never typed, quoting part of a hedged
+message, approving another commit, or missing a retraction. The real boundary is
+JDW-209: a separate unix account for the captain, its state and its tokens, which agents
+cannot write.
 
 ## Rollout verification (stage 1: observe)
 
@@ -465,6 +553,9 @@ Other files in the state directory, all written by the captain only:
   together with the ledgers (below).
 - `attempts.jsonl`: failed review calls, for the 6-hour backoff.
 - `human.jsonl`: which `needs-human` comments were posted, so each head gets one.
+- `chat-approvals.jsonl`: owner chat approvals, one row per recorded message
+  (`repo, pr, head, thread, message, quote, at, recorded_at`), written by
+  `approve-from-chat`; a run re-checks each against T3.
 - `rollouts.jsonl`: one line per rollout check, the last line per repo and PR is
   the row's state (see "Rollout verification").
 - `rotation.json` and `examined.json`: the fair-rotation cursors and examination

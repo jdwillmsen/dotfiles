@@ -129,6 +129,11 @@ out="$(run wipe --yes)"
 out="$(run bogus)" && fail "unknown command must fail" "$out"
 grep -q 'unknown_command' <<<"$out" || fail "unknown command should be a structured error" "$out"
 
+for args in "start --slot" "stop --slot" "check site --slot" "wipe --slot" "status --slot"; do
+    out="$(run $args)" && fail "trailing --slot must not loop: $args" "$out"
+    grep -q 'error: usage' <<<"$out" || fail "trailing --slot should be a usage error: $args" "$out"
+done
+
 # No tailnet means no viewer at all: never fall back to another interface.
 printf '#!/usr/bin/env bash\nexit 1\n' >"$bin/tailscale"
 out="$(run start)" && fail "start without a tailnet address must fail" "$out"

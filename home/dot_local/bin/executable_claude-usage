@@ -154,8 +154,9 @@ def stop_browser(lease):
 
 def fetch_all():
     """Return (usage, credits, promo) from the logged-in page, or die with a hint."""
-    # Stop only what this run brought up from fully stopped. A browser that is
-    # running, or half up, belongs to someone else and is left as found.
+    # Release the lease this run took, if any; a bare stop only when this run
+    # brought a fully-stopped browser up and got no lease. A browser already
+    # running is left as found; agent-browser stops only when no lease is left.
     before = browser_state()
     started = before == "stopped"
     lease = None
@@ -236,7 +237,7 @@ def fetch_all():
                 page.close()
         return [None if isinstance(g, dict) and "__status" in g else g for g in got]
     finally:
-        if started:
+        if lease or started:
             stop_browser(lease)
 
 

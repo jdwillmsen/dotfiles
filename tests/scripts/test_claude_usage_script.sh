@@ -110,7 +110,7 @@ drive running yes now
 drive stopped yes now
 [ "$calls" = "status start status check stop:s0-abc123 " ] || fail "a stopped browser is started, then released by this run's lease" "$calls"
 drive partial yes now
-[ "$calls" = "status start status check " ] || fail "a half-up browser is repaired but never stopped" "$calls"
+[ "$calls" = "status start status check stop:s0-abc123 " ] || fail "a half-up browser is repaired and its own lease released" "$calls"
 drive stopped fail now
 [ "$code" = 1 ] || fail "a failing sign-in check must exit 1, got $code" "$(cat "$tmp/out")"
 grep -q "could not check" "$tmp/out" || fail "a failing check is not reported as such" "$(cat "$tmp/out")"

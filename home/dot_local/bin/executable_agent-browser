@@ -83,11 +83,15 @@ live_leases() {  # live_leases SLOT -> lease ids, one per line
     return 0
 }
 
-prune_leases() {  # drop stale leases; their tabs go with the browser or the next owner
-    local f
+prune_leases() {  # drop stale leases and close their tabs, which nothing else would reach
+    local f id port
     for f in "$LEASES"/*; do
         [ -f "$f" ] || continue
-        lease_live "${f##*/}" || rm -f "$f"
+        id="${f##*/}"
+        lease_live "$id" && continue
+        port=$(( ${AGENT_BROWSER_CDP_PORT:-9222} + $(lease_get "$id" slot) ))
+        curl -fsS --max-time 5 "http://127.0.0.1:$port/json/close/$(lease_get "$id" target)" >/dev/null 2>&1 || true
+        rm -f "$f"
     done
 }
 
@@ -293,10 +297,18 @@ cmd_py() {
     command -v uv >/dev/null 2>&1 || err missing_dependency "uv not found" "install uv"
     alive chrome || err not_running "slot $SLOT browser is not running" "agent-browser start --slot $SLOT"
     shift
+    # A script may outlive LEASE_TTL; keep its lease live only while it runs, so
+    # an abandoned lease still expires.
+    local hb rc
+    (while sleep 60; do touch "$LEASES/$id" 2>/dev/null || exit; done) &
+    hb=$!
     AGENT_BROWSER_LEASE="$id" AGENT_BROWSER_LEASE_FILE="$LEASES/$id" \
         AGENT_BROWSER_CDP="http://127.0.0.1:$CDP_PORT" AGENT_BROWSER_TARGET="$(lease_get "$id" target)" \
         PYTHONPATH="$LIB_DIR${PYTHONPATH:+:$PYTHONPATH}" \
-        exec uv run -q --with playwright python "$@"
+        uv run -q --with playwright python "$@"
+    rc=$?
+    kill "$hb" 2>/dev/null
+    return "$rc"
 }
 
 cmd_check() {

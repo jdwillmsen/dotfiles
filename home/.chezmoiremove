@@ -16,3 +16,10 @@
 # The context7-mcp user skill duplicated the context7 plugin, which already
 # registers the same MCP server and carries its own usage instructions.
 .claude/skills/context7-mcp
+
+# The /pr, /standup and /explain commands went unused: the shared rules and the
+# no-mistakes pipeline already cover PR bodies, and none of the three was ever
+# invoked in the session transcripts.
+.claude/commands/pr.md
+.claude/commands/standup.md
+.claude/commands/explain.md

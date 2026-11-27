@@ -176,3 +176,9 @@ plus `all`. The per-role default lives in `repoDefaultGroups` beside the list.
 `jdwillmsen/experiments-archive` (private) is deliberately not listed: it holds
 retired repos as `<repo>/<branch>` branches, and git bundles under
 `bundles/2026-10`. Clone it by hand when something old is needed.
+
+## `mc` — Minecraft console
+
+`~/.local/bin/mc` is a link to `tools/mc` in the `jdwillmsen/jdw-deployments` checkout, created only where that
+checkout exists. It reaches every world with `--world fwb|lab|seed|pg`; `mc --help` lists the commands. Keep that
+checkout on `main` and pulled, or the link runs old code.

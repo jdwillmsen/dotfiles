@@ -41,6 +41,17 @@ manual step on a new machine.
 | **caveman** | Token-efficient output mode, off by default; `/caveman` turns it on for a session. | `claudePlugins` marketplace install; default mode `off` in `dot_config/caveman/config.json` (and the `AppData/Roaming` copy on Windows) |
 | **RTK** | Hook-rewritten command proxy that compresses shell output 60–90%. `rtk gain [--history]` shows savings, `rtk discover` finds missed commands, `rtk proxy <cmd>` bypasses filtering. If `rtk gain` fails, `which rtk` may be reachingforthejack/rtk (Rust Type Kit), a name collision. | `run_once_40-install-rtk.sh`; `rtk hook claude` PreToolUse hook in `modify_settings.json.json.tmpl`; agent-facing summary in `private_dot_claude/RTK.md` |
 
+### Claude Code hooks
+
+Wired in the `ENFORCED` block of `private_dot_claude/modify_settings.json.json.tmpl`,
+so an on-disk hooks list cannot drop them; scripts in `private_dot_claude/hooks/`.
+Advisory hooks print context for the agent and exit 0 on any fault.
+
+| Hook | Event and matcher | Does |
+|---|---|---|
+| `guard-delivery-state.sh` | PreToolUse, writing and reading tools | Blocks edits to merge-captain state and delivery policy ([merge-captain.md](merge-captain.md)) |
+| `verify-jira-transition.sh` | PostToolUse, `transitionJiraIssue` | Tells the agent to re-read the status with `getJiraIssue` and retry once, since a transition can report success unchanged |
+
 ### Deliberately skipped
 
 - **treehouse** (worktree manager) — native `EnterWorktree` plus the `gwta`/`wtd`

@@ -14,9 +14,15 @@ for want in kunchenguid/axi kunchenguid/lavish-axi; do
 done
 # A retired skill is uninstalled through the CLI, never installed again.
 echo "$skills" | grep -q 'skills add.*vercel-labs/skills' && { echo "FAIL: find-skills is retired but still installed"; exit 1; }
-echo "$skills" | grep -qF "skills remove 'find-skills' --global --yes" ||
-    echo "$skills" | grep -qF 'skills remove "find-skills" --global --yes' ||
+echo "$skills" | grep -qF 'skills remove "find-skills" --global --agent claude-code --yes' ||
     { echo "FAIL: retired find-skills is not removed"; exit 1; }
+# An empty or null entry must not reach the CLI as a removal with no name.
+guarded="$( { printf '%s' '{{ $_ := set . "retiredAgentSkills" (list "" nil "Bad Name" "old-skill") }}'
+    cat "$here/home/run_onchange_33-install-agent-skills.sh.tmpl"; } |
+    chezmoi execute-template --source "$CHEZ_SRC" --config "$cfg")"
+[ "$(grep -c 'skills remove' <<< "$guarded")" = 1 ] ||
+    { echo "FAIL: invalid retiredAgentSkills entries are not skipped"; echo "$guarded" | grep 'skills remove'; exit 1; }
+grep -qF 'skills remove "old-skill"' <<< "$guarded" || { echo "FAIL: a valid retired skill is skipped"; exit 1; }
 
 # no-mistakes ships its own skill via `no-mistakes init`. Installing it from the
 # skills CLI as well is what puts a duplicate on disk, so it must not be listed

@@ -18,14 +18,16 @@ fi
 
 # A retired skill is removed through the skills CLI rather than with rm, so its
 # lock entry and every agent link go with it. Only names this file once
-# installed are listed, so a skill added by hand is never touched here.
-{{ range .retiredAgentSkills }}
+# installed are listed, so a skill added by hand is never touched here. An
+# entry that is not a plain skill name is skipped: an empty one would hand the
+# CLI no name at all.
+{{ range .retiredAgentSkills }}{{ if regexMatch "^[a-z0-9-]+$" (toString .) }}
 if [ -e "$HOME/.claude/skills/{{ . }}" ] || [ -L "$HOME/.claude/skills/{{ . }}" ] ||
     grep -qF '"{{ . }}"' "$HOME/.agents/.skill-lock.json" 2>/dev/null; then
-    npx -y skills remove {{ . | quote }} --global --yes ||
+    npx -y skills remove {{ . | quote }} --global --agent claude-code --yes ||
         echo "skill {{ . }} removal failed"
 fi
-{{ end }}
+{{ end }}{{ end }}
 
 # Report skills present but undeclared rather than deleting them: this file is
 # the source of truth for what *should* exist, but an undeclared skill may have

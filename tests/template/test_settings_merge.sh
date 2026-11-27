@@ -131,3 +131,12 @@ clone_check='import json,sys; d=json.load(sys.stdin); pre=d["hooks"]["PreToolUse
 out="$(printf '' | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
 out="$(printf '%s' "$out" | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
 echo "$out" | "$PY" -c "$clone_check; print(\"PASS\")"
+
+# The dispatch-lane hook is enforced on every delegating tool, once across re-runs.
+# shellcheck disable=SC2016  # the python source carries a literal $HOME, which the settings file keeps unexpanded
+lane_check='import json,sys; d=json.load(sys.stdin); pre=d["hooks"]["PreToolUse"]; \
+ entries=[e for e in pre if any(h["command"].endswith("suggest-dispatch-lane.sh") for h in e["hooks"])]; \
+ assert entries==[{"matcher":"Agent|Task|mcp__t3-code__delegate_task","hooks":[{"type":"command","command":"$HOME/.claude/hooks/suggest-dispatch-lane.sh"}]}], entries'
+out="$(printf '' | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
+out="$(printf '%s' "$out" | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
+echo "$out" | "$PY" -c "$lane_check; print(\"PASS\")"

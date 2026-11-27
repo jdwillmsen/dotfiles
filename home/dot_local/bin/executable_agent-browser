@@ -35,9 +35,29 @@ err() {  # err CODE MESSAGE [HINT]
 
 # Slot 0 keeps the original paths and ports, so existing logins and tools
 # that hardcode 9222 keep working; slot N shifts every port by N.
+canon_slot() {  # canonical non-negative decimal slot, no leading zeros; fails on non-numeric
+    case "${1:-}" in ''|*[!0-9]*) return 1 ;; esac
+    [ "${#1}" -le 9 ] || return 1
+    printf '%s' "$((10#$1))"
+}
+
+# Shared slot-flag parser for every subcommand: --slot N and --slot=N;
+# sets SLOT_VALUE + SLOT_SHIFT and returns 0 on a slot flag, else returns 1.
+slot_flag() {
+    case "${1:-}" in
+        --slot)
+            [ $# -ge 2 ] || err usage "--slot needs a value" "agent-browser <command> --slot N"
+            SLOT_VALUE="${2:-}"; SLOT_SHIFT=2; return 0 ;;
+        --slot=*) SLOT_VALUE="${1#*=}"; SLOT_SHIFT=1; return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 use_slot() {
-    SLOT="$1"
-    case "$SLOT" in ''|*[!0-9]*) err usage "slot must be a number or auto" "agent-browser start --slot auto" ;; esac
+    local raw="${1:-}"
+    case "$raw" in ''|*[!0-9]*) err usage "slot must be a number or auto" "agent-browser start --slot auto" ;; esac
+    [ "${#raw}" -le 9 ] || err usage "slot $raw is beyond AGENT_BROWSER_MAX_SLOTS=$MAX_SLOTS"
+    SLOT=$((10#$raw))
     [ "$SLOT" -lt "$MAX_SLOTS" ] || err usage "slot $SLOT is beyond AGENT_BROWSER_MAX_SLOTS=$MAX_SLOTS"
     DISPLAY_NUM=$(( ${AGENT_BROWSER_DISPLAY:-99} + SLOT ))
     CDP_PORT=$(( ${AGENT_BROWSER_CDP_PORT:-9222} + SLOT ))
@@ -66,31 +86,43 @@ lock() {  # serialise start/stop so two agents never launch or kill a slot at on
 
 lease_get() { sed -n "s/^$2=//p" "$LEASES/$1" 2>/dev/null | tail -n1; }
 
-lease_live() {  # a lease is live while it exists and was used within LEASE_TTL
-    local f="$LEASES/$1" age
+lease_live() {  # a lease is live while it exists, has a numeric slot, and was used within LEASE_TTL
+    local f="$LEASES/$1" age slot
     [ -f "$f" ] || return 1
+    slot="$(lease_get "$1" slot)"
+    case "$slot" in ''|*[!0-9]*) return 1 ;; esac
     age=$(( $(date +%s) - $(stat -c %Y "$f") ))
     [ "$age" -le "$LEASE_TTL" ]
 }
 
-live_leases() {  # live_leases SLOT -> lease ids, one per line
-    local f id
+live_leases() {  # live_leases SLOT -> lease ids, one per line; canonical slot match
+    local want="$1" f id have
+    want="$(canon_slot "$want" 2>/dev/null || true)"
+    [ -n "$want" ] || return 0
     for f in "$LEASES"/*; do
         [ -f "$f" ] || continue
         id="${f##*/}"
-        lease_live "$id" && [ "$(lease_get "$id" slot)" = "$1" ] && echo "$id"
+        lease_live "$id" || continue
+        have="$(canon_slot "$(lease_get "$id" slot)" 2>/dev/null || true)"
+        [ "$have" = "$want" ] && echo "$id"
     done
     return 0
 }
 
-prune_leases() {  # drop stale leases and close their tabs, which nothing else would reach
-    local f id port
+prune_leases() {  # drop stale leases and close their tabs, which nothing else would reach; caller must hold lock
+    local f id port slot target
     for f in "$LEASES"/*; do
         [ -f "$f" ] || continue
         id="${f##*/}"
         lease_live "$id" && continue
-        port=$(( ${AGENT_BROWSER_CDP_PORT:-9222} + $(lease_get "$id" slot) ))
-        curl -fsS --max-time 5 "http://127.0.0.1:$port/json/close/$(lease_get "$id" target)" >/dev/null 2>&1 || true
+        slot="$(lease_get "$id" slot)"
+        target="$(lease_get "$id" target)"
+        case "$slot" in ''|*[!0-9]*) slot="" ;; esac
+        [ "${#slot}" -le 9 ] || slot=""
+        if [ -n "$slot" ] && [ -n "$target" ]; then
+            port=$(( ${AGENT_BROWSER_CDP_PORT:-9222} + 10#$slot ))
+            curl -fsS --max-time 5 "http://127.0.0.1:$port/json/close/$target" >/dev/null 2>&1 || true
+        fi
         rm -f "$f"
     done
 }
@@ -100,7 +132,8 @@ need_lease() {  # need_lease ID -> selects its slot, refreshes it
     [ -n "$id" ] || err usage "a lease id is required" "agent-browser start   # prints lease:"
     lease_live "$id" || err unknown_lease "lease $id does not exist or expired" "agent-browser start [URL]   # take a new lease"
     use_slot "$(lease_get "$id" slot)"
-    touch "$LEASES/$id"
+    lease_live "$id" || err unknown_lease "lease $id does not exist or expired" "agent-browser start [URL]   # take a new lease"
+    touch -c "$LEASES/$id"
 }
 
 cdp() {  # cdp METHOD PATH [curl args...]
@@ -189,9 +222,8 @@ print_lease() {  # print_lease ID
 cmd_start() {
     local url="about:blank" slot="0" id target
     while [ $# -gt 0 ]; do
+        if slot_flag "$@"; then slot="$SLOT_VALUE"; shift "$SLOT_SHIFT"; continue; fi
         case "$1" in
-            --slot) [ $# -ge 2 ] || err usage "--slot needs a value"; slot="${2:-}"; shift 2 ;;
-            --slot=*) slot="${1#*=}"; shift ;;
             -*) err usage "unknown option $1" "agent-browser start [--slot N|auto] [URL]" ;;
             *) url="$1"; shift ;;
         esac
@@ -213,29 +245,52 @@ cmd_start() {
 
 cmd_stop() {
     local id="" force=0 slot="0" others n
+    local id_known=0 id_live=0 id_expired=0 id_slot="" id_on_slot=0
     while [ $# -gt 0 ]; do
+        if slot_flag "$@"; then slot="$SLOT_VALUE"; shift "$SLOT_SHIFT"; continue; fi
         case "$1" in
             --force) force=1; shift ;;
-            --slot) [ $# -ge 2 ] || err usage "--slot needs a value"; slot="${2:-}"; shift 2 ;;
-            --slot=*) slot="${1#*=}"; shift ;;
             -*) err usage "unknown option $1" "agent-browser stop <lease> | stop --force [--slot N]" ;;
             *) id="$1"; shift ;;
         esac
     done
     lock
-    prune_leases
     if [ -n "$id" ]; then
-        if lease_live "$id"; then
-            use_slot "$(lease_get "$id" slot)"
-            cdp GET "/json/close/$(lease_get "$id" target)" >/dev/null 2>&1 || true
-            rm -f "$LEASES/$id"
-            printf 'released: %s\n' "$id"
-        else
-            slot="${id#s}"; slot="${slot%%-*}"
-            case "$slot" in ''|*[!0-9]*) slot=0 ;; esac
-            use_slot "$slot"
-            printf 'released: none (lease %s already gone)\n' "$id"
+        if [ -f "$LEASES/$id" ]; then
+            id_slot="$(lease_get "$id" slot)"
+            case "$id_slot" in ''|*[!0-9]*) id_slot="" ;; *) id_known=1 ;; esac
         fi
+        if lease_live "$id"; then
+            id_live=1
+        elif [ "$id_known" -eq 1 ]; then
+            id_expired=1
+        fi
+    fi
+    prune_leases
+    if [ -n "$id" ] && [ "$id_live" -eq 0 ]; then
+        use_slot "$slot"
+        printf 'released: none (lease %s already gone)\n' "$id"
+        if [ "$id_known" -eq 0 ]; then
+            err unknown_lease "lease $id does not exist or expired" "agent-browser start [URL]   # take a new lease"
+        fi
+        others="$(live_leases "$SLOT" | wc -l)"
+        if [ "$id_expired" -eq 1 ] && [ "$(canon_slot "$id_slot" 2>/dev/null || true)" = "$SLOT" ]; then
+            id_on_slot=1
+        fi
+        if [ "$others" -eq 0 ] && { [ "$id_on_slot" -eq 1 ] || [ "$force" -eq 1 ]; }; then
+            n="$(shut_down)"
+            printf 'slot: %s\nstopped: %d\nprofile: %s (kept; sessions persist)\n' "$SLOT" "$n" "$PROFILE"
+        else
+            printf 'slot: %s\nstate: kept (in use by %d other lease(s))\nprofile: %s\n' "$SLOT" "$others" "$PROFILE"
+            printf 'help[1]:\n  agent-browser stop <lease>   # release only your own lease\n'
+        fi
+        return
+    fi
+    if [ -n "$id" ]; then
+        use_slot "$(lease_get "$id" slot)"
+        cdp GET "/json/close/$(lease_get "$id" target)" >/dev/null 2>&1 || true
+        rm -f "$LEASES/$id"
+        printf 'released: %s\n' "$id"
     else
         use_slot "$slot"
     fi
@@ -255,13 +310,18 @@ slot_line() {  # slot_line N -> "N,state,leases,viewer"
     up="$(up_count)"
     case "$up" in 4) state=running ;; 0) state=stopped ;; *) state="partial($up/4)" ;; esac
     if [ "$up" -eq 4 ]; then ip="$(cat "$RUN/bind" 2>/dev/null)"; viewer="http://$ip:$WEB_PORT/vnc.html"; fi
-    printf '  %s,%s,%s,%s\n' "$1" "$state" "$(live_leases "$1" | wc -l)" "$viewer"
+    printf '  %s,%s,%s,%s\n' "$SLOT" "$state" "$(live_leases "$SLOT" | wc -l)" "$viewer"
 }
 
 cmd_status() {
     local slot="0" c up ip s
-    case "${1:-}" in --slot) [ $# -ge 2 ] || err usage "--slot needs a value"; slot="${2:-}" ;; --slot=*) slot="${1#*=}" ;; esac
-    [ -d "$LEASES" ] && prune_leases
+    while [ $# -gt 0 ]; do
+        if slot_flag "$@"; then slot="$SLOT_VALUE"; shift "$SLOT_SHIFT"; continue; fi
+        case "$1" in
+            -*) err usage "unknown option $1" "agent-browser status [--slot N]" ;;
+            *) err usage "unknown argument $1" "agent-browser status [--slot N]" ;;
+        esac
+    done
     use_slot "$slot"
     printf 'slot: %s\ncomponents[4]{name,state}:\n' "$SLOT"
     up=0
@@ -284,6 +344,10 @@ cmd_status() {
 }
 
 cmd_show() {
+    case "${1:-}" in
+        -*) err usage "unknown option $1" "agent-browser show <lease>" ;;
+    esac
+    [ $# -le 1 ] || err usage "unknown argument $2" "agent-browser show <lease>"
     need_lease "${1:-}"
     cdp GET "/json/activate/$(lease_get "$1" target)" >/dev/null 2>&1 \
         || err tab_gone "this lease's tab is closed" "agent-browser py $1 script.py   # reopens it"
@@ -293,6 +357,9 @@ cmd_show() {
 cmd_py() {
     local id="${1:-}"
     [ $# -ge 2 ] || err usage "py needs a lease and a script" "agent-browser py <lease> script.py [args...]"
+    case "$id" in
+        -*) err usage "unknown option $id" "agent-browser py <lease> script.py [args...]" ;;
+    esac
     need_lease "$id"
     command -v uv >/dev/null 2>&1 || err missing_dependency "uv not found" "install uv"
     alive chrome || err not_running "slot $SLOT browser is not running" "agent-browser start --slot $SLOT"
@@ -300,7 +367,7 @@ cmd_py() {
     # A script may outlive LEASE_TTL; keep its lease live only while it runs, so
     # an abandoned lease still expires.
     local hb rc
-    (while sleep 60; do touch "$LEASES/$id" 2>/dev/null || exit; done) &
+    (while sleep 60; do [ -f "$LEASES/$id" ] || exit; touch -c "$LEASES/$id" 2>/dev/null || exit; done) &
     hb=$!
     AGENT_BROWSER_LEASE="$id" AGENT_BROWSER_LEASE_FILE="$LEASES/$id" \
         AGENT_BROWSER_CDP="http://127.0.0.1:$CDP_PORT" AGENT_BROWSER_TARGET="$(lease_get "$id" target)" \
@@ -314,9 +381,10 @@ cmd_py() {
 cmd_check() {
     local site="" slot="0"
     while [ $# -gt 0 ]; do
+        if slot_flag "$@"; then slot="$SLOT_VALUE"; shift "$SLOT_SHIFT"; continue; fi
         case "$1" in
-            --lease) need_lease "${2:-}"; slot="$SLOT"; shift 2 ;;
-            --slot) [ $# -ge 2 ] || err usage "--slot needs a value"; slot="${2:-}"; shift 2 ;;
+            --lease) [ $# -ge 2 ] || err usage "--lease needs a value"; need_lease "${2:-}"; slot="$SLOT"; shift 2 ;;
+            -*) err usage "unknown option $1" "agent-browser check <github|linkedin|URL> [--lease ID] [--slot N]" ;;
             *) site="$1"; shift ;;
         esac
     done
@@ -375,10 +443,11 @@ PY
 cmd_wipe() {
     local yes=0 slot="0"
     while [ $# -gt 0 ]; do
+        if slot_flag "$@"; then slot="$SLOT_VALUE"; shift "$SLOT_SHIFT"; continue; fi
         case "$1" in
             --yes) yes=1; shift ;;
-            --slot) [ $# -ge 2 ] || err usage "--slot needs a value"; slot="${2:-}"; shift 2 ;;
-            *) shift ;;
+            -*) err usage "unknown option $1" "agent-browser wipe --yes [--slot N]" ;;
+            *) err usage "unknown argument $1" "agent-browser wipe --yes [--slot N]" ;;
         esac
     done
     use_slot "$slot"
@@ -393,13 +462,13 @@ usage() {
 agent-browser: logged-in browser for agents; the human does every login.
 usage:
   agent-browser [status [--slot N]]
-  agent-browser start [--slot N|auto] [URL]   # takes a lease: your own tab
+  agent-browser start [--slot N|auto|--slot=N] [URL]   # takes a lease: your own tab
   agent-browser py <lease> script.py [args]   # Playwright attached to your tab
   agent-browser show <lease>                  # bring your tab to the viewer's front
-  agent-browser check <github|linkedin|URL> [--lease ID]
+  agent-browser check <github|linkedin|URL> [--lease ID] [--slot N|--slot=N]
   agent-browser stop <lease>                  # browser stops when the last lease goes
-  agent-browser stop --force [--slot N]       # kill a slot regardless of leases
-  agent-browser wipe --yes [--slot N]
+  agent-browser stop --force [--slot N|--slot=N]   # kill a slot regardless of leases
+  agent-browser wipe --yes [--slot N|--slot=N]
 EOF
 }
 

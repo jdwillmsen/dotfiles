@@ -28,18 +28,30 @@ def _target_id(ctx, pg):
 
 def _record_target(target):
     path = os.environ.get("AGENT_BROWSER_LEASE_FILE")
-    if not path:
+    if not path or not os.path.exists(path):
         return
-    with open(path) as f:
-        lines = [l for l in f.read().splitlines() if not l.startswith("target=")]
+    try:
+        with open(path) as f:
+            lines = [l for l in f.read().splitlines() if not l.startswith("target=")]
+    except FileNotFoundError:
+        return
     lines.append(f"target={target}")
     # Replace atomically: agent-browser reads lease files without this
     # script's lock, and a truncated file would read as no lease. The dot
     # keeps the temporary file out of agent-browser's lease glob.
     tmp = os.path.join(os.path.dirname(path), "." + os.path.basename(path) + ".tmp")
-    with open(tmp, "w") as f:
-        f.write("\n".join(lines) + "\n")
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        if os.path.exists(path):
+            os.replace(tmp, path)
+        else:
+            os.unlink(tmp)
+    except FileNotFoundError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def page(p):

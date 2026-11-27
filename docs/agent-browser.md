@@ -40,7 +40,8 @@ Use a slot when a task needs a clean session or cookie state no other agent can 
 navigation or sign-out in slot 0 reaches every tab there). A slot does not isolate the
 account's data on the server: two agents editing one LinkedIn profile conflict in any slot.
 A slot's profile may be signed in to a different account from slot 0, so agents confirm the
-signed-in user before acting there. Otherwise share slot 0. Each Chrome costs roughly 300-500 MB of memory.
+signed-in user before acting there. Otherwise share slot 0. Each Chrome costs roughly
+300-500 MB of memory.
 
 ## Use
 

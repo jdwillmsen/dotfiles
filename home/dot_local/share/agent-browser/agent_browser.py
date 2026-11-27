@@ -33,8 +33,13 @@ def _record_target(target):
     with open(path) as f:
         lines = [l for l in f.read().splitlines() if not l.startswith("target=")]
     lines.append(f"target={target}")
-    with open(path, "w") as f:
+    # Replace atomically: agent-browser reads lease files without this
+    # script's lock, and a truncated file would read as no lease. The dot
+    # keeps the temporary file out of agent-browser's lease glob.
+    tmp = os.path.join(os.path.dirname(path), "." + os.path.basename(path) + ".tmp")
+    with open(tmp, "w") as f:
         f.write("\n".join(lines) + "\n")
+    os.replace(tmp, path)
 
 
 def page(p):

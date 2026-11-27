@@ -114,6 +114,7 @@ jira_check='import json,sys; d=json.load(sys.stdin); post=d["hooks"]["PostToolUs
  assert len(entries)==1, "jira transition entries %d" % len(entries); \
  assert entries[0]["hooks"]==[{"type":"command","command":"$HOME/.claude/hooks/verify-jira-transition.sh"}], entries'
 out="$(printf '' | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
+out="$(printf '%s' "$out" | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"
 echo "$out" | "$PY" -c "$jira_check; print(\"PASS\")"
 existing='{"hooks":{"PostToolUse":[{"matcher":"Write","hooks":[{"type":"command","command":"my-post"}]}]}}'
 out="$(printf '%s' "$existing" | bash "$here/home/private_dot_claude/modify_settings.json.json.tmpl")"

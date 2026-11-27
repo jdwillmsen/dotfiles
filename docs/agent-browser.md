@@ -26,8 +26,8 @@ Several agent sessions use the browser at once. Before leases, every agent drove
 
 - **Lease.** `start` records a lease (`$RUN/leases/<id>`) and opens a tab only that lease
   drives. `stop <lease>` closes that tab and stops the slot only when no live lease remains.
-  A bare `stop` is refused while leases are live; `stop --force` overrides. `py`, `check` and
-  `show` refresh a lease; one unused for `AGENT_BROWSER_LEASE_TTL` (2 h) expires, so a crashed
+  A bare `stop` is a safe no-op (`state: kept`) while leases are live; `stop --force` overrides.
+  `py`, `check` and `show` refresh a lease; one unused for `AGENT_BROWSER_LEASE_TTL` (2 h) expires, so a crashed
   agent cannot hold the browser up forever. `start`/`stop` serialise on a `flock`.
 - **Slot.** Slot 0 is shared: the original ports and profile, which every plain `start` joins.
   `start --slot auto` takes the first free isolated slot (1 to `AGENT_BROWSER_MAX_SLOTS - 1`,

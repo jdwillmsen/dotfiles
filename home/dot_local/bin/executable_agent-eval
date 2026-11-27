@@ -115,7 +115,7 @@ SECRET_RES = (
     re.compile(r"(?i)\b[a-z0-9_-]*(?:token|secret|passw(?:or)?d|pwd|api[_-]?key|credential)[a-z0-9_-]*"
                r"\s*[=:]\s*(?:\"[^\"]*\"|'[^']*'|\S+)"),
     re.compile(r"(?i)\bbearer\s+\S+"),
-    re.compile(r"\b(?:gh[pousr]_|github_pat_|sk-|xox[abprs]-|AKIA)[A-Za-z0-9_-]{8,}"),
+    re.compile(r"\b(?:gh[pousr]_|github_pat_|sk-|xox[abprs]-|AKIA)[A-Za-z0-9_.-]{8,}"),
     re.compile(r"[A-Za-z0-9+/_]{32,}={0,2}"),
 )
 # First match wins; the more specific shapes sit above the broad ones.

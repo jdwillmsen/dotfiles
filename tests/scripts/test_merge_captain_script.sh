@@ -4780,4 +4780,21 @@ if grep -q 'app_jwt(creds, self\.now)' "$tool"; then
 fi
 
 shellcheck -s bash "$0"
+
+# Stateless installation tokens (ghs_<app>_<JWT>, dots and dashes) are accepted, scrubbed whole, and anything that
+# could carry whitespace or a control character into a header is still refused.
+python3 - "$tool" <<'PY' || fail "stateless token shape or scrub regressed"
+import importlib.machinery, importlib.util, sys
+sys.dont_write_bytecode = True
+spec = importlib.util.spec_from_loader("mc", importlib.machinery.SourceFileLoader("mc", sys.argv[1]))
+mc = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mc)
+tok = "gh" + "s_123_eyJhbGciOiJSUzI1NiJ9." + "a-b_" * 120 + ".Sig-nature_00"
+assert mc.TOKEN_SHAPE.fullmatch(tok)
+for bad in (tok + " x", tok + "\n", tok.replace(".", "\t", 1), "short"):
+    assert not mc.TOKEN_SHAPE.fullmatch(bad), repr(bad[-8:])
+out = mc.scrub("denied for " + tok + " today")
+assert tok[:12] not in out and "Sig-nature" not in out, out
+PY
+
 echo "test_merge_captain_script: OK"

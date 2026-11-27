@@ -1,0 +1,3 @@
+{{- /* The Minecraft console CLI lives with the charts it drives; link it only where that checkout exists. */ -}}
+{{- $mc := joinPath .chezmoi.homeDir "projects/jdwillmsen/jdw-deployments/tools/mc" -}}
+{{- if stat $mc }}{{ $mc }}{{ end -}}

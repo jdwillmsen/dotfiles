@@ -50,10 +50,13 @@ For each ticket from the first JQL above:
    - `none` — no PR found.
    - `obsolete` — the work is moot (superseded, done elsewhere, no longer wanted).
 3. **Act:**
-   - Merged, rolled out and verified live **by this session** → transition to Done,
-     comment the evidence (PR link, merge commit, rollout run, live check).
-   - Everything else that looks finished (`merged`, `live` found by the sweep,
-     `obsolete`, won't-do) → do not transition; put it in the owner decision.
+   - Done only for a PR **this session merged**, then rolled out and verified
+     live itself → transition to Done, comment the evidence (PR link, merge
+     commit, rollout run, live check).
+   - A PR the sweep finds live but this session did not merge → owner decision,
+     never Done, however strong the evidence.
+   - Everything else that looks finished (`merged`, `obsolete`, won't-do) → do
+     not transition; put it in the owner decision.
    - `none` and stale (no update for 7+ days) → stuck; name the blocker.
 4. **Verify every transition.** Re-read the ticket with `getJiraIssue` and
    compare the status; `transitionJiraIssue` can return success with nothing
@@ -83,7 +86,7 @@ owning stream when they say so.
 
 One message, in this order, each item one line with the key and a link:
 
-- **Done** — tickets this session moved to Done, with the evidence link.
+- **Done** — tickets this session merged, rolled out and moved to Done, with the evidence link.
 - **Moved** — other transitions made (e.g. In Progress → Review).
 - **Stuck** — key, blocker, the next step.
 - **Owner decision** — one numbered list the owner can answer in one reply:

@@ -94,24 +94,61 @@ cat >"$bin/ssh" <<'EOF'
 #!/usr/bin/env bash
 host=""
 while [ $# -gt 0 ]; do
-    case "$1" in -o) shift 2 ;; *) host="$1"; break ;; esac
+    case "$1" in
+        -o) shift 2 ;;
+        --) host="$2"; shift 2; break ;;
+        -*) echo "stub ssh: option reached ssh: $1" >>"$SSH_LOG"; exit 255 ;;
+        *) echo "stub ssh: host passed without --" >>"$SSH_LOG"; exit 255 ;;
+    esac
 done
+if [ "${1:-}" = hostname ]; then
+    case "$host" in alias-of-me) hostname ;; *) echo "remote-$host" ;; esac
+    exit 0
+fi
 script="$(cat)"
 case "$host" in unreachable*) echo "ssh: connect to host $host: timed out" >&2; exit 255 ;; esac
 if printf '%s' "$script" | grep -q 'activeVersion'; then
     sed "s/REFSHA/$REFSHA/" "$FIXTURES/probe-$(cat "$STATE_DIR/$host" 2>/dev/null || echo behind).txt"
 else
-    printf '%s %s\n' "$host" "$(printf '%s' "$script" | tail -n1)" >>"$SSH_LOG"
+    step="$(printf '%s' "$script" | tail -n1)"
+    printf '%s %s\n' "$host" "$step" >>"$SSH_LOG"
+    case "$host:$step" in "${FAIL_STEP:-none}") exit 1 ;; esac
     echo current >"$STATE_DIR/$host"
 fi
 EOF
 chmod +x "$bin/ssh"
 mkdir -p "$tmp/state"
 
-run() {  # args → $out, $rc
+# The local host runs its steps with a real `bash -s`, so every command those
+# steps name is stubbed under a fake HOME whose ~/.local/bin the preamble puts
+# first on PATH. Each stub logs, so a test can prove what ran locally.
+fakehome="$tmp/home"; llog="$tmp/local.log"
+mkdir -p "$fakehome/.local/bin" "$fakehome/.t3/runtime"
+printf '{\n  "activeVersion": "0.1.13"\n}\n' >"$fakehome/.t3/runtime/service-state.json"
+cat >"$fakehome/.local/bin/chezmoi" <<STUB
+#!/usr/bin/env bash
+echo "chezmoi \$*" >>"$llog"
+case "\$1" in
+    git) echo "$refsha" ;;
+    source-path) echo "$fakehome" ;;
+    execute-template) echo true ;;
+esac
+STUB
+cat >"$fakehome/.local/bin/npx" <<STUB
+#!/usr/bin/env bash
+echo "npx \$*" >>"$llog"
+STUB
+for pair in no-mistakes:1.99.1 codex:0.170.0 cursor-agent:2026.10.22-27dcf5f; do
+    printf '#!/usr/bin/env bash\necho "%s %s"\n' "${pair%%:*}" "${pair#*:}" >"$fakehome/.local/bin/${pair%%:*}"
+done
+touch "$fakehome/run_onchange_43-install-agent-clis.sh.tmpl"
+chmod +x "$fakehome/.local/bin/"*
+
+run() {  # args → $out, $rc; FLEET_* and FAIL_STEP may be preset by the caller
     set +e
     out="$(PATH="$bin:$PATH" FIXTURES="$fx" REFSHA="$refsha" SSH_LOG="$log" STATE_DIR="$tmp/state" \
-        FLEET_LOCAL_HOST=nothere FLEET_UNDER_T3=0 FLEET_T3_LATEST=0.1.13 \
+        FLEET_LOCAL_HOST="${FLEET_LOCAL_HOST-nothere}" FLEET_UNDER_T3="${FLEET_UNDER_T3:-0}" \
+        FLEET_T3_LATEST="${FLEET_T3_LATEST-0.1.13}" FAIL_STEP="${FAIL_STEP:-none}" HOME="$fakehome" \
         python3 "$cli" --source "$src" "$@")"
     rc=$?
     set -e
@@ -142,5 +179,49 @@ grep -q 'npx --yes t3@latest update' "$log" || fail "t3 step" "$(cat "$log")"
 run --apply --check
 [ "$rc" = 2 ] || fail "conflicting modes must be a usage error, got $rc" "$out"
 grep -q '^error:' <<<"$out" || fail "usage error goes to stdout" "$out"
+
+# A host name that ssh would read as an option is refused before any ssh runs.
+rm -f "$log"
+run --check --host=-oProxyCommand=touch
+[ "$rc" = 2 ] || fail "option-shaped host must be a usage error, got $rc" "$out"
+grep -q '^error: invalid host name' <<<"$out" || fail "invalid host message" "$out"
+[ ! -e "$log" ] || fail "ssh ran for an invalid host" "$(cat "$log")"
+
+# A failed npm lookup is a reference error, not every host reading as behind.
+cat >"$bin/npm" <<'STUB'
+#!/usr/bin/env bash
+echo "npm ERR! network" >&2; exit 1
+STUB
+chmod +x "$bin/npm"
+FLEET_T3_LATEST='' run --check --host devbox2
+[ "$rc" = 1 ] || fail "npm failure must exit 1, got $rc" "$out"
+grep -q '^error: could not read the reference versions: npm view t3 version failed' <<<"$out" ||
+    fail "npm failure reported as a reference error" "$out"
+if grep -q 'behind' <<<"$out"; then fail "npm failure blamed the host" "$out"; fi
+rm -f "$bin/npm"
+
+# A failed dotfiles step stops that host; the next host still runs.
+rm -rf "$log" "$tmp/state"; mkdir -p "$tmp/state"
+FAIL_STEP="devbox2:chezmoi update --no-tty" run --apply --host devbox2 --host devbox3
+[ "$rc" = 1 ] || fail "failed step must exit 1, got $rc" "$out"
+[ "$(grep -c '^devbox2 ' "$log")" = 1 ] || fail "devbox2 ran steps after dotfiles failed" "$(cat "$log")"
+grep -q '^  devbox2,agent-clis,skipped (dotfiles failed)$' <<<"$out" || fail "skipped row" "$out"
+grep -q '^devbox3 npx --yes t3@latest update$' "$log" || fail "devbox3 should still run" "$(cat "$log")"
+
+# Inside T3 on the local box, its t3 step never runs: no local npx at all.
+rm -rf "$log" "$llog" "$tmp/state"; mkdir -p "$tmp/state"
+FLEET_LOCAL_HOST=devbox2 FLEET_UNDER_T3=1 run --apply --host devbox2
+[ "$rc" = 0 ] || fail "local apply under T3 should pass, got $rc" "$out"
+grep -q '^chezmoi update --no-tty$' "$llog" || fail "local dotfiles step did not run locally" "$(cat "$llog")"
+if grep -q '^npx' "$llog"; then fail "local t3 step ran under T3" "$(cat "$llog")"; fi
+[ ! -e "$log" ] || fail "local host went over ssh" "$(cat "$log")"
+
+# An alias that resolves to this machine over ssh is local and runs last.
+FLEET_LOCAL_HOST='' FLEET_UNDER_T3=1 run --host alias-of-me --host devbox2
+[ "$rc" = 0 ] || fail "dry run with alias, got $rc" "$out"
+plan_rows="$(grep -E '^  (alias-of-me|devbox2),' <<<"$out" | cut -d, -f1-3)"
+expected="$(printf '%s\n' '  devbox2,ssh,dotfiles' '  devbox2,ssh,agent-clis' '  devbox2,ssh,t3' \
+    '  alias-of-me,local,dotfiles' '  alias-of-me,local,agent-clis')"
+[ "$plan_rows" = "$expected" ] || fail "alias not treated as local" "$out"
 
 echo "PASS"

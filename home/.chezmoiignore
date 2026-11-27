@@ -69,6 +69,7 @@ run_once_49-install-dev-tools.sh.tmpl
 .local/bin/devbox-health
 .local/bin/mc
 .local/bin/memory-lint
+.local/bin/fleet-update
 .local/bin/merge-captain
 .local/bin/stream
 .local/bin/t3-session-expiry

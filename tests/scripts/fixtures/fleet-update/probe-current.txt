@@ -1,0 +1,5 @@
+dotfiles=REFSHA
+t3=0.1.13
+cli.no-mistakes=1.99.1
+cli.codex=0.170.0
+cli.cursor-agent=2026.10.22-27dcf5f

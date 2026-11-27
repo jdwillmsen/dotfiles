@@ -10,6 +10,9 @@ the question is never "how does linger work" — it is "what is supposed to be
 running, and which layer just went away." Re-deriving that from `ps` under
 pressure is how a five-minute outage becomes an hour.
 
+The web UIs elsewhere in the homelab (Proxmox, ArgoCD, Grafana, Vault and the
+rest), with where each login lives, are in [`homelab-urls.md`](homelab-urls.md).
+
 ## The inventory
 
 | Service | Scope | Owned by | Enabled | Listens on | Health check |

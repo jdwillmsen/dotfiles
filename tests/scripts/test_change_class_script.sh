@@ -1073,6 +1073,8 @@ exc_plan jdwillmsen/jdw-deployments R3 "Restart the lab server and the main mine
 exc_plan jdwillmsen/jdw-deployments R3 "Restart the crew lab and the survival server."
 exc_plan jdwillmsen/gameops R3 "Roll out crew-control and the auth service to prd."
 exc_plan jdwillmsen/jdw-deployments R3 "Restart the proving grounds server, then the one players use."
+exc_plan jdwillmsen/jdw-deployments R3 "Purchase a new dedicated server for the crew lab."
+grep -q 'plan-money,R3,plan' "$out" || fail "a purchase plan was not caught by plan-money" "$(cat "$out")"
 exc_plan jdwillmsen/jdw-deployments R3 "Tune FWB view distance in prd."
 exc_plan jdwillmsen/jdw-deployments R3 "Wipe the crew-lab world."
 

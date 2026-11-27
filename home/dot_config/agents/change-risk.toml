@@ -254,7 +254,13 @@ plan = ['(?i)\brotat(e|ing)\b[^.\n]{0,30}\b(secret|key|token|credential|password
 id = "plan-people-impact"
 tag = "players"
 tier = "R3"
-plan = ['(?i)\brestart\b[^.\n]{0,40}\b(server|game|minecraft|players?)', '(?i)\b(players?|users?)\b[^.\n]{0,30}\b(online|connected|mid-?game)', '(?i)\b(billing|payment|invoice|spend|purchase)s?\b']
+plan = ['(?i)\brestart\b[^.\n]{0,40}\b(server|game|minecraft|players?)', '(?i)\b(players?|users?)\b[^.\n]{0,30}\b(online|connected|mid-?game)']
+
+[[rule]]
+id = "plan-money"
+tag = "money"
+tier = "R3"
+plan = ['(?i)\b(billing|payment|invoice|spend|purchase)s?\b']
 
 [[rule]]
 id = "plan-exposure"

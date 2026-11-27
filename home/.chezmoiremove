@@ -23,3 +23,7 @@
 .claude/commands/pr.md
 .claude/commands/standup.md
 .claude/commands/explain.md
+
+# The session-summary Stop hook was never wired into settings.json, and the
+# statusline already shows the session's cost and duration.
+.claude/hooks/session-summary.sh

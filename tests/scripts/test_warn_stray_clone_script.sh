@@ -93,11 +93,28 @@ for bad in 'not json' '' '{"tool_input":{}}' '{"tool_input":{"command":"git clon
     [ -z "$out" ] || fail "bad input should print nothing: $bad" "$out"
 done
 
-# The fast path keeps unrelated calls cheap: a hundred of them in well under the hook budget.
+# An escaped quote earlier in the command does not end the scan before the clone.
+warns "clone after an escaped quote" 'git commit -m "say \"hi\"" && git clone https://github.com/a/b ~/projects/a/b-copy'
+
+# The fast path tests the command only. A session in a worktree has "worktree" in its cwd and transcript path, and
+# that alone must not start Python: a stub python that leaves a marker proves it never ran.
+mkdir -p "$tmp/stubpy"
+for py in python3 python; do
+    printf '#!/usr/bin/env bash\ntouch "%s/python-ran"\nexit 1\n' "$tmp" >"$tmp/stubpy/$py"
+    chmod +x "$tmp/stubpy/$py"
+done
+wt_cwd="$H/worktrees/jdwlabs/platform/feat/JDW-1-clone-fix"
+fixture="{\"session_id\":\"s\",\"transcript_path\":\"$H/.claude/projects/-home-worktrees-clone/s.jsonl\",\"cwd\":\"$wt_cwd\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"ls -la\",\"description\":\"List files\"}}"
+printf '%s' "$fixture" | HOME="$H" PATH="$tmp/stubpy:$PATH" "$hook" >/dev/null
+[ ! -e "$tmp/python-ran" ] || fail "fast path started python for a command with no clone or worktree"
+printf '%s' "${fixture/ls -la/git worktree list}" | HOME="$H" PATH="$tmp/stubpy:$PATH" "$hook" >/dev/null
+[ -e "$tmp/python-ran" ] || fail "the stub check is vacuous: a worktree command should reach python"
+
+# And it stays cheap: a hundred such calls in well under the hook budget.
 start=$(date +%s%N)
-for _ in $(seq 100); do printf '%s' '{"tool_input":{"command":"ls -la"}}' | HOME="$H" "$hook" >/dev/null; done
+for _ in $(seq 100); do printf '%s' "$fixture" | HOME="$H" "$hook" >/dev/null; done
 ms=$(( ($(date +%s%N) - start) / 1000000 ))
-[ "$ms" -lt 3000 ] || fail "fast path too slow: ${ms}ms for 100 calls"
+[ "$ms" -lt 1500 ] || fail "fast path too slow: ${ms}ms for 100 calls"
 
 shellcheck -s bash "$hook"
 echo "PASS"

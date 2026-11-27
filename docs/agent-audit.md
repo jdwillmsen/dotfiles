@@ -174,3 +174,8 @@ with `NoNewPrivileges=yes` and `PrivateTmp=yes`. The only repetition is
 bounded: the GitHub range split stops at single days, and a timed-out Jira
 create is not re-sent in the same run; the run only polls search for it. The weekly scan of about 600 transcript files took
 under 30 s on the devbox, most of it in the GitHub searches.
+
+## Memory hygiene
+
+Lost, duplicated and oversized auto-memory is a separate read-only check,
+`memory-lint`: see [`memory-lint.md`](memory-lint.md).

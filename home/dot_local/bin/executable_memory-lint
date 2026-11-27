@@ -1,0 +1,323 @@
+#!/usr/bin/env python3
+"""memory-lint — flag Claude Code auto-memory that is lost, duplicated or bloated.
+
+Scans the memory directories under ~/.claude/projects and reports three things:
+memory whose project directory will never be opened again (so no session loads
+it), notes duplicated across directories by file name or near-identical text,
+and MEMORY.md indexes long enough to crowd the context. It only reads: nothing
+under the projects root is ever written, moved or deleted.
+
+Agent-facing: stdout is TOON, including errors.
+"""
+import argparse
+import collections
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+EXIT_FAIL = 1
+EXIT_USAGE = 2
+
+INDEX = "MEMORY.md"
+DEFAULT_ROOT = "~/.claude/projects"
+DEFAULT_INDEX_LINES = 50
+DEFAULT_SIMILARITY = 0.8
+# Below this many words, two short notes look alike for want of content, not
+# because one copies the other.
+MIN_WORDS = 20
+SHINGLE = 3
+# The first few records of a transcript carry its cwd; reading whole files
+# would cost seconds on a box with hundreds of long sessions.
+CWD_SCAN_LINES = 40
+CWD_SCAN_FILES = 5
+
+
+def fail(msg, code=EXIT_FAIL):
+    print(f"error: {toon_scalar(msg)}")
+    print(f"code: {code}")
+    sys.exit(code)
+
+
+def toon_scalar(v):
+    if v is None:
+        return "null"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return str(v)
+    s = str(v)
+    if s == "" or s != s.strip() or re.search(r'[,:"\\\n\r\t\[\]{}]', s) or s in ("true", "false", "null") \
+            or re.fullmatch(r"-?\d+(\.\d+)?", s):
+        return json.dumps(s, ensure_ascii=False)
+    return s
+
+
+def table(name, fields, rows):
+    if not rows:
+        return [f"{name}[0]: none"]
+    out = [f"{name}[{len(rows)}]{{{','.join(fields)}}}:"]
+    out += ["  " + ",".join(toon_scalar(r[f]) for f in fields) for r in rows]
+    return out
+
+
+# ── Project directory resolution ─────────────────────────────────────────────
+
+def encode(path):
+    # Claude Code names a project's directory by replacing every character
+    # that is not a letter or digit in its absolute path with "-".
+    return re.sub(r"[^A-Za-z0-9]", "-", str(path))
+
+
+def transcript_cwd(project):
+    counts = collections.Counter()
+    files = sorted(project.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for f in files[:CWD_SCAN_FILES]:
+        try:
+            with f.open(encoding="utf-8", errors="replace") as fh:
+                for i, line in enumerate(fh):
+                    if i >= CWD_SCAN_LINES:
+                        break
+                    try:
+                        cwd = json.loads(line).get("cwd")
+                    except (json.JSONDecodeError, AttributeError):
+                        continue
+                    if isinstance(cwd, str) and encode(cwd) == project.name:
+                        counts[cwd] += 1
+                        break
+        except OSError:
+            continue
+    return counts.most_common(1)[0][0] if counts else None
+
+
+def resolve_existing(name):
+    """Find an existing directory whose encoded path equals name, or None.
+
+    The encoding is lossy, so a name is matched by walking the filesystem one
+    component at a time and keeping only branches whose encoding is a prefix.
+    """
+    stack = [Path("/")]
+    while stack:
+        cur = stack.pop()
+        try:
+            entries = list(os.scandir(cur))
+        except OSError:
+            continue
+        for e in entries:
+            try:
+                if not e.is_dir():
+                    continue
+            except OSError:
+                continue
+            cand = cur / e.name
+            enc = encode(cand)
+            if enc == name:
+                return cand
+            if name.startswith(enc + "-"):
+                stack.append(cand)
+    return None
+
+
+def tmp_prefixes():
+    raw = os.environ.get("MEMORY_LINT_TMP_PREFIXES", "/tmp:/var/tmp")
+    return [p.rstrip("/") for p in raw.split(":") if p]
+
+
+def is_scratch(path, name):
+    if path and ("/.t3/scratch/" in path + "/" or re.search(r"/\.?t3-scratch-", path)):
+        return True
+    return "-t3-scratch-" in name
+
+
+def is_tmp(path, name):
+    prefixes = tmp_prefixes()
+    if path:
+        return any(path == p or path.startswith(p + "/") for p in prefixes)
+    return any(name == encode(p) or name.startswith(encode(p) + "-") for p in prefixes)
+
+
+def orphan_reason(project):
+    """Why no future session will load this project's memory, or None."""
+    cwd = transcript_cwd(project)
+    if is_scratch(cwd, project.name):
+        return "scratch", cwd
+    if is_tmp(cwd, project.name):
+        return "tmp", cwd
+    if cwd:
+        return (None, cwd) if os.path.isdir(cwd) else ("missing", cwd)
+    found = resolve_existing(project.name)
+    return (None, str(found)) if found else ("missing", None)
+
+
+# ── Notes ────────────────────────────────────────────────────────────────────
+
+def body_words(text):
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            text = text[end + 4:]
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def shingles(words):
+    if len(words) < SHINGLE:
+        return {tuple(words)}
+    return {tuple(words[i:i + SHINGLE]) for i in range(len(words) - SHINGLE + 1)}
+
+
+def jaccard(a, b):
+    return len(a & b) / len(a | b) if a and b else 0.0
+
+
+def scan(root):
+    dirs, empty = [], 0
+    for project in sorted(p for p in root.iterdir() if p.is_dir()):
+        mem = project / "memory"
+        if not mem.is_dir():
+            continue
+        notes = sorted(p for p in mem.glob("*.md") if p.is_file() and p.name != INDEX)
+        index = mem / INDEX
+        if not notes and not index.is_file():
+            empty += 1
+            continue
+        dirs.append({"project": project, "mem": mem, "notes": notes, "index": index})
+    return dirs, empty
+
+
+def find_duplicates(dirs, threshold):
+    rows, seen = [], set()
+    by_name = collections.defaultdict(list)
+    docs = []
+    for d in dirs:
+        for n in d["notes"]:
+            label = f"{d['project'].name}/{n.name}"
+            by_name[n.name].append(label)
+            try:
+                words = body_words(n.read_text(encoding="utf-8", errors="replace"))
+            except OSError:
+                continue
+            if len(words) >= MIN_WORDS:
+                docs.append((d["project"].name, label, shingles(words)))
+
+    for labels in by_name.values():
+        for i, a in enumerate(labels):
+            for b in labels[i + 1:]:
+                seen.add((a, b))
+                rows.append({"kind": "name", "similarity": None, "a": a, "b": b})
+
+    sims = {}
+    for i, (da, a, sa) in enumerate(docs):
+        for db, b, sb in docs[i + 1:]:
+            if da == db:
+                continue
+            s = jaccard(sa, sb)
+            sims[(a, b)] = s
+            if s >= threshold and (a, b) not in seen:
+                rows.append({"kind": "content", "similarity": round(s, 2), "a": a, "b": b})
+    for r in rows:
+        if r["kind"] == "name":
+            s = sims.get((r["a"], r["b"]), sims.get((r["b"], r["a"])))
+            r["similarity"] = round(s, 2) if s is not None else "n/a"
+    return rows
+
+
+def long_indexes(dirs, limit):
+    rows = []
+    for d in dirs:
+        if not d["index"].is_file():
+            continue
+        try:
+            with d["index"].open(encoding="utf-8", errors="replace") as fh:
+                lines = sum(1 for _ in fh)
+        except OSError:
+            continue
+        if lines > limit:
+            rows.append({"dir": d["project"].name, "lines": lines, "limit": limit})
+    return rows
+
+
+# ── CLI ──────────────────────────────────────────────────────────────────────
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        fail(f"{message} (see memory-lint --help)", EXIT_USAGE)
+
+
+def build_parser():
+    p = Parser(
+        prog="memory-lint",
+        description="Flag Claude Code memory that no session will load, notes duplicated across "
+                    "project dirs, and MEMORY.md indexes over the line limit. Read-only.",
+    )
+    p.add_argument("--root", default=os.environ.get("MEMORY_LINT_ROOT", DEFAULT_ROOT),
+                   help=f"projects directory to scan (default {DEFAULT_ROOT})")
+    p.add_argument("--index-lines", type=int, default=DEFAULT_INDEX_LINES,
+                   help=f"flag MEMORY.md indexes longer than this (default {DEFAULT_INDEX_LINES})")
+    p.add_argument("--similarity", type=float, default=DEFAULT_SIMILARITY,
+                   help=f"word-shingle Jaccard at or above which two notes count as near-identical "
+                        f"(default {DEFAULT_SIMILARITY})")
+    p.add_argument("--full", action="store_true", help="also list every note in each orphaned dir")
+    p.add_argument("--json", action="store_true", help="print JSON instead of TOON")
+    return p
+
+
+def main(argv):
+    args = build_parser().parse_args(argv)
+    if not 0 < args.similarity <= 1:
+        fail("--similarity must be in (0, 1]", EXIT_USAGE)
+    if args.index_lines < 1:
+        fail("--index-lines must be at least 1", EXIT_USAGE)
+    root = Path(args.root).expanduser()
+    if not root.is_dir():
+        fail(f"projects root not found: {root}")
+
+    dirs, empty = scan(root)
+    orphans, orphan_notes = [], []
+    for d in dirs:
+        reason, path = orphan_reason(d["project"])
+        if reason:
+            orphans.append({"dir": d["project"].name, "reason": reason, "notes": len(d["notes"]),
+                            "path": path or "unknown"})
+            orphan_notes += [{"dir": d["project"].name, "note": n.name} for n in d["notes"]]
+    dups = find_duplicates(dirs, args.similarity)
+    longs = long_indexes(dirs, args.index_lines)
+    issues = len(orphans) + len(dups) + len(longs)
+
+    if args.json:
+        print(json.dumps({"root": str(root), "dirs": len(dirs), "empty_dirs": empty,
+                          "notes": sum(len(d["notes"]) for d in dirs), "orphans": orphans,
+                          "orphan_notes": orphan_notes, "duplicates": dups, "long_indexes": longs,
+                          "issues": issues}, indent=2))
+        return 0
+
+    out = [
+        f"root: {toon_scalar(str(root))}",
+        f"dirs: {len(dirs)}",
+        f"empty_dirs: {empty}",
+        f"notes: {sum(len(d['notes']) for d in dirs)}",
+    ]
+    out += table("orphans", ["dir", "reason", "notes", "path"], orphans)
+    if args.full:
+        out += table("orphan_notes", ["dir", "note"], orphan_notes)
+    out += table("duplicates", ["kind", "similarity", "a", "b"], dups)
+    out += table("long_indexes", ["dir", "lines", "limit"], longs)
+    out.append(f"issues: {issues}")
+    hints = []
+    if orphans and not args.full:
+        hints.append("memory-lint --full  # list the notes in each orphaned dir")
+    if orphans:
+        hints.append("move a still-useful orphaned note into its stream's grouping-folder memory dir")
+    if dups:
+        hints.append("keep one copy of each duplicate, in the broadest dir that loads it")
+    if longs:
+        hints.append(f"trim MEMORY.md to one short line per note, under {args.index_lines} lines")
+    if hints:
+        out.append(f"help[{len(hints)}]:")
+        out += [f"  {h}" for h in hints]
+    print("\n".join(out))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

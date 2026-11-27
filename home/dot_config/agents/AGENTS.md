@@ -177,10 +177,12 @@ unsure, classify up. Put the result on the PR and ticket as labels
   never a bare `#N` or `repo #N`: the owner works across many repos and orgs,
   so a bare number names no repository and cannot be opened. This covers
   summaries, tables and status reports, not only PRs you create.
-- **In review loops, fix only what the finding is about**: decline nits and
-  scope creep, and file the rest with `jira-followup`.
+- **In review loops, fix only what each finding is about.** Decline what the
+  reviewer marked nit or out of scope, with a one-line reason on the thread —
+  never a security finding or one from the tier's required review. File
+  out-of-scope work worth doing as a follow-up ticket (Tickets).
 - **Before rebasing a stale PR, decide modernize, rework or close**, and say
-  which on the PR.
+  which on the PR; closing or force-pushing still needs the owner's OK.
 
 ## Devbox
 

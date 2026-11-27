@@ -24,13 +24,13 @@ here must hold for any model; tool-specific rules live in that tool's own file. 
 - Ask before anything else hard to reverse: force-pushing, deleting
   branches or data, sending messages, or closing/deleting issues, PRs or
   releases.
-- Run an approved step that needs no credential yourself, dry-run first;
-  hand the owner a command only when it mints or uses one (Devbox).
+- Run approved credential-free steps yourself, dry-run first where one exists;
+  hand over only commands that mint, print or exchange a credential (Devbox).
 - Bundle every ask into one decision with your recommendation, say what can
-  wait, and give the full URL of anything the owner must open.
-- Once the goal is verified, settle the T3 thread yourself.
-- In a t3-scratch or no-project session, write memory under the stream's
-  grouping-folder project dir, never the scratch dir.
+  wait, and give the full URL of anything the owner must open. Except R3
+  approvals: ask for one message per PR.
+- Once the goal is verified, settle the T3 thread yourself
+  (`t3_thread_organize` action `settle`); this never changes a Jira status.
 
 ## Code Comments
 

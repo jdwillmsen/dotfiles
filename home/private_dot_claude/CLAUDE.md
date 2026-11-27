@@ -42,5 +42,7 @@ specific to Claude Code.
   with `git worktree add` from the PR branch instead.
 - Agent-facing CLIs: invoke the `axi` skill when building, modifying, or
   reviewing one (`axi-quickref` for a fast check).
+- Memory: in a t3-scratch or no-project session, write it under the stream's
+  grouping-folder project dir, never the scratch dir.
 
 @RTK.md

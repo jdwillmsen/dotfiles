@@ -1,0 +1,19 @@
+repos:
+  - slug: jdwillmsen/dotfiles
+    version: "not-a-cli"
+agentClis:
+  - name: no-mistakes
+    kind: script
+    version: "v1.99.1"
+    # a comment between keys
+    selfUpdate: "update --beta --yes"
+  - name: codex
+    kind: npm
+    version: "0.170.0"
+    package: "@openai/codex"
+  - name: cursor-agent
+    kind: script
+    version: '2026.10.22-27dcf5f'  # trailing comment
+noMistakesAgent:
+  - name: claude
+    version: "9.9.9"

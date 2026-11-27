@@ -182,3 +182,36 @@ retired repos as `<repo>/<branch>` branches, and git bundles under
 `~/.local/bin/mc` is a link to `tools/mc` in the `jdwillmsen/jdw-deployments` checkout, created only where that
 checkout exists. It reaches every world with `--world fwb|lab|seed|pg`; `mc --help` lists the commands. Keep that
 checkout on `main` and pulled, or the link runs old code.
+
+## `fleet-update` — bring every devbox to what main declares
+
+Both devboxes drift: dotfiles not pulled, an agent CLI behind its pin, an old
+T3 runtime. `fleet-update` updates them in one pass and says which box is still
+behind. Hosts default to `devbox` and `devbox2`, reached by their tailnet names
+over SSH (`FLEET_HOSTS` or `--host` overrides); the box it runs on runs its
+steps locally.
+
+```bash
+fleet-update               # dry run (the default): print the plan, change nothing
+fleet-update --check       # read versions over ssh only; exit 1 if a host is behind
+fleet-update --apply       # run the plan, then the same check
+fleet-update --apply --skip-t3
+```
+
+Per host, in order:
+
+| Step | Command | Why |
+|---|---|---|
+| `dotfiles` | `chezmoi update --no-tty` | pull main and apply it |
+| `agent-clis` | render script 43 with `chezmoi execute-template` and pipe it to `bash` | `chezmoi update` re-runs 43 only when a pin changes, so a box that drifted under an unchanged pin stays behind. A converged box touches nothing |
+| `t3` | `npx --yes t3@latest update` | moves T3 to the latest release and restarts `t3code.service` |
+
+The T3 restart ends every agent session on that host, so the local box runs
+last, and its `t3` step is left out when `fleet-update` itself runs inside a T3
+thread there. Run that update from a plain SSH or tmux shell.
+
+The check compares each host with `origin/main` of the dotfiles repo (its
+commit and the `agentClis` pins) and with the newest `t3` on npm. A CLI ahead
+of its pin passes, since that is a pin to bump in the repo, not a box to
+update. Output is TOON; exit 0 when every host is current, 1 when any is
+behind, unreachable or a step failed, 2 for a usage error.

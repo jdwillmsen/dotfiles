@@ -1,0 +1,397 @@
+#!/usr/bin/env python3
+"""fleet-update — bring every devbox to the dotfiles, agent CLI and T3 versions
+that main declares, then report which box is behind.
+
+Agent-facing: stdout is TOON, errors included. Exit 0 when every host is at
+the wanted versions (or, for the dry run, when the plan was printed), 1 when a
+host is behind, unreachable or a step failed, 2 for a usage error.
+"""
+
+import argparse
+import os
+import re
+import shlex
+import socket
+import subprocess
+import sys
+
+VERSION = "1.0.0"
+DEFAULT_HOSTS = ["devbox", "devbox2"]
+DATA_PATH = "home/.chezmoidata.yaml"
+AGENT_SCRIPT = "run_onchange_43-install-agent-clis.sh.tmpl"
+OUTPUT_TAIL = 15
+
+# A non-interactive ssh shell sources no rc file, so neither ~/.local/bin nor
+# the nvm node that owns the npm-installed CLIs is on PATH. exports.sh is not
+# sourced because it also loads agent secrets into the environment, which a
+# version probe has no use for.
+PREAMBLE = r"""
+export PATH="$HOME/.local/bin:$HOME/bin:$PATH"
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" >/dev/null 2>&1
+[ -r "$HOME/.config/shell/node-fallback.sh" ] && . "$HOME/.config/shell/node-fallback.sh"
+"""
+
+# Same extraction as script 43's installed_version, so this tool and the
+# installer agree on what "the installed version" of a CLI is.
+PROBE_BODY = r"""
+ver() {
+    command -v "$1" >/dev/null 2>&1 || return 0
+    "$1" --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+[0-9A-Za-z.+-]*' | head -n1 || true
+}
+echo "dotfiles=$(chezmoi git -- rev-parse HEAD 2>/dev/null || true)"
+state="$HOME/.t3/runtime/service-state.json"
+t3=""
+[ -r "$state" ] && t3="$(grep -oE '"activeVersion"[[:space:]]*:[[:space:]]*"[^"]*"' "$state" | sed -E 's/.*"([^"]*)"$/\1/' | head -n1)"
+echo "t3=$t3"
+for name in __NAMES__; do
+    echo "cli.$name=$(ver "$name")"
+done
+"""
+
+STEPS = [
+    ("dotfiles", "chezmoi update --no-tty"),
+    # chezmoi re-runs script 43 only when its rendered text changes, so a box
+    # that drifted without a pin change is never converged by `update` alone.
+    # Rendering and running it directly is idempotent: a converged box touches
+    # no network and no package manager.
+    ("agent-clis",
+     'set -o pipefail; chezmoi execute-template --no-tty < "$(chezmoi source-path)/'
+     + AGENT_SCRIPT + '" | bash'),
+    ("t3", "npx --yes t3@latest update"),
+]
+
+T3_NOTE = ("the t3 step restarts t3code.service, which ends every agent "
+           "session on that host; --skip-t3 leaves it out")
+
+
+class UsageError(Exception):
+    pass
+
+
+# ── pure helpers (unit-tested) ────────────────────────────────────────────
+
+
+def toon_value(v):
+    s = "" if v is None else str(v)
+    if s == "" or re.search(r'[,:"\n]', s) or s != s.strip():
+        return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return s
+
+
+def toon_table(name, fields, rows):
+    if not rows:
+        return [f"{name}: none"]
+    out = [f"{name}[{len(rows)}]{{{','.join(fields)}}}:"]
+    for row in rows:
+        out.append("  " + ",".join(toon_value(row.get(f)) for f in fields))
+    return out
+
+
+def parse_agent_clis(text):
+    """Return [(name, version)] from the agentClis table of .chezmoidata.yaml.
+
+    A line parser rather than a YAML library, because PyYAML is not on every
+    box this runs on and the table's shape is fixed by script 43's template.
+    """
+    rows, inside, current = [], False, None
+    for line in text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith((" ", "\t", "-")):
+            inside = line.split(":", 1)[0].strip() == "agentClis"
+            continue
+        if not inside:
+            continue
+        m = re.match(r"^\s*-\s+name:\s*(.+?)\s*$", line)
+        if m:
+            current = [_unquote(m.group(1)), None]
+            rows.append(current)
+            continue
+        m = re.match(r"^\s+version:\s*(.+?)\s*$", line)
+        if m and current is not None and current[1] is None:
+            current[1] = _unquote(m.group(1))
+    return [(n, v) for n, v in rows if v is not None]
+
+
+def _unquote(s):
+    s = s.split(" #", 1)[0].strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
+        return s[1:-1]
+    return s
+
+
+def parse_probe(text):
+    """key=value lines from the probe → {"dotfiles", "t3", "clis": {name: ver}}."""
+    out = {"dotfiles": "", "t3": "", "clis": {}}
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if not sep:
+            continue
+        key, value = key.strip(), value.strip()
+        if key.startswith("cli."):
+            out["clis"][key[4:]] = value
+        elif key in ("dotfiles", "t3"):
+            out[key] = value
+    return out
+
+
+def version_key(v):
+    head = re.split(r"[-+]", v.strip().lstrip("vV"), 1)[0]
+    key = []
+    for part in head.split("."):
+        m = re.match(r"\d+", part)
+        if not m:
+            break
+        key.append(int(m.group(0)))
+    return tuple(key)
+
+
+def compare(installed, wanted):
+    if not installed:
+        return "missing"
+    if not wanted:
+        return "unknown"
+    if installed.lstrip("vV") == wanted.lstrip("vV"):
+        return "ok"
+    a, b = version_key(installed), version_key(wanted)
+    if not a or not b or a == b:
+        return "differs"
+    return "behind" if a < b else "ahead"
+
+
+def compare_sha(installed, wanted):
+    if not installed:
+        return "missing"
+    if not wanted:
+        return "unknown"
+    return "ok" if installed == wanted else "behind"
+
+
+def version_rows(host, probe, reference):
+    rows = [{
+        "host": host, "item": "dotfiles",
+        "installed": probe["dotfiles"][:12], "wanted": reference["dotfiles"][:12],
+        "status": compare_sha(probe["dotfiles"], reference["dotfiles"]),
+    }]
+    for name, wanted in reference["clis"]:
+        have = probe["clis"].get(name, "")
+        rows.append({"host": host, "item": name, "installed": have,
+                     "wanted": wanted, "status": compare(have, wanted)})
+    rows.append({"host": host, "item": "t3", "installed": probe["t3"],
+                 "wanted": reference["t3"], "status": compare(probe["t3"], reference["t3"])})
+    return rows
+
+
+# "ahead" passes: an installer that overshot its pin is a repo edit to make,
+# not a box to update, and script 43 already reports it on every run.
+PASSING = {"ok", "ahead"}
+
+
+def behind_hosts(rows):
+    seen = []
+    for r in rows:
+        if r["status"] not in PASSING and r["host"] not in seen:
+            seen.append(r["host"])
+    return seen
+
+
+def order_hosts(hosts, local):
+    """Remote hosts first, the local one last: its t3 restart may end this run."""
+    return [h for h in hosts if h != local] + [h for h in hosts if h == local]
+
+
+def build_plan(hosts, local, skip_t3=False, local_t3_blocked=False):
+    plan = []
+    for host in order_hosts(hosts, local):
+        for step, command in STEPS:
+            if step == "t3" and (skip_t3 or (host == local and local_t3_blocked)):
+                continue
+            plan.append({"host": host, "via": "local" if host == local else "ssh",
+                         "step": step, "command": command})
+    return plan
+
+
+# ── side effects ──────────────────────────────────────────────────────────
+
+
+def run_on(host, local, script, timeout):
+    if host == local:
+        argv = ["bash", "-s"]
+    else:
+        argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, "bash", "-s"]
+    try:
+        p = subprocess.run(argv, input=PREAMBLE + script, capture_output=True,
+                           text=True, timeout=timeout)
+        return p.returncode, p.stdout, p.stderr
+    except subprocess.TimeoutExpired:
+        return 124, "", f"timed out after {timeout}s"
+    except OSError as e:
+        return 127, "", str(e)
+
+
+def git(source, *args):
+    p = subprocess.run(["git", "-C", source, *args], capture_output=True, text=True)
+    if p.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)} failed: {p.stderr.strip()[:200]}")
+    return p.stdout
+
+
+def default_source():
+    try:
+        p = subprocess.run(["chezmoi", "source-path"], capture_output=True, text=True)
+        if p.returncode == 0 and p.stdout.strip():
+            # .chezmoiroot points chezmoi at home/; the repo is its parent.
+            return os.path.dirname(p.stdout.strip())
+    except OSError:
+        pass
+    return os.path.expanduser("~/.local/share/chezmoi")
+
+
+def load_reference(source, t3_override=None):
+    """What main declares, read from origin rather than this box's checkout,
+    which may itself be the box that is behind."""
+    git(source, "fetch", "--quiet", "origin", "main")
+    sha = git(source, "rev-parse", "origin/main").strip()
+    clis = parse_agent_clis(git(source, "show", f"origin/main:{DATA_PATH}"))
+    t3 = t3_override
+    if t3 is None:
+        p = subprocess.run(["npm", "view", "t3", "version"], capture_output=True, text=True)
+        t3 = p.stdout.strip().splitlines()[-1] if p.returncode == 0 and p.stdout.strip() else ""
+    return {"dotfiles": sha, "clis": clis, "t3": t3}
+
+
+def probe_script(names):
+    return PROBE_BODY.replace("__NAMES__", " ".join(shlex.quote(n) for n in names))
+
+
+def running_under_t3():
+    forced = os.environ.get("FLEET_UNDER_T3")
+    if forced in ("0", "1"):
+        return forced == "1"
+    try:
+        with open("/proc/self/cgroup", encoding="utf-8") as f:
+            return "t3code" in f.read()
+    except OSError:
+        return False
+
+
+def tail(text, n=OUTPUT_TAIL):
+    lines = text.strip().splitlines()
+    return lines[-n:]
+
+
+# ── commands ──────────────────────────────────────────────────────────────
+
+
+def cmd_check(hosts, local, reference, out):
+    rows, unreachable = [], []
+    for host in order_hosts(hosts, local):
+        rc, stdout, stderr = run_on(host, local, probe_script([n for n, _ in reference["clis"]]), 60)
+        if rc != 0:
+            unreachable.append({"host": host, "exit": rc, "error": (stderr.strip() or stdout.strip())[:160]})
+            continue
+        rows.extend(version_rows(host, parse_probe(stdout), reference))
+    out.append(f"reference: dotfiles={reference['dotfiles'][:12]} t3={reference['t3'] or 'unknown'}")
+    out.extend(toon_table("versions", ["host", "item", "installed", "wanted", "status"], rows))
+    if unreachable:
+        out.extend(toon_table("unreachable", ["host", "exit", "error"], unreachable))
+    behind = behind_hosts(rows) + [u["host"] for u in unreachable]
+    if behind:
+        out.append(f"summary: {len(behind)} of {len(hosts)} host(s) not current: {' '.join(behind)}")
+        out.append("help[1]:")
+        out.append("  fleet-update --apply   # update every host, then re-check")
+        return 1
+    out.append(f"summary: all {len(hosts)} host(s) current")
+    return 0
+
+
+def cmd_apply(plan, local, out):
+    results, failed = [], False
+    for item in plan:
+        rc, stdout, stderr = run_on(item["host"], local, item["command"] + "\n", 1800)
+        results.append({"host": item["host"], "step": item["step"],
+                        "result": "ok" if rc == 0 else f"failed (exit {rc})"})
+        if rc != 0:
+            failed = True
+            out.append(f"error: {item['host']} {item['step']} failed (exit {rc}); last output:")
+            out.extend("  " + line for line in tail(stdout + "\n" + stderr))
+    out.extend(toon_table("steps", ["host", "step", "result"], results))
+    return 1 if failed else 0
+
+
+def parse_args(argv):
+    p = argparse.ArgumentParser(
+        prog="fleet-update",
+        description="Update dotfiles, agent CLIs and T3 on every devbox, then report versions.")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="print the plan only (default)")
+    mode.add_argument("--check", action="store_true",
+                      help="read versions over ssh, change nothing; exit 1 if a host is behind")
+    mode.add_argument("--apply", action="store_true", help="run the plan, then check")
+    p.add_argument("--host", action="append", metavar="NAME",
+                   help="host to include (repeatable; default env FLEET_HOSTS or devbox devbox2)")
+    p.add_argument("--skip-t3", action="store_true", help="leave the T3 update out")
+    p.add_argument("--source", help="dotfiles repo used for the reference versions "
+                                    "(default: chezmoi source-path's parent)")
+    p.add_argument("--version", action="version", version=f"fleet-update {VERSION}")
+
+    def error(message):
+        raise UsageError(message)
+
+    p.error = error
+    return p.parse_args(argv)
+
+
+def main(argv=None):
+    out = []
+    try:
+        args = parse_args(sys.argv[1:] if argv is None else argv)
+    except UsageError as e:
+        print(f"error: {e}\nhelp: fleet-update --help")
+        return 2
+
+    hosts = args.host or os.environ.get("FLEET_HOSTS", "").split() or list(DEFAULT_HOSTS)
+    local = os.environ.get("FLEET_LOCAL_HOST") or socket.gethostname().split(".")[0]
+    # Updating T3 from inside a T3 thread on the same box restarts the service
+    # that owns this process, so the run would die before it could report.
+    local_t3_blocked = local in hosts and running_under_t3()
+
+    if not (args.check or args.apply):
+        plan = build_plan(hosts, local, args.skip_t3, local_t3_blocked)
+        out.append("mode: dry-run (nothing changed)")
+        out.extend(toon_table("plan", ["host", "via", "step", "command"], plan))
+        if not args.skip_t3:
+            out.append(f"note: {T3_NOTE}")
+        if local_t3_blocked and not args.skip_t3:
+            out.append(f"note: running inside T3 on {local}, so its t3 step is left out; "
+                       "run `npx t3@latest update` there from a plain shell")
+        out.append("help[2]:")
+        out.append("  fleet-update --check   # read versions only, exit 1 if a host is behind")
+        out.append("  fleet-update --apply   # run this plan, then check")
+        print("\n".join(out))
+        return 0
+
+    try:
+        reference = load_reference(args.source or default_source(),
+                                   os.environ.get("FLEET_T3_LATEST"))
+    except (RuntimeError, OSError) as e:
+        print(f"error: could not read the reference versions: {e}")
+        return 1
+
+    rc = 0
+    if args.apply:
+        out.append("mode: apply")
+        plan = build_plan(hosts, local, args.skip_t3, local_t3_blocked)
+        if local_t3_blocked and not args.skip_t3:
+            out.append(f"note: running inside T3 on {local}; its t3 step was left out")
+        rc = cmd_apply(plan, local, out)
+    else:
+        out.append("mode: check (read-only)")
+    rc = max(rc, cmd_check(hosts, local, reference, out))
+    print("\n".join(out))
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

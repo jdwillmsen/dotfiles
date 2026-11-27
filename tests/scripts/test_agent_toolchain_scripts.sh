@@ -9,9 +9,14 @@ render() { chez_render "$cfg" "$here/$1"; }
 
 skills="$(render home/run_onchange_33-install-agent-skills.sh.tmpl)"
 echo "$skills" | shellcheck -s bash -
-for want in kunchenguid/axi kunchenguid/lavish-axi vercel-labs/skills; do
+for want in kunchenguid/axi kunchenguid/lavish-axi; do
     echo "$skills" | grep -qF "$want" || { echo "FAIL: $want missing from skills script"; exit 1; }
 done
+# A retired skill is uninstalled through the CLI, never installed again.
+echo "$skills" | grep -q 'skills add.*vercel-labs/skills' && { echo "FAIL: find-skills is retired but still installed"; exit 1; }
+echo "$skills" | grep -qF "skills remove 'find-skills' --global --yes" ||
+    echo "$skills" | grep -qF 'skills remove "find-skills" --global --yes' ||
+    { echo "FAIL: retired find-skills is not removed"; exit 1; }
 
 # no-mistakes ships its own skill via `no-mistakes init`. Installing it from the
 # skills CLI as well is what puts a duplicate on disk, so it must not be listed

@@ -46,8 +46,12 @@ agentSkills:
     source: kunchenguid/axi
   - name: lavish
     source: kunchenguid/lavish-axi
-  - name: find-skills
-    source: vercel-labs/skills
+# Skills this file used to install. The install script removes each one it
+# finds through the skills CLI, so the skill and its lock entry go together;
+# a name lands here only if an earlier agentSkills entry installed it.
+retiredAgentSkills:
+  # Pushes installing more skills, which the global rules restrict.
+  - find-skills
 # CLIs the skills above drive. lavish is absent because its skill shells out to
 # `npx -y lavish-axi`, so there is nothing to install.
 # `version` is the version this repo wants, in the vendor's own tag format —

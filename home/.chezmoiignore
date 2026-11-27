@@ -67,6 +67,7 @@ run_once_49-install-dev-tools.sh.tmpl
 .local/bin/check-openrouter-freshness
 .local/bin/refresh-openrouter-free
 .local/bin/devbox-health
+.local/bin/mc
 .local/bin/memory-lint
 .local/bin/merge-captain
 .local/bin/stream

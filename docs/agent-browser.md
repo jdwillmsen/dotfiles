@@ -36,9 +36,11 @@ Several agent sessions use the browser at once. Before leases, every agent drove
   `~/.cache/agent-browser-slotN`. Logins are per slot: profiles are never copied, since that
   would mean an agent handling cookies.
 
-Use a slot when two agents could be on the same site with the same account at once (shared
-cookies mean shared server-side state, such as one LinkedIn draft) or a task needs a clean
-session. Otherwise share slot 0. Each Chrome costs roughly 300-500 MB of memory.
+Use a slot when a task needs a clean session or cookie state no other agent can change (a
+navigation or sign-out in slot 0 reaches every tab there). A slot does not isolate the
+account's data on the server: two agents editing one LinkedIn profile conflict in any slot.
+A slot's profile may be signed in to a different account from slot 0, so agents confirm the
+signed-in user before acting there. Otherwise share slot 0. Each Chrome costs roughly 300-500 MB of memory.
 
 ## Use
 

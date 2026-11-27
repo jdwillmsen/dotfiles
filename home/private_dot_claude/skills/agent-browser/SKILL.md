@@ -33,9 +33,12 @@ Other sessions share this browser. Every `start` takes a **lease** that owns one
 - **Shared (default)**: `agent-browser start <URL>`. Slot 0, the profile the human signs in to;
   your tab sits beside other agents' tabs. Use this unless one of the cases below applies.
 - **Isolated**: `agent-browser start --slot auto <URL>`. A separate Chrome, viewer and profile
-  (slots 1-3). Use it when another agent may be on the same site with the same account (two
-  edits to one LinkedIn profile, two Discord sends), or a task needs a clean session. Each
-  slot's profile has its own logins, so the human may need to sign in there once.
+  (slots 1-3) with its own cookies. Use it when a task needs a clean session or its own
+  cookie state (another agent's navigation or sign-out must not reach it). It does not isolate
+  the account's data on the server: two agents editing one LinkedIn profile still conflict,
+  so do that work one after the other. Each slot has its own logins, and a slot may be signed
+  in to a different account from slot 0: before staging anything in a slot, read the
+  signed-in username from the page and confirm it is the account the user meant.
 
 Never pick a tab from `context.pages` (`pages[-1]` is someone else's tab or the human's login
 page). Drive only your own tab, through the `agent_browser` helper.
@@ -48,10 +51,11 @@ agent-browser check <github|linkedin|URL> --lease <lease>   # logged_in: yes|no
 agent-browser py <lease> script.py      # run Playwright attached to your tab
 agent-browser show <lease>              # bring your tab to the front of the viewer
 agent-browser stop <lease>              # end of task; sessions persist in the profile
-agent-browser                           # status: every slot, its leases and viewer
+agent-browser                           # status: every slot, its lease count and viewer
 ```
 
-1. `agent-browser start <URL>` and keep the printed `lease:` for every later call. If `check`
+1. `agent-browser start <URL>` and save the printed `lease:` at once; status shows only lease
+   counts, so a lost id cannot be recovered and its tab stays open until it expires. If `check`
    says `logged_in: no`, run `agent-browser show <lease>`, send the user the viewer link and
    wait for "logged in".
 2. Write the script in the session scratchpad and run it with `agent-browser py <lease>
@@ -68,7 +72,8 @@ agent-browser                           # status: every slot, its leases and vie
 
    Prefer role/text locators; fall back to coordinates from a screenshot only when a control
    has no label. Calls through `py`, `check` and `show` keep the lease alive; a lease unused
-   for 2 hours expires.
+   for 2 hours (a long wait for a login, say) expires. On `error: unknown_lease`, run `start`
+   again for a new lease.
 3. Verify every save by re-reading the live page, then `agent-browser stop <lease>`.
 
 ## Known site quirks
@@ -79,6 +84,7 @@ agent-browser                           # status: every slot, its leases and vie
 - GitHub social preview and org avatars have no API; upload through the hidden
   `input[type=file]` with `set_input_files`.
 
-`agent-browser wipe --yes [--slot N]` deletes every saved login in that slot (only when the user
-asks).
+`agent-browser wipe --yes [--slot N]` deletes every saved login in that slot, only when the
+user asks. It refuses while the slot runs: wipe once `agent-browser` shows the slot with 0
+leases, and use `stop --force --slot N` only for a wipe the user asked for.
 Details: `docs/agent-browser.md` in the dotfiles repo.

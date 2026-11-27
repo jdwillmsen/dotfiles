@@ -9,6 +9,11 @@ Most weak UI comes from building before deciding who it is for and how it
 should feel. Settle that in two short files, then build against them and
 check the rendered result yourself.
 
+**Before touching any UI**, screenshot each surface you will change at 390px
+and 1440px wide. These are the "before" images for step 5.
+
+For a critique only, read the briefs if they exist; do not create them.
+
 ## 1. Product brief: `PRODUCT.md`
 
 Look for `PRODUCT.md` at the repo or app root. If it exists, read it and
@@ -27,9 +32,10 @@ YAML frontmatter so code can use them; prose below explains the choices.
 
 - Derive tokens from what the codebase already uses before inventing new
   ones. Two greys that differ by 2% are one token.
-- Emit tokens into the stack's own format: a Tailwind theme
-  (`@theme` in CSS for v4, `theme.extend` for v3) or CSS custom properties.
-  Components use tokens, never raw hex or pixel values.
+- Emit tokens into the stack's own format, following the mapping notes in
+  the template: a Tailwind theme (`@theme` in CSS for v4, `theme.extend` for
+  v3) or CSS custom properties. Components use tokens, never raw hex or
+  pixel values.
 - Change a token in `DESIGN.md` first, then in code, in the same PR.
 
 ## 3. Pick a mode per surface
@@ -54,7 +60,8 @@ the most common mismatch. Name the mode before choosing layout.
 - Logo walls, fake testimonials or invented metrics as decoration.
 - Emoji as icons; mixed icon sets.
 - Every element centred; every corner the same large radius.
-- Placeholder copy ("Lorem ipsum", "Feature one") left in.
+- Placeholder copy ("Lorem ipsum", "Feature one") or template token values
+  left in.
 - Contrast below WCAG AA, or focus states removed.
 
 If the brief asks for one of these on purpose, it wins; say so in the PR.
@@ -63,17 +70,17 @@ If the brief asks for one of these on purpose, it wins; say so in the PR.
 
 Tests do not show whether a page looks right. Before calling the work done:
 
-1. Capture **before** screenshots of each touched surface first, before
-   editing.
-2. Run the app and open it in a browser you control: the T3 Code preview
+1. Run the app and open it in a browser you control: the T3 Code preview
    tools in a T3 thread, otherwise Playwright.
-3. Walk the main flow as a user would, at a phone width (390px) and a
+2. Walk the main flow as a user would, at a phone width (390px) and a
    desktop width (1440px), in light and dark if both exist.
-4. Check against the brief: mode, personality, craft floor, keyboard focus,
+3. Check against the brief: mode, personality, craft floor, keyboard focus,
    no horizontal scroll, no layout shift on load.
-5. Fix what is rough, then capture **after** screenshots at the same sizes.
-6. Attach before and after images to the PR. Motion changes get a short
-   recording instead.
+4. Fix what is rough, then capture **after** screenshots at the same sizes.
+5. Put before and after images on the PR, not in the repo: `gh` cannot
+   upload images, so drag them into a PR comment in a browser you control,
+   or attach them to the T3 thread and say so on the PR. Motion changes get
+   a short recording instead.
 
 Report anything you could not check (no dev server, auth wall) in the PR's
 *Verified* line rather than implying it was seen.

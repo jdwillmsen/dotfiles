@@ -1,6 +1,13 @@
 ---
 # Design tokens. Code reads these; components never hard-code values.
-# Map to a Tailwind theme (@theme in v4, theme.extend in v3) or CSS custom properties.
+# Mapping to code:
+# - Colours: CSS variables on :root and .dark (color-dark), then Tailwind v4
+#   `@theme inline { --color-bg: var(--bg); }` or v3 `colors: { bg: 'var(--bg)' }`.
+# - Tailwind v4 namespaces: type-scale -> --text-*, line-height -> --leading-*,
+#   radius -> --radius-*, shadow -> --shadow-*, breakpoints -> --breakpoint-*,
+#   motion.easing -> --ease-*. v3 puts breakpoints under `screens`.
+# - type-scale and space are unitless rem numbers: append `rem` when emitting.
+# - Durations have no Tailwind namespace; emit them as plain CSS variables.
 color:
   bg: "#ffffff"
   surface: "#f6f7f9"
@@ -22,7 +29,7 @@ color-dark:
   danger: "#ff6b5e"
   success: "#4cc282"
 font:
-  sans: "Inter, system-ui, sans-serif"
+  sans: "system-ui, sans-serif"
   mono: "ui-monospace, SFMono-Regular, monospace"
 type-scale:   # rem; ratio 1.25
   xs: 0.75

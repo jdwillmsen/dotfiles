@@ -16,10 +16,10 @@ What success looks like for them: <the moment they leave satisfied>
 
 ## Surfaces
 
-| Surface | Mode (persuade / operate / read / experience) | Notes |
-|---|---|---|
-| <e.g. landing page> | <mode> | |
-| <e.g. dashboard> | <mode> | |
+<!-- List them; DESIGN.md assigns each one a mode. -->
+
+- <e.g. landing page: who lands there and why>
+- <e.g. dashboard: what they check daily>
 
 ## Personality
 

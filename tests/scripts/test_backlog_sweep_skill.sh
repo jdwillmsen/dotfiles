@@ -14,7 +14,10 @@ grep -q '^description: .*where are we' "$skill" || fail "description must carry 
 [ "$(wc -l <"$skill")" -le 150 ] || fail "SKILL.md over 150 lines"
 
 grep -q 'stream key' "$skill" || fail "skill must resolve the project with 'stream key'"
-grep -q 'by this session' "$skill" || fail "Done must be limited to work this session shipped"
+grep -q 'Done only for a PR \*\*this session merged\*\*, then rolled out and verified' "$skill" ||
+    fail "Done must be limited to PRs this session merged, rolled out and verified"
+grep -q 'finds live but this session did not merge → owner decision' "$skill" ||
+    fail "live PRs this session did not merge must go to the owner decision"
 grep -qi 'owner decision' "$skill" || fail "unshipped closes must go to one owner decision"
 grep -q 'getJiraIssue' "$skill" || fail "every transition must be re-read"
 grep -qF "Report only. No comments, no links, no transitions on \`OPS\`" "$skill" ||

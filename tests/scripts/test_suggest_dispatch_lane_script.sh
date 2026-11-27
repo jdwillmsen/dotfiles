@@ -60,35 +60,60 @@ asked() {  # description expected-args
 
 # Class from the agent type, the T3 role, or the brief; risk and ticket from the brief; never logged.
 run Agent '{"subagent_type":"Explore","description":"find the config","prompt":"where is X"}'
-asked "Explore" "assign --class research --risk R1 --no-log --json"
+asked "Explore" "assign --class research --risk R1 --no-log --json --seed s"
 run Agent '{"subagent_type":"Plan","prompt":"design the rollout, risk R3, JDWLABS-88"}'
-asked "Plan with risk and ticket" "assign --class plan --risk R3 --no-log --json --ticket JDWLABS-88"
+asked "Plan with risk and ticket" "assign --class plan --risk R3 --no-log --json --ticket JDWLABS-88 --seed s"
 run mcp__t3-code__delegate_task '{"role":"test","task":"cover the parser. Tier: R0"}'
-asked "delegate role" "assign --class test --risk R0 --no-log --json"
+asked "delegate role" "assign --class test --risk R0 --no-log --json --seed s"
 run mcp__t3-code__delegate_task '{"role":"general","task":"Address the review findings on CAREER-4"}'
-asked "review-fix from text" "assign --class review-fix --risk R1 --no-log --json --ticket CAREER-4"
+asked "review-fix from text" "assign --class review-fix --risk R1 --no-log --json --ticket CAREER-4 --seed s"
 run Task '{"description":"Review PR","prompt":"Opus review of the diff, R2 risk"}'
-asked "review from text" "assign --class review --risk R2 --no-log --json"
+asked "review from text" "assign --class review --risk R2 --no-log --json --seed s"
 run Agent '{"description":"Implement the hook","prompt":"build it; mentions R2D2 and UTF-8 and ABC-12"}'
-asked "defaults; no false risk or ticket" "assign --class impl --risk R1 --no-log --json"
+asked "defaults; no false risk or ticket" "assign --class impl --risk R1 --no-log --json --seed s"
 run Agent '{"prompt":"summarize the CI logs"}'
-asked "summarize" "assign --class summarize --risk R1 --no-log --json"
+asked "summarize" "assign --class summarize --risk R1 --no-log --json --seed s"
 
 # The context names the lane and says whether this call matches it.
-run Agent '{"description":"Implement","prompt":"do it for JDW-9","model":"sonnet"}'
+run Agent '{"description":"Implement","prompt":"do it for JDW-9, risk R2","model":"sonnet"}'
 c="$(ctx)"
 grep -q 'lane claude-sonnet' <<<"$c" || fail "context should name the lane" "$c"
 grep -q 'runs on sonnet, which matches' <<<"$c" || fail "matching model should say so" "$c"
-grep -q 'risk R1 (default; pass the real tier)' <<<"$c" || fail "defaulted risk should be flagged" "$c"
-grep -q 'agent-pace assign --class impl --risk R1 --ticket JDW-9, then agent-eval record' <<<"$c" ||
-    fail "context should give the logged command" "$c"
-run Agent '{"prompt":"do it","model":"opus"}' free
+grep -q 'agent-pace assign --class impl --risk R2 --ticket JDW-9 --seed s, then agent-eval record' <<<"$c" ||
+    fail "context should give the logged command with the same seed" "$c"
+
+# The seed is the tool-use id when the call has one, so the logged command reproduces the advised lane.
+run_raw() {  # full hook JSON: sets OUT and ARGS
+    rm -f "$tmp/args"
+    OUT="$(printf '%s' "$1" | HOME="$H" PATH="$base_path" STUB_ARGS="$tmp/args" STUB_MODE=assigned "$hook")" ||
+        fail "hook must always exit 0"
+    ARGS="$(cat "$tmp/args" 2>/dev/null || true)"
+}
+run_raw '{"session_id":"sess-1","tool_use_id":"toolu_9","tool_name":"Agent","tool_input":{"prompt":"tier R1 build it"}}'
+asked "tool_use_id seed" "assign --class impl --risk R1 --no-log --json --seed toolu_9"
+grep -q -- '--risk R1 --ticket <KEY> --seed toolu_9,' <<<"$(ctx)" || fail "logged command should carry the seed" "$OUT"
+
+# With no tier stated, the lane is not offered as the answer.
+run Agent '{"prompt":"do it","model":"sonnet"}'
+c="$(ctx)"
+grep -q 'is valid for R1 only; state the tier' <<<"$c" || fail "unstated risk should be flagged R1-only" "$c"
+grep -q 'suggests lane' <<<"$c" && fail "unstated risk must not name a suggested lane" "$c"
+grep -q -- '--risk <tier>' <<<"$c" || fail "logged command should ask for the tier" "$c"
+
+# Tools that only share a prefix with the matched ones get nothing, and agent-pace is never asked.
+for other in TaskStop TaskList AgentTool mcp__t3-code__delegate_task_status Bash; do
+    run "$other" '{"prompt":"review R2"}'
+    [ -z "$OUT" ] || fail "$other should get no advice" "$OUT"
+    [ -z "$ARGS" ] || fail "$other should not call agent-pace" "$ARGS"
+done
+
+run Agent '{"prompt":"do it, risk R1","model":"opus"}' free
 c="$(ctx)"
 grep -q 'lane opencode-glm-flash-free' <<<"$c" || fail "free lane not named" "$c"
 grep -q 'runs on opus, not that lane' <<<"$c" || fail "mismatch should be called out" "$c"
-run mcp__t3-code__delegate_task '{"task":"do it"}'
+run mcp__t3-code__delegate_task '{"task":"do it, risk R1"}'
 grep -q 'inherited model' <<<"$(ctx)" || fail "no model should say inherited" "$OUT"
-run Agent '{"prompt":"review"}' defer
+run Agent '{"prompt":"review, risk R3"}' defer
 c="$(ctx)"
 grep -q 'result defer, opus out of quota' <<<"$c" || fail "defer should be reported" "$c"
 grep -q 'Queue the work' <<<"$c" || fail "defer should say to queue" "$c"

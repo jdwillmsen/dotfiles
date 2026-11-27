@@ -143,7 +143,7 @@ ENFORCED='{
         ]
       },
       {
-        "matcher": "Agent|Task|mcp__t3-code__delegate_task",
+        "matcher": "^(Agent|Task|mcp__t3-code__delegate_task)$",
         "hooks": [
           { "type": "command", "command": "$HOME/.claude/hooks/suggest-dispatch-lane.sh" }
         ]

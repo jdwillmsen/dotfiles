@@ -1078,6 +1078,26 @@ grep -q 'plan-money,R3,plan' "$out" || fail "a purchase plan was not caught by p
 exc_plan jdwillmsen/jdw-deployments R3 "Tune FWB view distance in prd."
 exc_plan jdwillmsen/jdw-deployments R3 "Wipe the crew-lab world."
 
+# A changed line that names FWB is R3 even in a lab file; content rules are
+# never lowered. A lab comment about FWB and a plain lab change stay R2.
+lab_diff() {
+    local want="$1" line="$2"
+    git -C "$lab_repo" reset -q --hard origin/main
+    printf '%s\n' "$line" >>"$lab_repo/charts/crew-lab/values.yaml"
+    commit_all "$lab_repo" change
+    ( cd "$lab_repo" && "$cc" --rules "$rules" --repo jdwillmsen/jdw-deployments ) >"$out" 2>"$err"
+    grep -qx "tier: $want" "$out" || fail "lab line '$line' did not classify $want" "$(cat "$out")"
+}
+printf 'b: 1\n' >"$lab_repo/charts/crew-lab/values.yaml"
+commit_all "$lab_repo" values
+git -C "$lab_repo" update-ref refs/remotes/origin/main HEAD
+lab_diff R3 "      server: minecraft-fwb-seed"
+grep -q 'fwb-reference,R3,charts/crew-lab/values.yaml' "$out" || fail "the FWB line gave no fwb-reference reason" "$(cat "$out")"
+lab_diff R3 "      name: fwb_afk_bot_2"
+lab_diff R2 "      server: crew-lab"
+lab_diff R2 "  # An idle unit holds what an FWB AFK bot holds."
+lab_diff R2 "      name: crew-fwbx-unit"
+
 # The policy file guards its own exceptions.
 exc_rules() {
     sed -n '1,/^# --- path rules/p' "$rules" >"$tmp/exc.toml"

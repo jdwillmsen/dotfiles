@@ -227,6 +227,17 @@ tier = "R3"
 content = ['\brm\s+(-[a-zA-Z]+\s+|--[a-z-]+\s+)+(/(?!tmp/[A-Za-z0-9_.-]*[A-Za-z0-9_-](\s|[\x22\x27]|$))|~|[\x22\x27]?\$HOME)', '\bkubectl\s+delete\b', '\bterraform\s+destroy\b', '\bgit\s+push\b[^\n;|&]*\s(-f\b|--force\b|\+[^\s]+)', '(?i)\bDROP\s+(TABLE|DATABASE|SCHEMA)\b', '(?i)\bTRUNCATE\s+TABLE\b', '(?i)\bDELETE\s+FROM\b(?![^;]*\bWHERE\b)']
 exclude = ["**/*.md", "docs/**", "tests/**", "**/test_*.sh"]
 
+# Lab and crew files that name FWB point at the real players' world, which the
+# lab-pg-crew exception must never reach. Comment lines are skipped because the
+# lab charts explain themselves against FWB throughout.
+[[rule]]
+id = "fwb-reference"
+tag = "players"
+tier = "R3"
+repos = ["jdwillmsen/jdw-deployments", "jdwillmsen/gameops"]
+content = ['(?i)^(?!\s*(#|//|/\*|\*|\{\{-?\s*/\*)).*(?<![a-z])fwb(?![a-z])']
+exclude = ["**/*.md", "docs/**", "tests/**", "**/tests/**", "**/*_test.go", "**/*.test.*", "**/test_*", "**/test-*"]
+
 # --- plan rules --------------------------------------------------------------
 # Tried against the plan text (or a ticket body or PR description). A hit
 # classifies the whole piece of work before any agent starts, and an R3 plan

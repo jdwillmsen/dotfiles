@@ -142,6 +142,94 @@ for args in "start --slot" "stop --slot" "check site --slot" "wipe --slot" "stat
     grep -q 'error: usage' <<<"$out" || fail "trailing --slot should be a usage error: $args" "$out"
 done
 
+# stop <bogus-id>: a not-live id never clobbers --slot and never shuts a slot down
+out="$(run start)"
+d="$(lease "$out")"
+[ -n "$d" ] || fail "setup start for bogus-stop test" "$out"
+out="$(run stop bogus-id)" && fail "stop <bogus-id> must not succeed" "$out"
+grep -q 'unknown_lease' <<<"$out" || fail "stop <bogus-id> should be a structured unknown_lease error" "$out"
+grep -q 'released: none' <<<"$out" || fail "stop <bogus-id> should report released: none" "$out"
+if grep -q 'stopped:' <<<"$out"; then fail "stop <bogus-id> must not shut a slot down" "$out"; fi
+out="$(run status)"
+grep -q 'state: running' <<<"$out" || fail "stop <bogus-id> must not stop the running slot" "$out"
+out="$(run stop --force --slot 1 bogus-id)" && fail "stop --force --slot 1 <bogus-id> must not succeed" "$out"
+grep -q 'unknown_lease' <<<"$out" || fail "stop --force <bogus-id> should be unknown_lease" "$out"
+if grep -q 'stopped:' <<<"$out"; then fail "stop --force --slot 1 <bogus-id> must not shut down any slot" "$out"; fi
+out="$(run status)"
+grep -q 'state: running' <<<"$out" || fail "stop --force --slot 1 <bogus-id> must not stop slot 0" "$out"
+out="$(run stop --slot 2 bogus-id)" && fail "stop --slot 2 <bogus-id> must not succeed" "$out"
+if grep -q 'stopped:' <<<"$out"; then fail "stop --slot 2 <bogus-id> must not shut a slot down" "$out"; fi
+out="$(run status)"
+grep -q 'state: running' <<<"$out" || fail "stop --slot 2 <bogus-id> must not stop slot 0" "$out"
+run stop "$d" >/dev/null
+run stop --force >/dev/null 2>&1 || true
+
+# canonical slot identity: leading zeros are the same slot
+out="$(run start --slot 00)"
+grep -q 'slot: 0' <<<"$out" || fail "--slot 00 must count as slot 0" "$out"
+grep -q 'cdp: http://127.0.0.1:9222' <<<"$out" || fail "--slot 00 must keep slot 0 ports" "$out"
+grep -q -- "--user-data-dir=$tmp/profile" "$tmp/google-chrome.args" || fail "--slot 00 must use the slot-0 profile" "$out"
+if [ -e "$tmp/profile-slot00" ]; then fail "--slot 00 must not create a slot00 profile"; fi
+case "$(lease "$out")" in s0-*) ;; *) fail "--slot 00 lease id must be s0-*" "$out" ;; esac
+out="$(run status --slot 00)"
+grep -q 'slot: 0' <<<"$out" || fail "status --slot 00 must count as slot 0" "$out"
+run stop --force --slot 00 >/dev/null
+
+# shared slot-flag parser: --slot N and --slot=N on every subcommand
+out="$(run start --slot=1)"
+grep -q 'slot: 1' <<<"$out" || fail "start must accept --slot=1" "$out"
+run stop --force --slot=1 >/dev/null
+out="$(run status --slot=0)"
+grep -q 'slot: 0' <<<"$out" || fail "status must accept --slot=0" "$out"
+
+# wipe targets exactly the named slot and rejects unknown args
+mkdir -p "$tmp/profile" "$tmp/profile-slot1"
+echo keep >"$tmp/profile/keep"
+echo gone >"$tmp/profile-slot1/gone"
+out="$(run wipe --yes --slot=1)"
+[ ! -e "$tmp/profile-slot1" ] || fail "wipe --slot=1 must remove only slot 1 profile" "$out"
+[ -e "$tmp/profile/keep" ] || fail "wipe --slot=1 must leave slot 0 profile" "$out"
+mkdir -p "$tmp/profile-slot1"
+for bad in "--slot1" "--slotX" "--bogus" "extra"; do
+    out="$(run wipe --yes "$bad")" && fail "wipe must reject unknown arg: $bad" "$out"
+    grep -q 'error: usage' <<<"$out" || fail "wipe unknown arg should be usage error: $bad" "$out"
+done
+# unknown flags with a following value are never silently shifted
+for bad in "--slott" "-slot"; do
+    out="$(run wipe --yes "$bad" 1)" && fail "wipe must reject unknown option: $bad" "$out"
+    grep -q 'error: usage' <<<"$out" || fail "wipe unknown option should be usage error: $bad" "$out"
+done
+[ -e "$tmp/profile/keep" ] || fail "rejected wipe must not delete slot 0 profile"
+[ -e "$tmp/profile-slot1" ] || fail "rejected wipe must not delete slot 1 profile"
+for bad in "--bogus" "--slotX" "--slott"; do
+    out="$(run check site "$bad")" && fail "check must reject unknown option: $bad" "$out"
+    grep -q 'error: usage' <<<"$out" || fail "check unknown option should be usage error: $bad" "$out"
+done
+out="$(run check site --unknown-site-flag)" && fail "check must reject unknown options" "$out"
+grep -q 'error: usage' <<<"$out" || fail "check unknown option should be usage error" "$out"
+
+# check --slot=N is accepted, never treated as the site
+out="$(run check github --slot=1)" || true
+grep -q 'slot 1 browser is not running' <<<"$out" || fail "check --slot=1 must select slot 1, not site" "$out"
+out="$(run check github --slot 1)" || true
+grep -q 'slot 1 browser is not running' <<<"$out" || fail "check --slot 1 must select slot 1" "$out"
+
+# agent_browser._record_target never recreates a removed lease file
+command -v python3 >/dev/null || fail "python3 not found"
+py_lease="$tmp/pylease"
+printf 'slot=0\ntarget=T1\ncreated=1\n' >"$py_lease"
+PYTHONPATH="$here/home/dot_local/share/agent-browser" python3 - "$py_lease" <<'PY' || fail "_record_target must update existing and never recreate removed lease"
+import os, sys
+os.environ["AGENT_BROWSER_LEASE_FILE"] = sys.argv[1]
+from agent_browser import _record_target
+_record_target("T2")
+lines = open(sys.argv[1]).read().splitlines()
+assert "target=T2" in lines and "slot=0" in lines and not any(l.startswith("target=T1") for l in lines), lines
+os.remove(sys.argv[1])
+_record_target("T3")
+assert not os.path.exists(sys.argv[1]), "a removed lease file must not be recreated"
+PY
+
 # No tailnet means no viewer at all: never fall back to another interface.
 printf '#!/usr/bin/env bash\nexit 1\n' >"$bin/tailscale"
 out="$(run start)" && fail "start without a tailnet address must fail" "$out"

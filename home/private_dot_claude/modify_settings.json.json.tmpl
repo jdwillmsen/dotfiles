@@ -88,7 +88,9 @@ DEFAULTS='{
 # tool can report success with the status unchanged, and the hook's reminder to
 # re-read it is only worth having if no on-disk hooks list can drop it. The
 # stray-clone warning on Bash is a separate entry rather than a second command in
-# the rtk entry, which is defaulted and so replaced by whatever is on disk.
+# the rtk entry, which is defaulted and so replaced by whatever is on disk. The
+# dispatch-lane hook on delegating tools is enforced because the Dispatch rule it
+# applies went unused when it depended on each session remembering it.
 #
 # CLAUDE_CODE_PLUGIN_DIRS loads the skill-trim mod in every session, including
 # ones started by apps that take no --plugin-dir flag. It is enforced because
@@ -138,6 +140,12 @@ ENFORCED='{
         "matcher": "Bash",
         "hooks": [
           { "type": "command", "command": "$HOME/.claude/hooks/warn-stray-clone.sh" }
+        ]
+      },
+      {
+        "matcher": "Agent|Task|mcp__t3-code__delegate_task",
+        "hooks": [
+          { "type": "command", "command": "$HOME/.claude/hooks/suggest-dispatch-lane.sh" }
         ]
       }
     ],

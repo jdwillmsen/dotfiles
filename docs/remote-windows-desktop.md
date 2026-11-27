@@ -5,6 +5,37 @@ Ryzen 9 3900X, RTX 2070, three 1920x1080 monitors = a 5760x1080 desktop). The
 rig is reached over SSH on its Tailscale IP; this note covers what to use when a
 task needs the **screen**, and whether stream encoding can move to another box.
 
+## Rig access rules
+
+Every rig task starts here, not only OBS work. Host-specific values (the
+address and the Windows user) live in the private skills repo, not in this
+public one.
+
+- **SSH by the rig's Tailscale name, never its LAN address.** The LAN address
+  stopped accepting SSH after a reboot, while the tailnet path kept working.
+  The default shell is PowerShell, so use PowerShell syntax, and run rig
+  scripts with `powershell -NoProfile -ExecutionPolicy Bypass -File <script>`.
+  Copy script files over with `scp` rather than quoting them inline through
+  SSH.
+- **Never remove the devbox key from
+  `C:\ProgramData\ssh\administrators_authorized_keys`.** It is the only way
+  in. An earlier cleanup removed it as a final tidy-up step and cut off remote
+  access while fixes were still pending; the owner had to re-add it by hand.
+  Before anything that could cut this access or restart the PC, say so first.
+- **Start VNC only through `vnc-session.ps1`** (`-Mode start` / `-Mode stop`),
+  never by starting the TightVNC server directly. The script also shows a
+  click-through "Claude is connected" banner on the primary monitor while a
+  session is up, which is how the owner can tell the screen has been taken
+  over. `-Mode stop` removes it. The VNC server is firewalled to the devbox's
+  tailnet address.
+- **Do not click or type while a game is on screen.** Check with a screenshot
+  first. Input during play interferes with the game and may trip anti-cheat
+  (see the open risk below).
+- **Check the rig with `rig.ps1` from the `gaming-rig` checkout.** `rig.ps1`
+  with no arguments prints the current state; `rig.ps1 verify` exits 1 when a
+  tweak has drifted; `rig.ps1 inventory <area>` (for example `services`) lists
+  what is installed. Nothing in it changes the machine without `-Live`.
+
 ## What works today with nothing installed
 
 SSH lands in a non-interactive session with no desktop, so GUI programs started
@@ -49,8 +80,8 @@ server or input injection while a game runs. Test with the game closed first and
 do not leave input tools running during ranked play.
 
 Every install on the rig needs the owner's say-so (standing rule: nothing that
-restarts the PC or touches the stream), and an agent must not remove the devbox
-SSH key from `administrators_authorized_keys`.
+restarts the PC or touches the stream). The SSH key rule is under
+[Rig access rules](#rig-access-rules).
 
 ## Hosting the stream encode elsewhere (dual streaming)
 

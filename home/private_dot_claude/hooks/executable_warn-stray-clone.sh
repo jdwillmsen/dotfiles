@@ -12,7 +12,20 @@ trap 'exit 0' ERR
 IFS= read -r -d '' input || true
 
 # Runs before every Bash call: anything that cannot be a clone or a worktree add returns without starting a process.
-[[ $input == *clone* || $input == *worktree* ]] || exit 0
+# Only the command string is searched; cwd and transcript_path sit under ~/worktrees in most sessions, so testing the
+# whole input would start Python on every call. A quote after a backslash is taken as escaped and the scan goes on,
+# which can only widen the text searched, never cut the command short.
+rest=${input#*\"command\"}
+[[ $rest != "$input" ]] || exit 0
+rest=${rest#*\"}
+cmd=""
+while [[ $rest == *\"* ]]; do
+    chunk=${rest%%\"*}
+    cmd+=$chunk
+    rest=${rest:$((${#chunk} + 1))}
+    [[ $chunk == *\\ ]] || break
+done
+[[ $cmd == *clone* || $cmd == *worktree* ]] || exit 0
 
 PY=python3
 "$PY" -c "" >/dev/null 2>&1 || PY=python

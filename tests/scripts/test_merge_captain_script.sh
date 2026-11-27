@@ -150,6 +150,13 @@ if head2 == ["pr", "view"]:
     if flag("--json").startswith("headRefOid,state"):
         if rd("sleep_after_review") is not None and os.path.exists(f"{S}/reviews_posted.jsonl"):
             time.sleep(15)
+        # unlabel_at_N: from the k-th head read on, the chat approval label is gone, as if a person removed it.
+        k = rd(f"unlabel_at_{n}")
+        if k:
+            reads = int(rd(f"head_reads_{n}", "0")) + 1
+            open(f"{S}/head_reads_{n}", "w").write(str(reads))
+            if reads >= int(k):
+                pr = dict(pr, labels=[x for x in pr.get("labels", []) if x.get("name") != "approved/owner-chat"])
         seq = rd(f"head_seq_{n}")
         if seq:
             lines = seq.split()
@@ -507,6 +514,21 @@ elif cmd == "run":
     p = f"{S}/runs.json"
     runs = [x for x in (json.load(open(p)) if os.path.exists(p) else []) if x["id"] != r["id"]]
     json.dump(runs + [r], open(p, "w"))
+elif cmd == "t3":
+    # One message in a fake T3 store, with the columns and payload keys merge-captain reads.
+    import sqlite3
+    mid, thread, source, by, at, text = sys.argv[2:8]
+    extra = json.loads(sys.argv[8]) if len(sys.argv) > 8 else {}
+    con = sqlite3.connect(f"{S}/t3.sqlite")
+    con.execute("CREATE TABLE IF NOT EXISTS orchestration_v2_projection_messages (message_id TEXT PRIMARY KEY, "
+                "thread_id TEXT, run_id TEXT, node_id TEXT, role TEXT, streaming INTEGER, created_at TEXT, "
+                "updated_at TEXT, payload_json TEXT, search_text TEXT)")
+    payload = {"createdBy": by, "creationSource": source, "id": mid, "threadId": thread, "role": "user", "text": text,
+               "attachments": [], "streaming": False, "createdAt": at, "updatedAt": at, **extra}
+    con.execute("INSERT INTO orchestration_v2_projection_messages VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (mid, thread, None, None, "user", 0, at, at, json.dumps(payload), text))
+    con.commit()
+    con.close()
 elif cmd == "pace":
     k = sys.argv[2]
     kv = kvs(sys.argv[3:])
@@ -594,6 +616,7 @@ newcase() {
 DEFAULT_TOKEN="${GP}testsecretvalue0000000000000"
 mc_env() {  # rebuilt per call: a test may point CFG somewhere else
     MCENV=(MERGE_CAPTAIN_CONFIG="$CFG" MERGE_CAPTAIN_STATE="$STATE" MERGE_CAPTAIN_NOW="$NOW" MERGE_CAPTAIN_TOKENS="$TOKDIR"
+        MERGE_CAPTAIN_T3_DB="$S/t3.sqlite"
         MERGE_CAPTAIN_GH="$bin/gh" MERGE_CAPTAIN_CLASS="$bin/change-class" MERGE_CAPTAIN_PACE="$bin/agent-pace"
         MERGE_CAPTAIN_OPENSSL="$bin/openssl" MERGE_CAPTAIN_API_URL="${APIURL:-http://127.0.0.1:9}" CLAUDECODE= CLAUDE_CODE_ENTRYPOINT=
         MERGE_CAPTAIN_EVAL="$bin/agent-eval" MERGE_CAPTAIN_CLAUDE="$bin/claude" MERGE_CAPTAIN_OPENCODE="$bin/opencode"
@@ -1467,6 +1490,373 @@ expect 13 needs-human
 [ -s "$STATE/human.jsonl" ] || fail "the once-per-head note is not kept in local state"
 want 0 run
 [ "$(count '^pr comment 13' "$S/gh.log")" = 1 ] || fail "local state did not stop a repeat comment"
+
+# ── Owner chat approval: an R3 pull request merges only on an approval the owner typed, for its exact head ──
+hsha() { printf 'head-%s' "$1" | sha1sum | cut -c1-40; }  # distinct heads, so short prefixes differ too
+hs() { hsha "$1"; }  # the full sha: the owner's line carries all 40 characters
+SHA21="$(hsha 21)"
+chat_pr() {  # N: an R3 pull request with its own head
+    fx pr "$1" "headRefOid=$(hsha "$1")"
+    fx class "$1" R3 tags=agent-rules reasons=agent-rules:R3:AGENTS.md
+}
+# t3 ID THREAD SOURCE CREATED_BY AT TEXT [extra payload json]: one user-role message in the fake T3 store.
+t3() { python3 -I "$tmp/fx.py" t3 "$@"; }
+chat() {  # exit code, PR, quote, optional extra args
+    local w="$1" n="$2" q="$3"
+    shift 3
+    want "$w" approve-from-chat "acme/live#$n" --thread thr-1 --quote "$q" "$@"
+}
+newcase
+chat_pr 21
+t3 m-0 thr-1 web user 2026-10-23T18:30:00Z "what is left on live#21"
+t3 m-21 thr-1 web user 2026-10-23T19:00:00Z "approve live#21 $(hs 21)!"
+chat 0 21 "approve  live#21 $(hs 21)!"
+grep -q '^recorded: true' "$out" && grep -q "^head: \"\?$SHA21" "$out" && grep -q '^message: m-21' "$out" ||
+    fail "approve-from-chat output" "$(cat "$out")"
+grep -q "merge-captain:chat-approval sha=$SHA21" "$S/posted_21.txt" && grep -q 'Thread: thr-1' "$S/posted_21.txt" &&
+    grep -q 'Message: m-21' "$S/posted_21.txt" && grep -q "> approve live#21 $(hs 21)!" "$S/posted_21.txt" &&
+    grep -q 'Said at: 2026-10-23T19:00:00Z' "$S/posted_21.txt" || fail "chat approval comment" "$(cat "$S/posted_21.txt")"
+grep -q '"name": "approved/owner-chat"' "$S/pr_21.json" || fail "chat approval label not set" "$(cat "$S/pr_21.json")"
+grep -q "\"head\": \"$SHA21\"" "$STATE/chat-approvals.jsonl" && grep -q '"message": "m-21"' "$STATE/chat-approvals.jsonl" &&
+    grep -q "\"quote\": \"approve live#21 $(hs 21)!\"" "$STATE/chat-approvals.jsonl" ||
+    fail "chat approval not in state" "$(cat "$STATE/chat-approvals.jsonl" 2>/dev/null)"
+grep -n '' "$S/gh.log" | grep -E 'pr comment 21|--add-label approved/owner-chat' | head -2 | cut -d: -f1 | tr '\n' ' ' >"$S/order"
+python3 -I - "$S/order" <<'PY' || fail "the label went on before the comment"
+import sys
+a, b = map(int, open(sys.argv[1]).read().split())
+sys.exit(0 if a < b else 1)
+PY
+[ "$(count '^pr merge' "$S/gh.log")" = 0 ] || fail "recording an approval merged"
+# Recording the same message again changes nothing.
+chat 0 21 "approve live#21 $(hs 21)!"
+grep -q '^already: true' "$out" || fail "a repeat record is not idempotent" "$(cat "$out")"
+[ "$(count '^pr comment 21' "$S/gh.log")" = 1 ] && [ "$(wc -l <"$STATE/chat-approvals.jsonl")" = 1 ] ||
+    fail "a repeat record wrote again" "$(cat "$S/gh.log")"
+# explain and a run: R3 is reviewed at R3 (agent-pace picks the reviewer) and merged with the head pinned.
+want 0 explain acme/live#21
+grep -q '^would: would-merge' "$out" && grep -q 'owner chat approval in thread thr-1' "$out" || fail "explain chat-approved R3" "$(cat "$out")"
+fx pace 1 lane=claude-opus provider=claudeAgent model=claude-opus-5-5
+fx rev claude 1 approve
+want 0 run
+expect 21 merged "owner chat approval in thread thr-1"
+grep -q -- '--risk R3' "$S/pace.log" || fail "the R3 review was not asked for at R3" "$(cat "$S/pace.log")"
+grep -q "^pr merge 21 --repo acme/live --rebase --match-head-commit $SHA21$" "$S/gh.log" || fail "chat-approved merge" "$(cat "$S/gh.log")"
+
+# A plain "approve owner/repo#N sha" is recorded with the owner's full message, not the agent's copy of it; the
+# full sha and the word-last form count too.
+newcase
+chat_pr 29
+t3 m-29 thr-1 web user 2026-10-23T19:00:00Z "approve acme/live#29 $(hs 29)"
+chat 0 29 "approve   acme/live#29 $(hs 29) "
+grep -q "\"quote\": \"approve acme/live#29 $(hs 29)\"" "$STATE/chat-approvals.jsonl" || fail "full message not stored" "$(cat "$STATE/chat-approvals.jsonl")"
+newcase
+chat_pr 29
+t3 m-29 thr-1 web user 2026-10-23T19:00:00Z "acme/live#29 $(hsha 29) lgtm."
+chat 0 29 "acme/live#29 $(hsha 29) lgtm."
+
+# Mobile counts too; without a review that approves, the approval alone merges nothing.
+newcase
+chat_pr 22
+t3 m-22 thr-1 mobile user 2026-10-23T19:00:00Z "acme/live#22 $(hs 22) approved."
+chat 0 22 "acme/live#22 $(hs 22) approved."
+fx pace 1 lane=claude-opus provider=claudeAgent model=claude-opus-5-5
+fx rev claude 1 changes
+want 0 run
+expect 22 blocked "review changes"
+[ "$(count '^pr merge' "$S/gh.log")" = 0 ] || fail "merged over a changes review"
+
+# A push after the approval voids it: no merge, the label comes off, the new head goes to a person.
+newcase
+chat_pr 23
+t3 m-23 thr-1 web user 2026-10-23T19:00:00Z "merge it https://github.com/acme/live/pull/23 $(hs 23)"
+chat 0 23 "merge it https://github.com/acme/live/pull/23 $(hs 23)"
+python3 -I - "$S/pr_23.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+pr = json.load(open(p))
+pr["headRefOid"] = "b" * 40
+json.dump(pr, open(p, "w"))
+PY
+want 0 run
+expect 23 needs-human "R3 above max R2"
+grep -q '^pr edit 23 .*--remove-label approved/owner-chat' "$S/gh.log" || fail "stale chat label kept" "$(cat "$S/gh.log")"
+grep -q 'No chat approval the owner typed' "$S/posted_23.txt" || fail "the needs-human comment does not say why" "$(cat "$S/posted_23.txt")"
+[ "$(count '^pr merge' "$S/gh.log")" = 0 ] && [ ! -e "$S/pace.log" ] || fail "merged or reviewed on a stale approval"
+
+# Removing the label withdraws the approval.
+newcase
+chat_pr 24
+t3 m-24 thr-1 web user 2026-10-23T19:00:00Z "lgtm live#24 $(hs 24)"
+chat 0 24 "lgtm live#24 $(hs 24)"
+python3 -I - "$S/pr_24.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+pr = json.load(open(p))
+pr["labels"] = []
+json.dump(pr, open(p, "w"))
+PY
+want 0 run
+expect 24 needs-human
+[ "$(count '^pr merge' "$S/gh.log")" = 0 ] || fail "merged after the label was removed"
+
+# A later owner message that names the PR without approving this head retracts the approval, at record and run time.
+newcase
+chat_pr 30
+t3 m-30 thr-1 web user 2026-10-23T19:00:00Z "approve live#30 $(hs 30)"
+chat 0 30 "approve live#30 $(hs 30)"
+t3 m-30b thr-1 mobile user 2026-10-23T19:05:00Z "actually wait on live#30, I found something"
+want 0 run
+expect 30 needs-human
+grep -q '^pr edit 30 .*--remove-label approved/owner-chat' "$S/gh.log" || fail "retracted chat label kept" "$(cat "$S/gh.log")"
+[ "$(count '^pr merge' "$S/gh.log")" = 0 ] || fail "merged after a retraction"
+newcase
+chat_pr 30
+t3 m-30 thr-1 web user 2026-10-23T19:00:00Z "approve live#30 $(hs 30)"
+t3 m-30b thr-1 web user 2026-10-23T19:05:00Z "hold live#30"
+chat 1 30 "approve live#30 $(hs 30)"
+grep -q 'later message from the owner names acme/live#30' "$out" || fail "recorded over a retraction" "$(cat "$out")"
+# A later message about another PR is not a retraction.
+newcase
+chat_pr 30
+t3 m-30 thr-1 web user 2026-10-23T19:00:00Z "approve live#30 $(hs 30)"
+t3 m-30b thr-1 web user 2026-10-23T19:05:00Z "hold live#31"
+chat 0 30 "approve live#30 $(hs 30)"
+
+# The sha binds the approval to the code: a stale head, another commit's sha or a short prefix are refused.
+newcase
+chat_pr 31
+t3 m-31a thr-1 web user 2026-10-23T19:00:00Z "approve live#31 $(hs 99)"
+chat 1 31 "approve live#31 $(hs 99)"
+grep -q "the owner approved $(hsha 99 | cut -c1-12), but the head is" "$out" || fail "a sha of a different commit" "$(cat "$out")"
+t3 m-31b thr-1 web user 2026-10-23T19:01:00Z "approve live#31 $(hsha 31 | cut -c1-39)"
+chat 1 31 "approve live#31 $(hsha 31 | cut -c1-39)"
+grep -q 'not a plain approval of acme/live#31 with a commit' "$out" || fail "a 39-character sha" "$(cat "$out")"
+t3 m-31e thr-1 web user 2026-10-23T19:01:30Z "approve live#31 $(hsha 31 | cut -c1-12)"
+chat 1 31 "approve live#31 $(hsha 31 | cut -c1-12)"
+grep -q 'not a plain approval of acme/live#31 with a commit' "$out" || fail "a 12-character prefix" "$(cat "$out")"
+t3 m-31c thr-1 web user 2026-10-23T19:02:00Z "approve live#31"
+chat 1 31 "approve live#31"
+grep -q 'with a commit' "$out" || fail "an approval without a sha" "$(cat "$out")"
+t3 m-31d thr-1 web user 2026-10-23T19:03:00Z "approve live#31 $(hs 31)"
+python3 -I - "$S/pr_31.json" <<'PY'
+import json, sys
+p = sys.argv[1]
+pr = json.load(open(p))
+pr["headRefOid"] = "c" * 40
+json.dump(pr, open(p, "w"))
+PY
+chat 1 31 "approve live#31 $(hs 31)"
+grep -q 'but the head is cccccccccccc' "$out" || fail "a stale sha after a push" "$(cat "$out")"
+[ -z "$(writes)" ] || fail "a refused sha wrote" "$(writes)"
+
+# Re-push: head Y, then X, the owner approves X, then Y is pushed back. The approval names X, so Y never merges on it.
+newcase
+chat_pr 32
+Y32="$(hsha 32)"
+X32="$(hsha 320)"
+fx pr 32 "headRefOid=$X32"
+t3 m-32 thr-1 web user 2026-10-23T19:00:00Z "approve live#32 $X32"
+chat 0 32 "approve live#32 $X32"
+fx pr 32 "headRefOid=$Y32" 'labels=[{"name":"approved/owner-chat"}]'
+want 0 run
+expect 32 needs-human
+grep -q '^pr edit 32 .*--remove-label approved/owner-chat' "$S/gh.log" || fail "chat label kept after a re-push" "$(cat "$S/gh.log")"
+[ "$(count '^pr merge' "$S/gh.log")" = 0 ] || fail "merged Y on an approval of X"
+chat 1 32 "approve live#32 $X32"
+grep -q "the owner approved $(cut -c1-12 <<<"$X32"), but the head is $(cut -c1-12 <<<"$Y32")" "$out" ||
+    fail "recorded an approval of X while Y is the head" "$(cat "$out")"
+
+# Forgeries: a hand-written state row plus the label merges nothing unless T3 holds a message the owner typed.
+forged() {  # N message-id: an R3 PR carrying the label and a state row that points at message-id in thr-1
+    chat_pr "$1"
+    fx pr "$1" "headRefOid=$(hsha "$1")" 'labels=[{"name":"approved/owner-chat"}]'
+    mkdir -p "$STATE"
+    printf '{"repo":"acme/live","pr":%s,"head":"%s","thread":"thr-1","message":"%s","quote":"approve live#%s %s","at":"2026-10-23T19:00:00Z"}\n' \
+        "$1" "$(hsha "$1")" "$2" "$1" "$(hs "$1")" >"$STATE/chat-approvals.jsonl"
+}
+forged_rejected() {  # N why
+    want 0 run
+    expect "$1" needs-human
+    grep -q "^pr edit $1 .*--remove-label approved/owner-chat" "$S/gh.log" || fail "forged chat label kept: $2" "$(cat "$S/gh.log")"
+    [ "$(count '^pr merge' "$S/gh.log")" = 0 ] && [ ! -e "$S/pace.log" ] || fail "merged or reviewed on a forgery: $2"
+}
+newcase
+forged 25 m-none
+forged_rejected 25 "no such message"
+newcase
+forged 25 m-25
+t3 m-25 thr-1 mcp agent 2026-10-23T19:00:00Z "approve live#25 $(hs 25)" '{"senderThreadId":"thr-9"}'
+forged_rejected 25 "an agent's message"
+newcase
+forged 25 m-25
+t3 m-25 thr-1 server user 2026-10-23T19:00:00Z "approve live#25 $(hs 25)"
+forged_rejected 25 "a server-made user turn"
+newcase
+forged 25 m-25
+t3 m-25 thr-1 web user 2026-10-23T19:00:00Z "approve live#25 $(hs 25)" '{"idleCompaction":"onReturn"}'
+forged_rejected 25 "an idle-compaction turn"
+newcase
+forged 25 m-25
+t3 m-25 thr-1 web user 2026-10-23T19:00:00Z "approve live#25 $(hs 25)" '{"notification":{"source":{"kind":"monitor"}}}'
+forged_rejected 25 "a notification"
+newcase
+forged 25 m-25
+t3 m-25 thr-2 web user 2026-10-23T19:00:00Z "approve live#25 $(hs 25)"
+forged_rejected 25 "a message in another thread"
+newcase
+forged 25 m-25
+t3 m-25 thr-1 web user 2026-10-23T19:00:00Z "please don't approve live#25 $(hs 25) yet, I need to look"
+forged_rejected 25 "a row pointing at a hedged message"
+newcase
+forged 25 m-25
+t3 m-25 thr-1 web user 2026-10-23T19:00:00Z "approve live#25 $(hs 99)"
+forged_rejected 25 "a row pointing at an approval of another commit"
+newcase
+forged 25 m-25
+t3 m-25 thr-1 web user 2026-10-23T19:00:00Z "approve live#25 $(hs 25)"
+rm -f "$S/t3.sqlite"
+forged_rejected 25 "no T3 store"
+newcase
+chat_pr 25
+t3 m-25 thr-1 web user 2026-10-23T19:00:00Z "approve live#25 $(hs 25)"
+fx pr 25 "headRefOid=$(hsha 25)" 'labels=[{"name":"approved/owner-chat"}]'
+forged_rejected 25 "the label with no state row"
+
+# T3 lets an agent edit a queued owner message in place (author and source kept, updatedAt moved): never counts.
+newcase
+forged 25 m-25
+t3 m-25 thr-1 web user 2026-10-23T19:00:00Z "approve live#25 $(hs 25)" '{"updatedAt":"2026-10-23T19:04:00Z"}'
+forged_rejected 25 "an edited queued message"
+newcase
+forged 25 m-25
+t3 m-25 thr-1 web user 2026-10-23T19:00:00Z "approve live#25 $(hs 25)" '{"updatedAt":null}'
+forged_rejected 25 "a message with no updatedAt"
+newcase
+chat_pr 33
+t3 m-33 thr-1 mobile user 2026-10-23T19:00:00Z "approve live#33 $(hs 33)" '{"updatedAt":"2026-10-23T19:00:01Z"}'
+chat 1 33 "approve live#33 $(hs 33)"
+grep -q 'no unedited message the owner typed' "$out" || fail "recorded an edited message" "$(cat "$out")"
+
+# A retraction counts from any thread, not only the one the approval was typed in.
+newcase
+chat_pr 34
+t3 m-34 thr-1 web user 2026-10-23T19:00:00Z "approve live#34 $(hs 34)"
+chat 0 34 "approve live#34 $(hs 34)"
+t3 m-34b thr-7 web user 2026-10-23T19:05:00Z "hold acme/live#34, found a bug"
+want 0 run
+expect 34 needs-human
+[ "$(count '^pr merge' "$S/gh.log")" = 0 ] || fail "merged after a retraction in another thread"
+chat 1 34 "approve live#34 $(hs 34)"
+grep -q 'later message from the owner names acme/live#34' "$out" || fail "recorded over a retraction in another thread" "$(cat "$out")"
+# An agent's message in another thread is not a retraction.
+newcase
+chat_pr 34
+t3 m-34 thr-1 web user 2026-10-23T19:00:00Z "approve live#34 $(hs 34)"
+t3 m-34b thr-7 mcp agent 2026-10-23T19:05:00Z "hold acme/live#34" '{"senderThreadId":"thr-9"}'
+chat 0 34 "approve live#34 $(hs 34)"
+
+# When the bare name lives under two configured owners, only owner/repo#N counts.
+newcase
+printf '[[repo]]\nname = "other/live"\nmode = "dry-run"\nmax_tier = "R2"\n' >>"$CFG"
+chat_pr 35
+t3 m-35 thr-1 web user 2026-10-23T19:00:00Z "approve live#35 $(hs 35)"
+chat 1 35 "approve live#35 $(hs 35)"
+grep -q 'exists under more than one owner, so name it as acme/live#35' "$out" || fail "an ambiguous bare name was accepted" "$(cat "$out")"
+t3 m-35b thr-1 web user 2026-10-23T19:01:00Z "approve acme/live#35 $(hs 35)"
+chat 0 35 "approve acme/live#35 $(hs 35)"
+fx pace 1 lane=claude-opus provider=claudeAgent model=claude-opus-5-5
+fx rev claude 1 approve
+want 0 run
+expect 35 merged "owner chat approval"
+
+# The label is withdrawn between the decision and the merge: the pre-merge read sees it gone, no merge.
+newcase
+chat_pr 26
+t3 m-26 thr-1 web user 2026-10-23T19:00:00Z "live#26 $(hs 26) approved"
+chat 0 26 "live#26 $(hs 26) approved"
+fx pace 1 lane=claude-opus provider=claudeAgent model=claude-opus-5-5
+fx rev claude 1 approve
+echo 4 >"$S/unlabel_at_26"
+want 0 run
+expect 26 skipped "chat approval withdrawn"
+[ "$(count '^pr merge' "$S/gh.log")" = 0 ] || fail "merged after the label was withdrawn mid-run"
+
+# What approve-from-chat refuses, with nothing written: the owner typed exactly this, and it is still not a plain
+# approval. Every bypass the reviews found is here.
+newcase
+chat_pr 27
+fx pr 28
+H27="$(hs 27)"
+ZW="$(printf 'n​ot')"
+k=0
+chat_refused() {  # message expected-output why
+    k=$((k + 1))
+    t3 "m-r$k" thr-1 web user 2026-10-23T19:00:00Z "$1"
+    chat 1 27 "$1"
+    grep -q -- "$2" "$out" || fail "refused: $3" "$(cat "$out")"
+}
+chat_refused "approve go $H27" 'does not name acme/live#27' "names no PR"
+chat_refused "go live#27 $H27" 'not a plain approval' "go is not an approval word"
+chat_refused "don't approve live#27 $H27 yet" 'not a plain approval' "a negated message"
+chat_refused "never approve live#27 $H27" 'not a plain approval' "never"
+chat_refused "cannot approve live#27 $H27 yet" 'not a plain approval' "cannot"
+chat_refused "live#27 $H27 good to go once CI passes" 'not a plain approval' "a condition"
+chat_refused "approve live#27 $H27 if Opus agrees" 'not a plain approval' "if"
+chat_refused "reject live#28, approve the other" 'does not name acme/live#27' "approve the other"
+chat_refused "reject live#27 $H27, approve the other" 'not a plain approval' "reject this one"
+chat_refused "live#27 $H27 approved — revert it" 'not a plain approval' "an em dash reversal"
+chat_refused "$ZW approve live#27 $H27" 'not a plain approval' "a zero-width character"
+chat_refused "approve live#27 $H27$(printf '​')" 'not a plain approval' "a trailing zero-width character"
+chat_refused "merge-captain approve-from-chat acme/live#27 --thread thr-1" 'not a plain approval' "a pasted command"
+chat_refused "\`approve live#27 $H27\`" 'not a plain approval' "backticks"
+chat_refused "> approve live#27 $H27" 'not a plain approval' "a quote marker"
+chat_refused "approve live#27 $H27 but wait for CI" 'not a plain approval' "a hedged message"
+chat_refused "approve live#27 $H27?" 'not a plain approval' "a question"
+chat_refused "approve live#28 $H27" 'does not name acme/live#27' "a different PR"
+chat_refused "approve live#27 and live#28 $H27" 'not a plain approval' "two PRs"
+chat_refused "approve live#270 $H27" 'does not name acme/live#27' "a longer number"
+chat_refused "approve other/live#27 $H27" 'does not name acme/live#27' "another owner"
+chat_refused "approve $H27 live#27" 'not a plain approval' "the sha before the PR"
+chat_refused "live#27 $H27" 'not a plain approval' "no approval word"
+chat_refused "approve token: ${GP}abcdefghijklmnopqrstuvwx live#27" 'credential' "a credential"
+# A fragment of a longer hedged message the owner typed is not their message.
+t3 m-m thr-1 web user 2026-10-23T19:00:00Z "don't approve live#27 $H27 yet"
+chat 1 27 "approve live#27 $H27"
+grep -q 'message the owner typed in that thread' "$out" || fail "a fragment was accepted" "$(cat "$out")"
+# An agent-sent message is never the owner's, even word for word.
+t3 m-n thr-1 mcp agent 2026-10-23T19:10:00Z "lgtm live#27 $H27" '{"senderThreadId":"thr-9"}'
+chat 1 27 "lgtm live#27 $H27"
+grep -q 'message the owner typed in that thread' "$out" || fail "an agent-sent message was accepted" "$(cat "$out")"
+t3 m-o thr-1 web user 2026-10-23T19:20:00Z "ship it live#27 $H27"
+want 1 approve-from-chat acme/live#27 --thread thr-2 --quote "ship it live#27 $H27"
+grep -q 'message the owner typed in that thread' "$out" || fail "another thread was accepted" "$(cat "$out")"
+t3 m-dry thr-1 web user 2026-10-23T19:00:00Z "approve dry#27 $H27"
+want 1 approve-from-chat acme/dry#27 --thread thr-1 --quote "approve dry#27 $H27"
+grep -q 'is dry-run' "$out" || fail "a dry-run repository" "$(cat "$out")"
+want 2 approve-from-chat acme/live#27 --thread 'bad thread' --quote "ship it live#27 $H27"
+want 2 approve-from-chat acme/live#27 --thread thr-1
+# A run in progress holds the lock: nothing is recorded under it.
+mkdir -p "$STATE"
+python3 -I - "$STATE/lock" "$tmp/locked" <<'PY' &
+import fcntl, os, sys, time
+f = open(sys.argv[1], "w")
+fcntl.flock(f, fcntl.LOCK_EX)
+open(sys.argv[2], "w").close()
+time.sleep(20)
+PY
+locker=$!
+until [ -e "$tmp/locked" ]; do sleep 0.1; done
+chat 1 27 "ship it live#27 $H27"
+grep -q 'run is in progress' "$out" || fail "recorded while a run held the lock" "$(cat "$out")"
+kill "$locker" 2>/dev/null || true
+wait "$locker" 2>/dev/null || true
+rm -f "$tmp/locked"
+want 0 pause
+chat 1 27 "ship it live#27 $H27"
+grep -q 'paused' "$out" || fail "recording while paused" "$(cat "$out")"
+want 0 resume
+[ -z "$(writes)" ] || fail "a refused approval wrote" "$(writes)"
+[ ! -s "$STATE/chat-approvals.jsonl" ] || fail "a refused approval was recorded"
 
 # ── Skips happen before any classification or write ──
 newcase

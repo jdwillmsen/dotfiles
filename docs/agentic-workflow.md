@@ -40,6 +40,7 @@ manual step on a new machine.
 | **mattpocock/skills** | General engineering skills (tdd, diagnosing-bugs, code-review, …). | `claudePlugins` marketplace install; loads namespaced as `mattpocock-skills:*` |
 | **caveman** | Token-efficient output mode, off by default; `/caveman` turns it on for a session. | `claudePlugins` marketplace install; default mode `off` in `dot_config/caveman/config.json` (and the `AppData/Roaming` copy on Windows) |
 | **RTK** | Hook-rewritten command proxy that compresses shell output 60–90%. `rtk gain [--history]` shows savings, `rtk discover` finds missed commands, `rtk proxy <cmd>` bypasses filtering. If `rtk gain` fails, `which rtk` may be reachingforthejack/rtk (Rust Type Kit), a name collision. | `run_once_40-install-rtk.sh`; `rtk hook claude` PreToolUse hook in `modify_settings.json.json.tmpl`; agent-facing summary in `private_dot_claude/RTK.md` |
+| **design-brief** | Product brief (`PRODUCT.md`) and design brief with tokens (`DESIGN.md`) before UI work, a mode per surface (persuade / operate / read / experience), a short banned AI-slop list, and before/after screenshots from a real browser on the PR. Ideas adapted from impeccable and T3 Code's verify rule; no scripts or hooks. | Hand-written and vendored in `private_dot_claude/skills/design-brief/` |
 
 ### Claude Code hooks
 
@@ -60,6 +61,14 @@ Advisory hooks print context for the agent and exit 0 on any fault.
   shell helpers already cover this. See `docs/shell-helpers.md`.
 - **firstmate** (orchestrator agent driving tmux tabs) — the tmux dependency is
   high-friction on Windows, and the `Agent` tool already covers parallel work.
+- **tstack** (Theo's PR-lifecycle skills) — duplicates `no-mistakes`, `/ship`,
+  `/steward`, `task-dispatch` and the PR rules, and conflicts with them:
+  attribution in PR bodies and comments, merges with no R3 stop, and review
+  models hardcoded instead of routed through `agent-pace`.
+- **impeccable** (design skill) — downloads a native binary on first run and
+  adds SessionStart, Stop and per-Edit hooks that run it, ships ~1.7 MB of
+  bundled assets, and has no measured win here. Its brief, mode and craft-floor
+  ideas live on in `design-brief` instead.
 
 ### Installed but disabled
 

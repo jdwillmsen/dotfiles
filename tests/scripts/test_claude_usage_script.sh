@@ -73,19 +73,19 @@ w = m.present(row)["windows"]
 assert all(set(x) == set(w[0]) and "used_usd" in x for x in w), w
 PY
 
-# ── the browser: stop only what this run started, from fully stopped ──
+# ── the browser: release only the lease this run took, from fully stopped ──
 bin="$tmp/bin"; mkdir -p "$bin"
 cat >"$bin/agent-browser" <<'STUB'
 #!/usr/bin/env bash
 d="${STUB_DIR:?}"
-echo "${1:-status}" >>"$d/calls"
+if [ "${1:-}" = stop ]; then echo "stop${2:+:$2}"; else echo "${1:-status}"; fi >>"$d/calls"
 case "${1:-}" in
     check)
         case "$(cat "$d/login")" in
             fail) exit 1 ;;
             *) echo "site: x"; echo "logged_in: $(cat "$d/login")" ;;
         esac ;;
-    start) [ -e "$d/start_fails" ] || echo running >"$d/state"; echo "state: $(cat "$d/state")" ;;
+    start) [ -e "$d/start_fails" ] || { echo running >"$d/state"; echo "lease: s0-abc123"; }; echo "state: $(cat "$d/state")" ;;
     stop) echo stopped >"$d/state" ;;
     *) printf 'state: %s\nviewer: http://100.64.0.1:6080/vnc.html\n' "$(cat "$d/state")" ;;
 esac
@@ -108,13 +108,13 @@ drive() {  # drive STATE LOGIN [claude-usage args...]
 drive running yes now
 [ "$calls" = "status check " ] || fail "a running browser must be neither started nor stopped" "$calls"
 drive stopped yes now
-[ "$calls" = "status start status check stop " ] || fail "a stopped browser is started, then stopped by this run" "$calls"
+[ "$calls" = "status start status check stop:s0-abc123 " ] || fail "a stopped browser is started, then released by this run's lease" "$calls"
 drive partial yes now
 [ "$calls" = "status start status check " ] || fail "a half-up browser is repaired but never stopped" "$calls"
 drive stopped fail now
 [ "$code" = 1 ] || fail "a failing sign-in check must exit 1, got $code" "$(cat "$tmp/out")"
 grep -q "could not check" "$tmp/out" || fail "a failing check is not reported as such" "$(cat "$tmp/out")"
-[ "$calls" = "status start status check stop " ] || fail "the browser this run started is stopped even on error" "$calls"
+[ "$calls" = "status start status check stop:s0-abc123 " ] || fail "the lease this run took is released even on error" "$calls"
 # A start that does not bring the browser up is still cleaned up.
 : >"$STUB_DIR/start_fails"
 drive stopped yes now

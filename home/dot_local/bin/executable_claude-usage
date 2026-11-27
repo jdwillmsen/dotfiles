@@ -143,9 +143,11 @@ def sign_in():
     return None
 
 
-def stop_browser():
+def stop_browser(lease):
+    # Releasing the lease stops the browser only if no other agent took one
+    # meanwhile; a bare stop would leave it to agent-browser to refuse.
     try:
-        run(["agent-browser", "stop"])
+        run(["agent-browser", "stop"] + ([lease] if lease else []))
     except Exception:
         pass
 
@@ -156,12 +158,14 @@ def fetch_all():
     # running, or half up, belongs to someone else and is left as found.
     before = browser_state()
     started = before == "stopped"
+    lease = None
     # Everything after this point is inside the try, so a start that times out
     # or brings up only some components is still cleaned up by the finally.
     try:
         if before != "running":
             try:
-                run(["agent-browser", "start", SITE + "/new"], timeout=120)
+                out = run(["agent-browser", "start", SITE + "/new"], timeout=120).stdout
+                lease = next((l.split(": ", 1)[1] for l in out.splitlines() if l.startswith("lease: ")), None)
             except subprocess.TimeoutExpired:
                 pass
             if browser_state() != "running":
@@ -233,7 +237,7 @@ def fetch_all():
         return [None if isinstance(g, dict) and "__status" in g else g for g in got]
     finally:
         if started:
-            stop_browser()
+            stop_browser(lease)
 
 
 # ── commands ─────────────────────────────────────────────────────────────────

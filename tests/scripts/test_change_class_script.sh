@@ -1018,7 +1018,66 @@ real_case jdwlabs/deployments tools/check-prd-drift.py R3
 real_case dotablaze-tech/deployments charts/meowbot/templates/deployment.yaml R3
 real_case jdwillmsen/jdw-deployments charts/crew-lab/templates/crew-deployment.yaml R2
 
-# ── Exceptions: the policy file guards its own ──
+# ── Exceptions: the lab, proving grounds and crew top out at R2; FWB does not ──
+exc_paths() {
+    local repo="$1" want="$2" got=0
+    shift 2
+    ( cd "$tmp" && printf '%s\n' "$@" | "$cc" --rules "$rules" --files - --repo "$repo" ) \
+        >"$out" 2>"$err" || got=$?
+    [ "$got" = 0 ] || fail "classifying $* as $repo exited $got" "$(cat "$out" "$err")"
+    got="$(sed -n 's/^tier: //p' "$out")"
+    [ "$got" = "$want" ] || fail "$repo $* classified $got, want $want" "$(cat "$out")"
+}
+exc_paths jdwillmsen/jdw-deployments R2 charts/crew-lab/values-prd.yaml charts/crew-lab/templates/crew-deployment.yaml
+grep -qx '  prd-config (lab-pg-crew),R2,charts/crew-lab/values-prd.yaml' "$out" \
+    || fail "a lowered hit does not name the exception" "$(cat "$out")"
+exc_paths jdwillmsen/jdw-deployments R2 charts/proving-grounds/values-prd.yaml tools/proving-grounds-lab.py
+exc_paths jdwillmsen/jdw-deployments R2 charts/crew-lab/templates/crew-control-db-externalsecret.yaml
+exc_paths jdwillmsen/gameops R2 minecraft/crew-control/internal/store/store.go minecraft/crew-control/migrations/0007_events.sql
+exc_paths jdwillmsen/jdw-deployments R3 charts/crew-lab/values-prd.yaml charts/minecraft-fwb/values.yaml
+exc_paths jdwillmsen/jdw-deployments R3 charts/minecraft-fwb/values.yaml
+exc_paths jdwillmsen/jdw-deployments R3 charts/fwb-seed/values-prd.yaml
+exc_paths jdwillmsen/jdw-deployments R3 argocd/prd/config.yaml
+exc_paths jdwlabs/deployments R3 charts/crew-lab/templates/deployment.yaml
+exc_paths jdwlabs/deployments R3 charts/crew-lab/values-prd.yaml
+exc_paths acme/other R3 charts/crew-lab/values-prd.yaml
+
+# Without a known repo nothing proves the scope, so nothing is lowered.
+printf 'charts/crew-lab/values-prd.yaml\n' | ( cd "$tmp" && "$cc" --rules "$rules" --files - ) >"$out" 2>"$err"
+grep -qx 'tier: R3' "$out" || fail "an unknown repo was lowered by an exception" "$(cat "$out")"
+
+# Changed lines are never softened: a key in a lab file is still R3.
+lab_repo="$tmp/lab-repo"
+new_repo "$lab_repo"
+mkdir -p "$lab_repo/charts/crew-lab"
+printf 'a: 1\n' >"$lab_repo/charts/crew-lab/values-prd.yaml"
+commit_all "$lab_repo" base
+git -C "$lab_repo" update-ref refs/remotes/origin/main HEAD
+printf 'k: ghp_%s\n' "$(printf 'a%.0s' $(seq 30))" >>"$lab_repo/charts/crew-lab/values-prd.yaml"
+commit_all "$lab_repo" key
+( cd "$lab_repo" && "$cc" --rules "$rules" --repo jdwillmsen/jdw-deployments ) >"$out" 2>"$err"
+grep -qx 'tier: R3' "$out" || fail "a key in a lab file was lowered" "$(cat "$out")"
+grep -q 'embedded-key,R3' "$out" || fail "the key in a lab file gave no embedded-key reason" "$(cat "$out")"
+
+exc_plan() {
+    local repo="$1" want="$2" text="$3" got=0
+    ( cd "$tmp" && printf '%s\n' "$text" | "$cc" --rules "$rules" --plan - --repo "$repo" ) \
+        >"$out" 2>"$err" || got=$?
+    [ "$got" = 0 ] || fail "classifying plan as $repo exited $got" "$(cat "$out" "$err")"
+    got="$(sed -n 's/^tier: //p' "$out")"
+    [ "$got" = "$want" ] || fail "plan '$text' in $repo classified $got, want $want" "$(cat "$out")"
+}
+exc_plan jdwillmsen/jdw-deployments R2 "Roll out the crew-lab kit change to prd."
+exc_plan jdwillmsen/gameops R2 "Add a crew-control endpoint for unit jobs. Roll out crew-control to prd."
+exc_plan jdwillmsen/jdw-deployments R2 "Restart the proving grounds server after the values-prd bump."
+exc_plan jdwillmsen/jdw-deployments R3 "Roll out the crew-lab kit change to prd. Promote the platform chart too."
+exc_plan jdwillmsen/jdw-deployments R3 "Roll out the crew-lab and fwb-seed values to prd."
+exc_plan jdwillmsen/jdw-deployments R3 "Tune FWB view distance in prd."
+exc_plan jdwillmsen/jdw-deployments R3 "Roll out the new chart to prd."
+exc_plan jdwillmsen/jdw-deployments R3 "Wipe the crew-lab world."
+exc_plan jdwlabs/deployments R3 "Roll out the crew-lab kit change to prd."
+
+# The policy file guards its own exceptions.
 exc_rules() {
     sed -n '1,/^# --- path rules/p' "$rules" >"$tmp/exc.toml"
     cat >>"$tmp/exc.toml"

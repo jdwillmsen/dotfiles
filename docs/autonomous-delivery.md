@@ -32,6 +32,18 @@ promotion, infrastructure that gets applied, auth and secrets, data and
 migrations, network policy, the agent rules themselves, repository governance
 and game servers. Size alone lifts a change to at most R2.
 
+The one way down is an `[[exception]]` in the policy, and only an owner ruling
+adds one. It names the rules it may lower, the repos it covers, the path globs
+of its scope and, for plans, the words that name the scope. A hit is lowered
+only when its path is in scope, or when every plan sentence that trips the rule
+names the scope and nothing wider. Every other path and sentence keeps its own
+tier, so a mixed change stays high. Content rules (secrets, keys, cluster RBAC,
+destructive commands) can never be lowered, and an unknown repo lowers nothing.
+
+| Exception | Tops out at | Scope | Stays R3 |
+|---|---|---|---|
+| `lab-pg-crew` | R2 | `jdwillmsen/jdw-deployments` `charts/crew-lab`, `charts/proving-grounds` and their `tools/` scripts; `jdwillmsen/gameops` `minecraft/crew`, `minecraft/crew-control`, `minecraft/lab-packs`, `packs/lab-mods-*` | FWB, `fwb-seed`, `argocd/prd/config.yaml` (it also carries FWB), `minecraft/agent` (FWB's chat agent), plans that name FWB, the seed, the platform or shared pieces, and irreversible or live-ops plans |
+
 Tuning: a false R3 is a rule to narrow (add an `exclude`, tighten a glob), not a
 reason to lower the tier. A missed R3 is a rule to add, and that is a
 rules-file change, which is itself R3.

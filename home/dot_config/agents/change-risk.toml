@@ -1,5 +1,6 @@
 # Change risk policy, read by `change-class`. Highest matching tier wins, so
-# adding a rule can only make the classifier more cautious, never less.
+# adding a rule can only make the classifier more cautious, never less. The one
+# way down is an [[exception]] at the end, and only an owner ruling adds one.
 # R0 trivial   R1 low   R2 medium   R3 critical (the only tier a human reviews)
 
 [tiers.R0]
@@ -297,3 +298,25 @@ plan = ['(?i)\b(get rid of|tear ?down|take down|shut ?down|turn off|switch off|k
         '(?i)\b(lower|reduce|shorten|disable|remove|delete)\b[^.\n]{0,30}\b(retention|backups?|snapshots?|logging|monitoring|alerts?|mfa|2fa)\b',
         '(?i)\b(turn off|disable|skip|remove|drop|relax)\b[^.\n]{0,30}\b(required )?(reviews?|approvals?|checks?|protections?|signing)\b',
         '(?i)\b(give|grant|add|make|promote)\b[^.\n]{0,40}\b(admin|owner|maintainer|write access|root|sudo)\b']
+
+# --- exceptions --------------------------------------------------------------
+# An owner ruling that a named scope tops out at a lower tier. It lowers only
+# the listed rules, only in the listed repos, and only where the hit sits in
+# scope: a path matching `paths` (minus `exclude`), or a plan whose every
+# sentence that trips the rule matches `plan` and no `plan_exclude`. Anything
+# else in the same change keeps its own tier, so a mixed change stays high.
+# Content rules can never be listed.
+
+# The Minecraft lab, proving grounds and crew are test servers no real player
+# depends on. FWB and the fwb-seed world are not in scope. argocd/prd/config.yaml
+# also carries the FWB app, so a change there stays R3 even for a lab entry.
+# minecraft/agent is FWB's chat agent and stays out too.
+[[exception]]
+id = "lab-pg-crew"
+tier = "R2"
+rules = ["prd-config", "auth-and-secrets", "data-and-migrations", "game-world", "plan-production", "plan-people-impact"]
+repos = ["jdwillmsen/jdw-deployments", "jdwillmsen/gameops"]
+paths = ["charts/crew-lab/**", "charts/proving-grounds/**", "tools/crew-lab-*", "tools/proving-grounds-lab*",
+         "minecraft/crew/**", "minecraft/crew-control/**", "minecraft/lab-packs/**", "packs/lab-mods-*/**"]
+plan = ['(?i)\b(crew-lab|crew-control|crew|lab-packs|proving[- ]grounds|minecraft lab|the lab|lab (server|world)|pg (server|world))\b']
+plan_exclude = ['(?i)\b(fwb|seed|minecraft-fwb|main (server|world)|platform|shared|cluster|infra|jdwlabs|dotablaze|all (servers|worlds|apps)|every (server|world|app))\b']

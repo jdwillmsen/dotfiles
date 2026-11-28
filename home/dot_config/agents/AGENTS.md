@@ -101,7 +101,7 @@ unsure, classify up. Put the result on the PR and ticket as labels
 | R0 | docs, tests, comments | green CI | no |
 | R1 | ordinary code, dependencies | one agent reviewer, any family (another family when one is free) | no |
 | R2 | CI, deploy config, non-prd rollout, very large diffs | Sonnet-or-better reviewer, bot findings resolved | no |
-| R3 | prd, infra apply, auth and secrets, data and migrations, network, these rules, governance, game servers | Opus reviewer | **interview before work starts; approval before merge** |
+| R3 | prd, infra apply, auth and secrets, data and migrations, network, these rules, governance, game servers (the Minecraft lab, proving grounds and crew are R2) | Opus reviewer | **interview before work starts; approval before merge** |
 
 - An R3 plan is not started until the owner has been asked the open questions
   (blast radius, rollback, who is affected). Every other tier needs no

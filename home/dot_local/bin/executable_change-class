@@ -18,7 +18,7 @@ import time
 import tomllib
 from pathlib import Path
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 EXIT_FAIL, EXIT_USAGE, EXIT_DENIED = 1, 2, 3
 TIERS = ("R0", "R1", "R2", "R3")
 TIER_INDEX = {t: i for i, t in enumerate(TIERS)}
@@ -310,8 +310,50 @@ def load_policy(path):
             "paths": paths, "exclude": exclude, "content": content, "plan": plan, "repos": repos,
         })
 
+    by_id = {r["id"]: r for r in rules}
+    exceptions = []
+    raw_exceptions = data.get("exception", [])
+    if not isinstance(raw_exceptions, list):
+        fail(f"rules {path}: [[exception]] must be a list of tables")
+    for i, exc in enumerate(raw_exceptions):
+        where = f"{path}: exception {i + 1}"
+        if not isinstance(exc, dict):
+            fail(f"rules {where}: must be a table")
+        eid = exc.get("id")
+        if not isinstance(eid, str) or not eid:
+            fail(f"rules {where}: id must be a non-empty string")
+        where = f"{path}: exception {eid}"
+        tier = _tier(exc.get("tier"), where)
+        lowers = exc.get("rules")
+        if not isinstance(lowers, list) or not lowers or not all(isinstance(r, str) for r in lowers):
+            fail(f"rules {where}: rules must be a non-empty list of rule ids")
+        for rid in lowers:
+            if rid not in by_id:
+                fail(f"rules {where}: unknown rule {rid}")
+            # Changed lines carry secrets and destructive commands wherever
+            # they sit, so no scope may soften a content rule.
+            if by_id[rid]["content"]:
+                fail(f"rules {where}: rule {rid} scans content and cannot be lowered")
+            if by_id[rid]["plan"]:
+                fail(f"rules {where}: rule {rid} reads plans and cannot be lowered")
+        repos = repo_list(exc.get("repos"), where)
+        if not repos:
+            fail(f"rules {where}: repos must name the repositories it covers")
+        # A plan names its scope in free text, and no word list can prove
+        # that text leaves everything else out, so plans are never lowered.
+        for key in ("plan", "plan_exclude", "content"):
+            if key in exc:
+                fail(f"rules {where}: {key} is not supported, an exception lowers by paths only")
+        paths = glob_list(exc.get("paths"), where)
+        if not paths:
+            fail(f"rules {where}: needs paths")
+        exceptions.append({
+            "id": eid, "tier": tier, "rules": set(lowers), "repos": repos, "paths": paths,
+            "exclude": glob_list(exc.get("exclude"), where),
+        })
+
     return {"tiers": clean_tiers, "size": clean_size, "default": clean_default,
-            "floors": floors, "rules": rules}
+            "floors": floors, "rules": rules, "exceptions": exceptions}
 
 
 # ── Repository and diff inputs ───────────────────────────────────────────────
@@ -748,6 +790,21 @@ def _rule_applies(rule, full, bare, repo_known):
     return any(_repo_matches(r, full, bare) for r in rule["repos"])
 
 
+def _exception_for(policy, rule, full, bare, repo_known, in_scope):
+    """The first owner-approved exception that lowers this rule for this hit, if any."""
+    if not repo_known:
+        return None
+    for exc in policy.get("exceptions", []):
+        if rule["id"] in exc["rules"] and TIER_INDEX[rule["tier"]] > TIER_INDEX[exc["tier"]] \
+                and any(_repo_matches(r, full, bare) for r in exc["repos"]) and in_scope(exc):
+            return exc
+    return None
+
+
+def _path_in_scope(exc, path):
+    return matches(exc["paths"], path) and not matches(exc["exclude"], path)
+
+
 def classify(paths, bad, lines, changed, plan_text, policy, repo, repo_known, content_scanned, explain,
              scan_skipped=False):
     reasons = []
@@ -792,10 +849,14 @@ def classify(paths, bad, lines, changed, plan_text, policy, repo, repo_known, co
             best = max(best, TIER_INDEX[default["tier"]])
             continue
         for rule in matched:
-            reasons.append({"rule": rule["id"], "tier": rule["tier"], "where": path,
-                            "tag": rule["tag"]})
+            tier, name = rule["tier"], rule["id"]
+            exc = _exception_for(policy, rule, repo, bare, repo_known,
+                                 lambda e: _path_in_scope(e, path))
+            if exc:
+                tier, name = exc["tier"], f"{rule['id']} ({exc['id']})"
+            reasons.append({"rule": name, "tier": tier, "where": path, "tag": rule["tag"]})
             tags.add(rule["tag"])
-            best = max(best, TIER_INDEX[rule["tier"]])
+            best = max(best, TIER_INDEX[tier])
 
     deadline = time.monotonic() + SCAN_BUDGET_SECONDS
     out_of_time = False

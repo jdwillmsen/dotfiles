@@ -1,5 +1,6 @@
 # Change risk policy, read by `change-class`. Highest matching tier wins, so
-# adding a rule can only make the classifier more cautious, never less.
+# adding a rule can only make the classifier more cautious, never less. The one
+# way down is an [[exception]] at the end, and only an owner ruling adds one.
 # R0 trivial   R1 low   R2 medium   R3 critical (the only tier a human reviews)
 
 [tiers.R0]
@@ -226,6 +227,19 @@ tier = "R3"
 content = ['\brm\s+(-[a-zA-Z]+\s+|--[a-z-]+\s+)+(/(?!tmp/[A-Za-z0-9_.-]*[A-Za-z0-9_-](\s|[\x22\x27]|$))|~|[\x22\x27]?\$HOME)', '\bkubectl\s+delete\b', '\bterraform\s+destroy\b', '\bgit\s+push\b[^\n;|&]*\s(-f\b|--force\b|\+[^\s]+)', '(?i)\bDROP\s+(TABLE|DATABASE|SCHEMA)\b', '(?i)\bTRUNCATE\s+TABLE\b', '(?i)\bDELETE\s+FROM\b(?![^;]*\bWHERE\b)']
 exclude = ["**/*.md", "docs/**", "tests/**", "**/test_*.sh"]
 
+# Lab and crew files that name FWB, or fwb-seed's ports (31300, 31301,
+# 31310-31329, public 19135), point at a real players' world, which the
+# lab-pg-crew exception must never reach. Comment lines are skipped because the
+# lab charts explain themselves against FWB throughout.
+[[rule]]
+id = "fwb-reference"
+tag = "players"
+tier = "R3"
+repos = ["jdwillmsen/jdw-deployments", "jdwillmsen/gameops"]
+content = ['(?i)^(?!\s*(#|//|/\*|\*|\{\{-?\s*/\*)).*(?<![a-z])fwb',
+           '^(?!\s*(#|//|/\*|\*|\{\{-?\s*/\*)).*(?<![0-9])(3130[01]|313[12][0-9]|19135)(?![0-9])']
+exclude = ["**/*.md", "docs/**", "tests/**", "**/tests/**", "**/*_test.go", "**/*.test.*", "**/test_*", "**/test-*"]
+
 # --- plan rules --------------------------------------------------------------
 # Tried against the plan text (or a ticket body or PR description). A hit
 # classifies the whole piece of work before any agent starts, and an R3 plan
@@ -253,7 +267,13 @@ plan = ['(?i)\brotat(e|ing)\b[^.\n]{0,30}\b(secret|key|token|credential|password
 id = "plan-people-impact"
 tag = "players"
 tier = "R3"
-plan = ['(?i)\brestart\b[^.\n]{0,40}\b(server|game|minecraft|players?)', '(?i)\b(players?|users?)\b[^.\n]{0,30}\b(online|connected|mid-?game)', '(?i)\b(billing|payment|invoice|spend|purchase)s?\b']
+plan = ['(?i)\brestart\b[^.\n]{0,40}\b(server|game|minecraft|players?)', '(?i)\b(players?|users?)\b[^.\n]{0,30}\b(online|connected|mid-?game)']
+
+[[rule]]
+id = "plan-money"
+tag = "money"
+tier = "R3"
+plan = ['(?i)\b(billing|payment|invoice|spend|purchase)s?\b']
 
 [[rule]]
 id = "plan-exposure"
@@ -297,3 +317,26 @@ plan = ['(?i)\b(get rid of|tear ?down|take down|shut ?down|turn off|switch off|k
         '(?i)\b(lower|reduce|shorten|disable|remove|delete)\b[^.\n]{0,30}\b(retention|backups?|snapshots?|logging|monitoring|alerts?|mfa|2fa)\b',
         '(?i)\b(turn off|disable|skip|remove|drop|relax)\b[^.\n]{0,30}\b(required )?(reviews?|approvals?|checks?|protections?|signing)\b',
         '(?i)\b(give|grant|add|make|promote)\b[^.\n]{0,40}\b(admin|owner|maintainer|write access|root|sudo)\b']
+
+# --- exceptions --------------------------------------------------------------
+# An owner ruling that a named scope tops out at a lower tier. It lowers only
+# the listed path rules, only in the listed repos, and only for a path matching
+# `paths` (minus `exclude`). Anything else in the same change keeps its own
+# tier, so a mixed change stays high. Content and plan rules can never be
+# listed, so a plan for scoped work still gets its R3 interview.
+
+# The Minecraft lab, proving grounds and crew are test servers no real player
+# depends on. FWB and the fwb-seed world are not in scope. argocd/prd/config.yaml
+# also carries the FWB app, so a change there stays R3 even for a lab entry.
+# minecraft/agent is FWB's chat agent and stays out too. charts/crew-lab/values.yaml
+# defines crew-23, a unit that plays on fwb-seed with FWB's afk-bot-2 account,
+# and an edit to its image or plan cannot be told apart line by line from any
+# other unit's, so the exception never lowers that file.
+[[exception]]
+id = "lab-pg-crew"
+tier = "R2"
+rules = ["prd-config", "auth-and-secrets", "data-and-migrations", "game-world"]
+repos = ["jdwillmsen/jdw-deployments", "jdwillmsen/gameops"]
+paths = ["charts/crew-lab/**", "charts/proving-grounds/**", "tools/crew-lab-*", "tools/proving-grounds-lab*",
+         "minecraft/crew/**", "minecraft/crew-control/**", "minecraft/lab-packs/**", "packs/lab-mods-*/**"]
+exclude = ["charts/crew-lab/values.yaml"]

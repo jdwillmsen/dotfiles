@@ -764,7 +764,7 @@ run 2 --fail-at R9
 run 2 --bogus
 
 run 0 --version
-grep -qx '1.0.0' "$out" || fail "--version did not print the version" "$(cat "$out")"
+grep -qx '1.1.0' "$out" || fail "--version did not print the version" "$(cat "$out")"
 
 
 # --plan alone must ignore the working diff (the repo above has an R1 diff).
@@ -1017,5 +1017,177 @@ real_case jdwlabs/apps apps/auth/package.json R2
 real_case jdwlabs/deployments tools/check-prd-drift.py R3
 real_case dotablaze-tech/deployments charts/meowbot/templates/deployment.yaml R3
 real_case jdwillmsen/jdw-deployments charts/crew-lab/templates/crew-deployment.yaml R2
+
+# ── Exceptions: the lab, proving grounds and crew top out at R2; FWB does not ──
+exc_paths() {
+    local repo="$1" want="$2" got=0
+    shift 2
+    ( cd "$tmp" && printf '%s\n' "$@" | "$cc" --rules "$rules" --files - --repo "$repo" ) \
+        >"$out" 2>"$err" || got=$?
+    [ "$got" = 0 ] || fail "classifying $* as $repo exited $got" "$(cat "$out" "$err")"
+    got="$(sed -n 's/^tier: //p' "$out")"
+    [ "$got" = "$want" ] || fail "$repo $* classified $got, want $want" "$(cat "$out")"
+}
+exc_paths jdwillmsen/jdw-deployments R2 charts/crew-lab/values-prd.yaml charts/crew-lab/templates/crew-deployment.yaml
+grep -qx '  prd-config (lab-pg-crew),R2,charts/crew-lab/values-prd.yaml' "$out" \
+    || fail "a lowered hit does not name the exception" "$(cat "$out")"
+exc_paths jdwillmsen/jdw-deployments R2 charts/proving-grounds/values-prd.yaml tools/proving-grounds-lab.py
+exc_paths jdwillmsen/jdw-deployments R2 charts/crew-lab/templates/crew-control-db-externalsecret.yaml
+exc_paths jdwillmsen/gameops R2 minecraft/crew-control/internal/store/store.go minecraft/crew-control/migrations/0007_events.sql
+exc_paths jdwillmsen/jdw-deployments R3 charts/crew-lab/values-prd.yaml charts/minecraft-fwb/values.yaml
+exc_paths jdwillmsen/jdw-deployments R3 charts/minecraft-fwb/values.yaml
+exc_paths jdwillmsen/jdw-deployments R3 charts/fwb-seed/values-prd.yaml
+exc_paths jdwillmsen/jdw-deployments R3 argocd/prd/config.yaml
+exc_paths jdwlabs/deployments R3 charts/crew-lab/templates/deployment.yaml
+exc_paths jdwlabs/deployments R3 charts/crew-lab/values-prd.yaml
+exc_paths acme/other R3 charts/crew-lab/values-prd.yaml
+
+# Without a known repo nothing proves the scope, so nothing is lowered.
+printf 'charts/crew-lab/values-prd.yaml\n' | ( cd "$tmp" && "$cc" --rules "$rules" --files - ) >"$out" 2>"$err"
+grep -qx 'tier: R3' "$out" || fail "an unknown repo was lowered by an exception" "$(cat "$out")"
+
+# Changed lines are never softened: a key in a lab file is still R3.
+lab_repo="$tmp/lab-repo"
+new_repo "$lab_repo"
+mkdir -p "$lab_repo/charts/crew-lab"
+printf 'a: 1\n' >"$lab_repo/charts/crew-lab/values-prd.yaml"
+commit_all "$lab_repo" base
+git -C "$lab_repo" update-ref refs/remotes/origin/main HEAD
+printf 'k: ghp_%s\n' "$(printf 'a%.0s' $(seq 30))" >>"$lab_repo/charts/crew-lab/values-prd.yaml"
+commit_all "$lab_repo" key
+( cd "$lab_repo" && "$cc" --rules "$rules" --repo jdwillmsen/jdw-deployments ) >"$out" 2>"$err"
+grep -qx 'tier: R3' "$out" || fail "a key in a lab file was lowered" "$(cat "$out")"
+grep -q 'embedded-key,R3' "$out" || fail "the key in a lab file gave no embedded-key reason" "$(cat "$out")"
+
+exc_plan() {
+    local repo="$1" want="$2" text="$3" got=0
+    ( cd "$tmp" && printf '%s\n' "$text" | "$cc" --rules "$rules" --plan - --repo "$repo" ) \
+        >"$out" 2>"$err" || got=$?
+    [ "$got" = 0 ] || fail "classifying plan as $repo exited $got" "$(cat "$out" "$err")"
+    got="$(sed -n 's/^tier: //p' "$out")"
+    [ "$got" = "$want" ] || fail "plan '$text' in $repo classified $got, want $want" "$(cat "$out")"
+}
+# Plans are never lowered: a word list cannot prove a sentence stays in scope.
+exc_plan jdwillmsen/jdw-deployments R3 "Roll out the crew-lab kit change to prd."
+exc_plan jdwillmsen/jdw-deployments R3 "Restart the lab server and the main minecraft server."
+exc_plan jdwillmsen/jdw-deployments R3 "Restart the crew lab and the survival server."
+exc_plan jdwillmsen/gameops R3 "Roll out crew-control and the auth service to prd."
+exc_plan jdwillmsen/jdw-deployments R3 "Restart the proving grounds server, then the one players use."
+exc_plan jdwillmsen/jdw-deployments R3 "Purchase a new dedicated server for the crew lab."
+grep -q 'plan-money,R3,plan' "$out" || fail "a purchase plan was not caught by plan-money" "$(cat "$out")"
+exc_plan jdwillmsen/jdw-deployments R3 "Tune FWB view distance in prd."
+exc_plan jdwillmsen/jdw-deployments R3 "Wipe the crew-lab world."
+
+# A changed line that names FWB is R3 even in a lab file; content rules are
+# never lowered. A lab comment about FWB and a plain lab change stay R2.
+lab_diff() {
+    local want="$1" line="$2"
+    git -C "$lab_repo" reset -q --hard origin/main
+    printf '%s\n' "$line" >>"$lab_repo/charts/crew-lab/values.yaml"
+    commit_all "$lab_repo" change
+    ( cd "$lab_repo" && "$cc" --rules "$rules" --repo jdwillmsen/jdw-deployments ) >"$out" 2>"$err"
+    grep -qx "tier: $want" "$out" || fail "lab line '$line' did not classify $want" "$(cat "$out")"
+}
+printf 'b: 1\n' >"$lab_repo/charts/crew-lab/values.yaml"
+commit_all "$lab_repo" values
+git -C "$lab_repo" update-ref refs/remotes/origin/main HEAD
+lab_diff R3 "      server: minecraft-fwb-seed"
+grep -q 'fwb-reference,R3,charts/crew-lab/values.yaml' "$out" || fail "the FWB line gave no fwb-reference reason" "$(cat "$out")"
+lab_diff R3 "      name: fwb_afk_bot_2"
+lab_diff R2 "      server: crew-lab"
+lab_diff R2 "  # An idle unit holds what an FWB AFK bot holds."
+lab_diff R3 "      chest: *fwbSeedDeliveryChest"
+lab_diff R3 "        port: 31301"
+grep -q 'fwb-reference,R3,charts/crew-lab/values.yaml' "$out" || fail "an fwb-seed port gave no fwb-reference reason" "$(cat "$out")"
+lab_diff R3 "        nodePort: 31315"
+lab_diff R2 "        port: 31302"
+lab_diff R2 "  # fwb-seed listens on 31301."
+
+# A plain crew-lab template change stays R2; values.yaml is never lowered.
+git -C "$lab_repo" reset -q --hard origin/main
+mkdir -p "$lab_repo/charts/crew-lab/templates"
+printf 'kind: Deployment\n' >"$lab_repo/charts/crew-lab/templates/crew-deployment.yaml"
+commit_all "$lab_repo" template
+( cd "$lab_repo" && "$cc" --rules "$rules" --repo jdwillmsen/jdw-deployments ) >"$out" 2>"$err"
+grep -qx 'tier: R2' "$out" || fail "a plain crew-lab template change was not R2" "$(cat "$out")"
+exc_paths jdwillmsen/jdw-deployments R2 charts/crew-lab/templates/crew-control-db-externalsecret.yaml
+exc_paths jdwillmsen/jdw-deployments R2 charts/crew-lab/values.yaml
+grep -q 'lab-pg-crew' "$out" && fail "the exception reached charts/crew-lab/values.yaml" "$(cat "$out")"
+
+# The policy file guards its own exceptions.
+exc_rules() {
+    sed -n '1,/^# --- path rules/p' "$rules" >"$tmp/exc.toml"
+    cat >>"$tmp/exc.toml"
+    run 1 --rules "$tmp/exc.toml" --plan /dev/null
+}
+exc_rules <<'TOML'
+[[rule]]
+id = "k"
+tag = "secrets"
+tier = "R3"
+content = ['key']
+
+[[exception]]
+id = "x"
+tier = "R2"
+rules = ["k"]
+repos = ["a/b"]
+paths = ["x/**"]
+TOML
+grep -q 'cannot be lowered' "$out" || fail "an exception lowered a content rule" "$(cat "$out")"
+exc_rules <<'TOML'
+[[exception]]
+id = "x"
+tier = "R2"
+rules = ["nope"]
+repos = ["a/b"]
+paths = ["x/**"]
+TOML
+grep -q 'unknown rule nope' "$out" || fail "an exception named an unknown rule" "$(cat "$out")"
+exc_rules <<'TOML'
+[[rule]]
+id = "p"
+tag = "prd"
+tier = "R3"
+paths = ["**/prd/**"]
+
+[[exception]]
+id = "x"
+tier = "R2"
+rules = ["p"]
+paths = ["x/**"]
+TOML
+grep -q 'repos must name' "$out" || fail "an exception without repos was accepted" "$(cat "$out")"
+exc_rules <<'TOML'
+[[rule]]
+id = "p"
+tag = "prd"
+tier = "R3"
+paths = ["**/prd/**"]
+
+[[exception]]
+id = "x"
+tier = "R2"
+rules = ["p"]
+repos = ["a/b"]
+paths = ["x/**"]
+plan = ['x']
+TOML
+grep -q 'plan is not supported' "$out" || fail "an exception accepted plan scoping" "$(cat "$out")"
+exc_rules <<'TOML'
+[[rule]]
+id = "pp"
+tag = "prd"
+tier = "R3"
+plan = ['prd']
+
+[[exception]]
+id = "x"
+tier = "R2"
+rules = ["pp"]
+repos = ["a/b"]
+paths = ["x/**"]
+TOML
+grep -q 'reads plans and cannot be lowered' "$out" || fail "an exception lowered a plan rule" "$(cat "$out")"
 
 echo "test_change_class_script: OK"

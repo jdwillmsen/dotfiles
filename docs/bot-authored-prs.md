@@ -15,6 +15,11 @@ The bot cannot approve its own PR either, so a bot-authored PR still waits for
 the human. It can approve a `jdwillmsen`-authored PR, which satisfies a plain
 approval count but never a CODEOWNERS gate.
 
+An owner's chat approval recorded with `merge-captain approve-from-chat` lets
+the captain merge an R3 PR, but it is not a GitHub review: where the ruleset
+requires an approving review, the owner still approves on GitHub
+(`docs/merge-captain.md`, "Owner chat approval").
+
 ## Where the credentials are
 
 There is no local helper. The App's credentials are in the Kubernetes secret

@@ -4,8 +4,10 @@
 Walks the configured repositories, classifies each open pull request with
 change-class, applies the repository's own gates (checks, review threads,
 code scanning), asks the lane agent-pace picks for a review where the tier
-needs one, and merges with the head commit pinned. R3 is never merged. Only a
-`live` repository is ever written to. Each owner's gh calls use that owner's
+needs one, and merges with the head commit pinned. A tier above the
+repository's ceiling (R3 always) is merged only on the owner's chat approval
+for that exact head, recorded with `approve-from-chat`. Only a `live`
+repository is ever written to. Each owner's gh calls use that owner's
 fine-grained token when one is saved (`auth`), else the default gh login.
 Agent-facing: stdout is TOON, diagnostics go to stderr.
 """
@@ -23,6 +25,7 @@ import re
 import shlex
 import shutil
 import signal
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -64,12 +67,13 @@ REVIEWS = STATE / "reviews.jsonl"
 ATTEMPTS = STATE / "attempts.jsonl"
 APPROVALS = STATE / "approvals.jsonl"
 HUMAN = STATE / "human.jsonl"
+CHAT_APPROVALS = STATE / "chat-approvals.jsonl"
 ROLLOUTS = STATE / "rollouts.jsonl"
 LOCK = STATE / "lock"
 
 TIERS = ("R0", "R1", "R2", "R3")
 MODES = ("live", "dry-run", "off")
-# R3 is never mergeable here, so it is not a legal ceiling.
+# R3 is merged only on the owner's recorded chat approval, never on a ceiling, so it is not a legal one.
 CEILINGS = ("R0", "R1", "R2")
 # Anything that moves a tool, a config file or a directory the captain trusts with credentials is an override, so any
 # variable with this prefix counts, and so does one added later. Overrides exist for the tests: set in a real run they
@@ -134,12 +138,25 @@ REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 TICKET = re.compile(r"[A-Z][A-Z0-9]*-[0-9]+")
 MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@-]*")
 IDENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9:_.-]{0,63}")
+THREAD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9:_.%-]{0,255}")
+# Where T3 Code says who wrote a message: only text the owner typed in its web or mobile app counts. Agent sends
+# (MCP, delegation, notifications) and server-made "user" turns, such as an answered question, are refused.
+T3_OWNER_SOURCES = ("web", "mobile")
+T3_AGENT_MARKS = ("senderThreadId", "notification", "scheduledTaskId", "workflowScript", "delegatedCompletion",
+                  "idleCompaction")
+CHAT_LABEL = "approved/owner-chat"
+QUOTE_MAX = 300
+# An approval is the owner's whole message and must be exactly "<word> <ref> <sha>" or "<ref> <sha> <word>", optionally
+# ending in "." or "!". Anything else, however harmless it reads, is refused: a blocklist of hedges can always be talked
+# around. The full 40-character sha binds it to exactly the commit the owner saw: any prefix short of that can be
+# matched by a second commit the same agent makes (a birthday search), then swapped in by a push.
+APPROVAL_VERB = r"(?:approve|approved|lgtm|ship it|merge it)"
 # Trailers that name who wrote a commit: `Assisted-by: <agent>:<model-id> [tools]` and `Co-Authored-By: <name> <mail>`.
 ASSISTED_BY = re.compile(r"^\s*assisted-by:\s*[^:\[\]]+?:\s*([A-Za-z0-9][A-Za-z0-9._/@-]*)", re.I)
 CO_AUTHORED_BY = re.compile(r"^\s*co-authored-by:\s*(.+?)\s*(?:<[^>]*>)?\s*$", re.I)
 GOOD_CONCLUSIONS = ("SUCCESS", "NEUTRAL", "SKIPPED")
 LABEL_COLOURS = {"risk/R0": "0e8a16", "risk/R1": "fbca04", "risk/R2": "d93f0b", "risk/R3": "b60205",
-                 "needs-human": "b60205", "agent-changes-requested": "d93f0b"}
+                 "needs-human": "b60205", "agent-changes-requested": "d93f0b", CHAT_LABEL: "0e8a16"}
 TAG_COLOUR = "ededed"
 LABEL_NOTE = "merge-captain"
 # Flags that would widen what a merge or edit may do. Nothing here builds one,
@@ -195,7 +212,7 @@ PROMPT_SECRETS = (
                 r"(?:\"[^\"\n]{6,}\"|'[^'\n]{6,}'|[A-Za-z0-9_+/=@%^*!~:-]{8,})"), r"\1[redacted]"),
 )
 
-USAGE_SHORT = "merge-captain [run | status | pause | resume | explain | auth | auth-app] [--help]"
+USAGE_SHORT = "merge-captain [run | status | pause | resume | explain | approve-from-chat | auth | auth-app] [--help]"
 
 
 def log(msg):
@@ -283,6 +300,50 @@ def clean(text, limit=300):
 
 def shown_names(names):
     return ", ".join(clean(x, 60) for x in names[:3])
+
+
+def names_pr(text, repo, n):
+    """Whether `text` names exactly this pull request: repo#N, owner/repo#N or its URL. A bare number, another
+    repository's #N or a longer number that starts with N does not count."""
+    owner, name = (re.escape(x) for x in repo.split("/"))
+    ref = rf"(?:{owner}/)?{name}#{n}"
+    url = rf"(?:https?://)?github\.com/{owner}/{name}/pull/{n}"
+    return re.search(rf"(?i)(?<![\w./-])(?:{ref}|{url})(?!\w)", str(text)) is not None
+
+
+def normal_text(text):
+    return re.sub(r"\s+", " ", str(text)).strip()
+
+
+def bare_name_shared(repos, repo):
+    """Whether another configured repository has the same name under another owner, so `name#N` is ambiguous."""
+    name = repo.split("/")[1].lower()
+    return sum(1 for r in repos if r["name"].split("/")[1].lower() == name) > 1
+
+
+def approval_sha(text, repo, n, need_owner=False):
+    """The full commit sha the owner's whole message approves for this pull request, lower-cased, or None when the
+    message is not exactly an approval of it. Printable ASCII only, so zero-width and look-alike characters cannot
+    hide a word; backticks and `>` cannot match. With `need_owner` a bare `name#N` does not count."""
+    raw = str(text)
+    if not raw.isascii() or any(not (c.isprintable() or c in " \t\n\r") for c in raw):
+        return None
+    text = normal_text(raw)
+    if not text or len(text) > QUOTE_MAX:
+        return None
+    owner, name = (re.escape(x) for x in repo.split("/"))
+    ref = rf"(?:(?:{owner}/){'' if need_owner else '?'}{name}#{n}|(?:https?://)?github\.com/{owner}/{name}/pull/{n})"
+    sha = r"([0-9a-fA-F]{40})"
+    m = re.fullmatch(rf"(?i)(?:{APPROVAL_VERB}[ ,:]+{ref}[ ,:@]+{sha}|{ref}[ ,:@]+{sha}[ ,:]+{APPROVAL_VERB})[.!]?",
+                     text)
+    found = next((g for g in m.groups() if g), None) if m else None
+    return found.lower() if found else None
+
+
+def approves_pr(text, repo, n, head, need_owner=False):
+    """Whether the owner's whole message approves exactly this pull request at exactly this head."""
+    sha = approval_sha(text, repo, n, need_owner)
+    return sha is not None and str(head).lower() == sha
 
 
 def md_safe(text, limit):
@@ -377,7 +438,7 @@ def load_config():
         ceiling = row.get("max_tier", "R0")
         if ceiling not in CEILINGS:
             die(EXIT_FAIL, f"repo {name}: max_tier must be one of {','.join(CEILINGS)} "
-                           f"(R3 is never merged), got {ceiling!r}")
+                           f"(R3 needs the owner's chat approval), got {ceiling!r}")
         no_checks = row.get("allow_no_checks", False)
         if not isinstance(no_checks, bool):
             die(EXIT_FAIL, f"repo {name}: allow_no_checks must be true or false, got {no_checks!r}")
@@ -510,6 +571,81 @@ def test_mode():
     if os.path.realpath(sys.argv[0]) == os.path.realpath(INSTALLED):
         return False
     return under_temp(TOKENS) and under_temp(STATE)
+
+
+def t3_db():
+    """T3 Code's own message store. A test run may name its own; a real run always reads the account's."""
+    if test_mode() and os.environ.get("MERGE_CAPTAIN_T3_DB"):
+        return Path(os.environ["MERGE_CAPTAIN_T3_DB"])
+    return Path(ACCOUNT_HOME) / ".t3/userdata/statev2.sqlite"
+
+
+def owner_messages(thread=None, n=None):
+    """(message id, sent epoch, text) for every message the owner typed, oldest first: in `thread`, or in every
+    thread when it is None (then only messages that mention #n or /pull/n are read, which every naming of the pull
+    request does). None when the store cannot be read. The store is opened read-only; a missing file, another schema
+    or any error is None, so an approval fails closed.
+
+    A message whose updatedAt differs from its createdAt, or lacks either, is not the owner's: T3 lets an agent edit
+    a queued message in place, keeping its author and source and moving only updatedAt."""
+    path = t3_db()
+    if not path.is_file():
+        return None
+    sql = "SELECT message_id, thread_id, created_at, payload_json FROM orchestration_v2_projection_messages " \
+          "WHERE role = 'user'"
+    if thread is not None:
+        sql, args = sql + " AND thread_id = ?", (thread,)
+    else:
+        sql, args = sql + " AND (instr(payload_json, ?) > 0 OR instr(payload_json, ?) > 0)", (f"#{n}", f"/pull/{n}")
+    con = None
+    try:
+        con = sqlite3.connect(f"file:{urllib.parse.quote(str(path))}?mode=ro", uri=True, timeout=5)
+        rows = con.execute(sql + " ORDER BY created_at, message_id", args).fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        if con is not None:
+            con.close()
+    found = []
+    for mid, tid, created, payload in rows:
+        try:
+            j = json.loads(payload)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(j, dict) or j.get("createdBy") != "user" or j.get("creationSource") not in T3_OWNER_SOURCES:
+            continue
+        if j.get("threadId") != tid or any(j.get(k) for k in T3_AGENT_MARKS):
+            continue
+        made, changed = j.get("createdAt"), j.get("updatedAt")
+        if not (isinstance(made, str) and made and made == changed):
+            continue
+        text, sent = j.get("text"), parse_time(created)
+        if isinstance(text, str) and isinstance(mid, str) and sent is not None:
+            found.append((mid, sent, text))
+    return found
+
+
+def owner_approval(thread, repo, n, head, quote=None, message_id=None, need_owner=False):
+    """((message id, sent epoch, text), None) for the owner's newest approval of this pull request at `head` in
+    `thread` matching `quote` (whole text, whitespace aside) or `message_id`, else (None, why). A later message of
+    theirs in any thread that names the pull request without approving this head is a retraction, and wins."""
+    msgs = owner_messages(thread)
+    if msgs is None:
+        return None, "the T3 message store cannot be read"
+    hits = [m for m in msgs if (message_id is None or m[0] == message_id)
+            and (quote is None or normal_text(m[2]) == normal_text(quote))]
+    if not hits:
+        return None, "no unedited message the owner typed in that thread is exactly this text"
+    hit = hits[-1]
+    if not approves_pr(hit[2], repo, n, head, need_owner):
+        return None, f"the owner's message is not an approval of {repo}#{n} at {head[:12]}"
+    everywhere = owner_messages(None, n)
+    if everywhere is None:
+        return None, "the T3 message store cannot be read"
+    if any(m[1] >= hit[1] and m[0] != hit[0] and names_pr(m[2], repo, n)
+           and not approves_pr(m[2], repo, n, head, need_owner) for m in everywhere):
+        return None, f"a later message from the owner names {repo}#{n} without approving it"
+    return hit, None
 
 
 def tool_path(env_name, name):
@@ -1583,6 +1719,23 @@ class Captain:
         append_jsonl(REVIEWS, {"repo": repo, "pr": n, "head": head, "tier": tier, "verdict": verdict, "lane": lane,
                                "assignment": assignment, "at": iso(self.now)}, durable=True)
 
+    def chat_approval(self, repo, n, head):
+        """The owner's chat approval for exactly this head, or None. A row in the state file says which message to
+        look at; it counts only if T3 still holds that message, typed by the owner in that thread, reading as a plain
+        approval of this pull request naming this head's full sha, with no later retraction. The row and the label
+        are bookkeeping: either can be forged, so neither is trusted on its own."""
+        rows = [r for r in read_jsonl(CHAT_APPROVALS)
+                if r.get("repo") == repo and r.get("pr") == n and r.get("head") == head
+                and isinstance(r.get("thread"), str) and THREAD_ID.fullmatch(r["thread"])
+                and isinstance(r.get("message"), str)]
+        for r in reversed(rows):
+            hit, why = owner_approval(r["thread"], repo, n, head, message_id=r["message"],
+                                      need_owner=bare_name_shared(self.cfg["repos"], repo))
+            if hit:
+                return r
+            self.step("owner", why)
+        return None
+
     def human_noted(self, repo, n, head, kind):
         return any(row.get("repo") == repo and row.get("pr") == n and row.get("head") == head
                    and row.get("kind") == kind for row in read_jsonl(HUMAN))
@@ -2321,18 +2474,31 @@ class Captain:
             self.edit_labels(repo, n, [w for w in wanted if w not in labels], stale)
 
         ceiling = rc["max_tier"]
+        owner_ok = None
         if TIERS.index(tier) > TIERS.index(ceiling):
             rules = ",".join(sorted({r["rule"] for r in reasons if r["tier"] == tier}))[:120]
             why = f"{tier} above max {ceiling}" + (f": {rules}" if rules else "")
-            self.step("tier", why)
-            self.hand_to_human(repo, n, head, tier, reasons, details, "tier",
-                               f"Risk tier {tier} is above the {ceiling} this repository lets the captain merge, "
-                               "so it is left for a person.", why)
+            owner_ok = self.chat_approval(repo, n, head) if CHAT_LABEL in labels else None
+            if owner_ok:
+                self.step("owner", f"chat approval from thread {owner_ok['thread']} for {head[:12]}")
+            else:
+                text = (f"Risk tier {tier} is above the {ceiling} this repository lets the captain merge, "
+                        "so it is left for a person.")
+                if CHAT_LABEL in labels:
+                    # Left in place, the label would tell a person this commit was approved when it was not.
+                    self.step("owner", "label without a recorded chat approval for this head")
+                    if self.live:
+                        self.edit_labels(repo, n, [], [CHAT_LABEL])
+                    text += (" No chat approval the owner typed is on record for this commit, so the label does not "
+                             "count; a new approval for this head is needed.")
+                self.step("tier", why)
+                self.hand_to_human(repo, n, head, tier, reasons, details, "tier", text, why)
 
         needs_approval = self.gate(rc, n, details)
         self.step("gates", "met, approval required" if needs_approval else "met")
 
         lane = None
+        owner_note = f"owner chat approval in thread {owner_ok['thread']}; " if owner_ok else ""
         if tier != "R0":
             on_record = self.review_on_record(repo, n, head, tier)
             if on_record == "changes":
@@ -2341,7 +2507,7 @@ class Captain:
                 self.step("review", "approve on record")
                 reason = "review approve on record"
             elif not self.live:
-                raise Stop("would-merge", f"gates met; {tier} review pending, would review then merge")
+                raise Stop("would-merge", f"{owner_note}gates met; {tier} review pending, would review then merge")
             else:
                 lane = self.review(repo, n, head, tier, tags, reasons, details)
                 reason = f"review approve by {lane}"
@@ -2350,6 +2516,7 @@ class Captain:
         else:
             reason = "R0 gates met, no review needed"
         d["lane"] = lane
+        reason = owner_note + reason
 
         if not self.live:
             raise Stop("would-merge", reason + ("; would approve as the App first" if needs_approval else ""))
@@ -2360,13 +2527,13 @@ class Captain:
             if needs_approval:
                 self.approve(rc, n, head, tier, None if tier == "R0" else lane or self.recorded_lane, reasons, details)
                 reason += "; approved by merge-captain-approver"
-            self.merge(repo, n, head, d, reason, lane)
+            self.merge(repo, n, head, d, reason, lane, CHAT_LABEL if owner_ok else None)
         except BaseException as e:
             if self.standing and self.should_withdraw(e):
                 self.withdraw(rc, n, head)
             raise
 
-    def merge(self, repo, n, head, d, reason, lane):
+    def merge(self, repo, n, head, d, reason, lane, required_label=None):
         if PAUSED.exists():
             raise Stop("skipped", "paused")
         if self.merges_last_hour() >= self.limits["max_merges_per_hour"]:
@@ -2377,6 +2544,8 @@ class Captain:
             raise Stop("waiting", "head moved before merge", lane)
         if state.get("state") != "OPEN" or state.get("isDraft") or names & set(SKIP_LABELS):
             raise Stop("skipped", "no longer eligible", lane)
+        if required_label and required_label not in names:
+            raise Stop("skipped", "chat approval withdrawn", lane)
         r = self.gh(["pr", "merge", str(n), "--repo", repo, "--rebase", "--match-head-commit", head], write=True)
         if not r.ok:
             # A timeout or a dropped connection can follow a merge that went through; the pull request's own
@@ -3217,6 +3386,112 @@ def cmd_explain(args):
     return 0
 
 
+def chat_approval_comment(repo, n, head, thread, message, sent, recorded, quote):
+    return "\n".join([
+        f"<!-- merge-captain:chat-approval sha={head} -->",
+        f"merge-captain: recorded the owner's chat approval of {repo}#{n} at commit {head}.",
+        "",
+        f"- Thread: {thread}",
+        f"- Message: {message} (typed by the owner, checked in T3)",
+        f"- Said at: {iso(sent)}",
+        f"- Recorded at: {iso(recorded)}",
+        "",
+        f"> {md_safe(quote, 600)}",
+        "",
+        f"A push to this branch voids it. Removing the `{CHAT_LABEL}` label withdraws it."])
+
+
+def cmd_approve_from_chat(args):
+    """Record the owner's chat approval of one pull request at one head. The message is looked up in T3, so only
+    words the owner typed count. The captain merges on it only for that head, only while the label stays on, and
+    only after its own gates and review pass."""
+    m = re.fullmatch(r"([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([0-9]+)", args.target)
+    if not m:
+        usage_error(f"not a pull request reference: {args.target}", "Use owner/repo#number")
+    repo, n = m.group(1), int(m.group(2))
+    thread = args.thread.strip()
+    if not THREAD_ID.fullmatch(thread):
+        usage_error("--thread is not a thread id", "Pass the id of the T3 thread the owner approved in")
+    quote = args.quote.strip()
+    if not quote or len(quote) > QUOTE_MAX:
+        usage_error(f"--quote must be the owner's whole message, 1 to {QUOTE_MAX} characters")
+    if scrub(quote) != quote:
+        die(EXIT_FAIL, "the message looks like it holds a credential, so it is not recorded")
+    if not names_pr(quote, repo, n):
+        die(EXIT_FAIL, f"the owner's message does not name {repo}#{n}",
+            "An approval counts only if it names the pull request: repo#N, owner/repo#N or its URL")
+    cfg = load_config()
+    rc = next((r for r in cfg["repos"] if r["name"] == repo), None)
+    if rc is None:
+        die(EXIT_FAIL, f"{repo} is not in {tilde(CONFIG)}; the captain ignores it")
+    need_owner = bare_name_shared(cfg["repos"], repo)
+    approved = approval_sha(quote, repo, n, need_owner)
+    if approved is None:
+        die(EXIT_FAIL, f"the owner's message is not a plain approval of {repo}#{n} with a commit",
+            f"It must be exactly 'approve {repo}#{n} <full 40-character head sha>' (or approved, lgtm, ship it, "
+            "merge it; or the word last), plain ASCII"
+            + (f"; {repo.split('/')[1]} exists under more than one owner, so name it as {repo}#{n}" if need_owner
+               else "") + "; show the owner that line to copy")
+    if rc["mode"] != "live":
+        die(EXIT_FAIL, f"{repo} is {rc['mode']}, so the captain would not merge it; nothing is recorded")
+    if PAUSED.exists():
+        die(EXIT_FAIL, "merge-captain is paused; nothing is recorded", "Run `merge-captain resume` first")
+    ensure_state()
+    # The run holds this lock while it decides; recording under it means a run never sees half an approval.
+    lock = open(LOCK, "w")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        die(EXIT_FAIL, "a merge-captain run is in progress; nothing is recorded", "Try again in a minute")
+    cap = Captain(cfg)
+    try:
+        cap.repo, cap.live = repo, True
+        try:
+            j = cap.gh_json(["pr", "view", str(n), "--repo", repo, "--json",
+                             "headRefOid,state,isDraft,labels"], "pull request")
+            head = j.get("headRefOid") if isinstance(j, dict) else None
+            if not isinstance(head, str) or not SHA.fullmatch(head):
+                die(EXIT_FAIL, f"cannot read the head of {repo}#{n}")
+            if j.get("state") != "OPEN":
+                die(EXIT_FAIL, f"{repo}#{n} is not open")
+            if head != approved:
+                die(EXIT_FAIL, f"the owner approved {approved[:12]}, but the head is {head[:12]}",
+                    "Show the owner the line with the current head's sha and ask again")
+            hit, why = owner_approval(thread, repo, n, head, quote=quote, need_owner=need_owner)
+            if hit is None:
+                die(EXIT_FAIL, why, "Pass the owner's whole message verbatim, from the T3 thread they sent it in")
+            message, sent, quote = hit
+            labels = {x.get("name") for x in j.get("labels") or [] if isinstance(x, dict)}
+            same = [r for r in read_jsonl(CHAT_APPROVALS) if r.get("repo") == repo and r.get("pr") == n
+                    and r.get("head") == head and r.get("message") == message]
+            if same and CHAT_LABEL in labels:
+                emit({"recorded": False, "already": True, "pr": f"{repo}#{n}", "head": head, "thread": thread,
+                      "message": message, "at": iso(sent), "label": CHAT_LABEL})
+                return 0
+            # Comment, then row, then label: the label is what makes a run act, so it goes on last, and a failure
+            # before it leaves nothing a run would merge on.
+            if not same:
+                cap.comment(repo, n, chat_approval_comment(repo, n, head, thread, message, sent, cap.now, quote))
+                append_jsonl(CHAT_APPROVALS, {"repo": repo, "pr": n, "head": head, "thread": thread,
+                                              "message": message, "quote": quote, "at": iso(sent),
+                                              "recorded_at": iso(cap.now)}, durable=True)
+            cap.ensure_labels(repo, [CHAT_LABEL])
+            if CHAT_LABEL not in labels:
+                cap.edit_labels(repo, n, [CHAT_LABEL], [])
+        except Stop as s:
+            die(EXIT_FAIL, f"not recorded: {s.reason}")
+        except Refused as e:
+            die(EXIT_FAIL, f"not recorded: {e}")
+    finally:
+        cap.close()
+        lock.close()
+    emit({"recorded": True, "pr": f"{repo}#{n}", "head": head, "thread": thread, "message": message, "at": iso(sent),
+          "label": CHAT_LABEL,
+          "next": f"A live run merges it on this head once the gates and an {TIERS[-1]} review pass; "
+                  f"`merge-captain explain {repo}#{n}` shows what it would do"})
+    return 0
+
+
 def refuse_override():
     problem = override_problem()
     if problem:
@@ -3517,7 +3792,9 @@ def build_parser():
                epilog="examples:\n  merge-captain run --dry-run\n"
                       "  merge-captain run --repo jdwillmsen/dotfiles --pr 150\n"
                       "  merge-captain explain jdwillmsen/dotfiles#150\n"
-                      "  merge-captain pause --reason 'release freeze'\n")
+                      "  merge-captain pause --reason 'release freeze'\n"
+                      "  merge-captain approve-from-chat jdwillmsen/dotfiles#150 --thread T \\\n"
+                      "      --quote 'approve dotfiles#150 <full head sha>'\n")
     p.set_defaults(func=cmd_home)
     sub = p.add_subparsers(metavar="command", parser_class=Parser)
 
@@ -3542,6 +3819,13 @@ def build_parser():
     e = sub.add_parser("explain", help="what a run would do for one pull request, no side effects")
     e.set_defaults(func=cmd_explain)
     e.add_argument("target", metavar="O/R#N")
+
+    c = sub.add_parser("approve-from-chat", help="record the owner's chat approval of one pull request at one head")
+    c.set_defaults(func=cmd_approve_from_chat)
+    c.add_argument("target", metavar="O/R#N")
+    c.add_argument("--thread", required=True, metavar="ID", help="the chat thread the owner approved in")
+    c.add_argument("--quote", required=True, metavar="TEXT",
+                   help="the owner's whole T3 message, verbatim: a plain approval naming the pull request")
 
     a = sub.add_parser("auth", help="save or remove one owner's token (a person at a terminal only)")
     a.set_defaults(func=cmd_auth)

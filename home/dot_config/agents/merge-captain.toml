@@ -4,8 +4,9 @@
 # mode: live    comment, label, review and merge, up to max_tier
 #       dry-run classify and log what would happen; writes nothing, runs no reviewer
 #       off     ignored
-# max_tier: highest risk tier it may merge on its own (R0, R1 or R2). R3 is never
-# merged, whatever is written here.
+# max_tier: highest risk tier it may merge on its own (R0, R1 or R2). Anything above
+# it, R3 always, merges only on the owner's chat approval recorded for that exact head
+# (`merge-captain approve-from-chat`), whatever is written here.
 # allow_no_checks: true lets a repository with no CI at all merge; otherwise a
 # pull request that reports no checks waits.
 # max_prs_per_repo: optional; overrides [limits] max_prs_per_repo for this repository.
